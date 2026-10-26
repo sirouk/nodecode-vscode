@@ -3,9 +3,8 @@ name: Publish extension
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -13,6 +12,8 @@ permissions:
 
 jobs:
   verify:
+    # PRs, pushes to main, and manual dispatches. Tag pushes go to publish.
+    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +41,7 @@ jobs:
 
   publish:
     needs: verify
-    if: github.event_name == 'release' && github.repository == 'sirouk/nodecode-vscode'
+    if: github.ref_type == 'tag' && github.repository == 'sirouk/nodecode-vscode'
     runs-on: ubuntu-latest
     # VSCE_PAT is a repository-level secret (Settings -> Secrets and variables ->
     # Actions). No environment scoping: the job reads it directly.
@@ -96,9 +97,13 @@ jobs:
           [ -f "$vsix" ] || { echo "npm run package did not produce $vsix" >&2; exit 1; }
           npx vsce publish --packagePath "$vsix"
 
-      - name: Attach the vsix to the GitHub release
+      - name: Create the GitHub release and attach the vsix
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           vsix="nodecode-vscode-$(node -p "require('./package.json').version").vsix"
-          gh release upload "$GITHUB_REF_NAME" "$vsix" --clobber
+          notes="$(node -e 'const c=require("fs").readFileSync("CHANGELOG.md","utf8"),v=require("./package.json").version;let i=c.indexOf("## ["+v+"]"),s=i>=0?c.slice(i):c,j=s.indexOf("\n## ");process.stdout.write((j>=0?s.slice(0,j):s).trim())')"
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && exit 0
+          gh release create "$GITHUB_REF_NAME" "$vsix" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "$notes"

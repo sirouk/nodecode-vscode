@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the extension icon with the official Nodecode axolotl mark: the activity bar icon (`media/icon.svg`) and the marketplace tile (`media/icon.png`) now carry the real brand mark.
+
 ## [0.1.0] - 2026-10-26
 
 ### Added

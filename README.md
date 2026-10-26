@@ -69,7 +69,7 @@ npm install
 npm run compile
 ```
 
-Press **F5** for an Extension Development Host. `npm test` runs the IPC + HTTP parity probe (CLI sections skip cleanly when `nodecode` is not on PATH); `npm run icon` regenerates `media/icon.png` — it must stay committed, CI fails if it drifts; `npm run typecheck` typechecks without emitting; `npm run package` builds the `.vsix`.
+Press **F5** for an Extension Development Host. `npm test` runs the IPC + HTTP parity probe (CLI sections skip cleanly when `nodecode` is not on PATH); `npm run icon` writes `media/icon.png` from the embedded official mark — it must stay committed, CI fails if it drifts; `npm run typecheck` typechecks without emitting; `npm run package` builds the `.vsix`.
 
 ## Releasing
 

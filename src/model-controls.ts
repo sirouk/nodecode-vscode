@@ -1,5 +1,13 @@
 // Inline model selection shares the native session target with its reasoning menu.
+export function formatContextCount(value: number): string {
+  if (value < 1000) return new Intl.NumberFormat().format(value);
+  let scale = value >= 1_000_000 ? 1_000_000 : 1000;
+  let rounded = Math.round(value / scale * 10) / 10;
+  if (scale === 1000 && rounded >= 1000) { scale = 1_000_000; rounded = Math.round(value / scale * 10) / 10; }
+  return String(rounded) + (scale === 1_000_000 ? " M" : " K");
+}
 export const MODEL_CLIENT_JS = String.raw`
+  ${formatContextCount.toString()}
   var modelRole='main',modelAux=null,modelDecider=null,modelBackups=null,backupAdding=false,backupResults=null;
   function receiveRoleOptions(message){modelAux=message.auxiliary||null;modelDecider=message.decider||null;modelBackups=message.failover||null;}
   function setOptionBusy(busy){optionApplying=busy;E('optionChoices').querySelectorAll('button,input').forEach(function(b){b.disabled=busy;});E('modelRoleTabs').querySelectorAll('button').forEach(function(b){b.disabled=busy;});E('modelSearch').disabled=busy;}
@@ -30,25 +38,27 @@ export const MODEL_CLIENT_JS = String.raw`
   function renderOptions(){
     var choices=E('optionChoices'),focused=document.activeElement,starFocus=focused&&focused.dataset?{provider:focused.dataset.starProvider,model:focused.dataset.starModel}:{};
     updateRoleTabs();
-    var contextLabel=typeof modelContext.limit==='number'?'Last reported context: '+(typeof modelContext.used==='number'?new Intl.NumberFormat().format(modelContext.used)+' / ':'')+new Intl.NumberFormat().format(modelContext.limit)+' tokens':'';
+    var contextLabel=typeof modelContext.limit==='number'?'Last reported context: '+(typeof modelContext.used==='number'?formatContextCount(modelContext.used)+' / ':'')+formatContextCount(modelContext.limit)+' tokens':'';
+    var exactContext=typeof modelContext.limit==='number'?'Context: '+(typeof modelContext.used==='number'?new Intl.NumberFormat().format(modelContext.used)+' / ':'')+new Intl.NumberFormat().format(modelContext.limit)+' tokens':'';
+    E('optionStatus').title=exactContext;
     E('optionStatus').textContent=optionKind==='effort'||modelRole==='main'?contextLabel:'';
-    if(contextLabel)E('modelBtn').title=contextLabel+' · Choose model';
+    if(contextLabel)E('modelBtn').title=exactContext+' · Choose model';
     if(optionKind==='model'&&renderRoleOptions(choices)){positionOptions();return;}
     if(optionKind==='effort'){
       var efforts=Array.isArray(modelTarget.efforts)?modelTarget.efforts:[];
-      choices.innerHTML=efforts.length?efforts.map(function(level){return '<button class="option-select" data-effort="'+esc(level)+'" aria-current="'+String(level===modelTarget.effort)+'">'+esc(level)+'</button>';}).join(''):'<div class="picker-message">No reasoning options reported for this model.</div>';
+      choices.innerHTML=efforts.length?efforts.map(function(level){return '<button class="option-select reasoning-choice" data-effort="'+esc(level)+'" aria-current="'+String(level===modelTarget.effort)+'">'+esc(level)+'</button>';}).join(''):'<div class="picker-message">No reasoning options reported for this model.</div>';
     }else{
       var query=E('modelSearch').value.trim().toLowerCase();
       var rows=modelRows.filter(function(row){return [row.provider,row.model,row.name,row.display_name].filter(Boolean).join(' ').toLowerCase().includes(query);}).map(function(row){return {row:row,starred:modelFavorites.some(function(f){return f.provider===row.provider&&f.model===row.model;})};});
       rows.sort(function(a,b){return Number(b.starred)-Number(a.starred);});
       var section='';choices.innerHTML=rows.map(function(item){var row=item.row,group=item.starred?'Favorites':'All models',heading=group!==section?'<div class="option-group">'+group+'</div>':'';section=group;
         var selected=modelRole==='aux'?(modelAux||{}):modelRole==='backup'?{}:modelTarget;
-        var identity=[row.provider,row.model].filter(Boolean).join('/'),context=typeof row.context==='number'?new Intl.NumberFormat().format(row.context)+' context tokens':'Context not reported';
-        return heading+'<div class="option-row"><button class="option-select" data-provider="'+esc(row.provider)+'" data-model="'+esc(row.model)+'" aria-current="'+String(row.provider===selected.provider&&row.model===selected.model)+'" title="'+esc(identity)+'"><span>'+esc(row.name||row.display_name||row.model)+'</span><span class="sub">'+esc(row.provider)+' · '+esc(context)+'</span></button><button class="option-star" data-star-provider="'+esc(row.provider)+'" data-star-model="'+esc(row.model)+'" aria-pressed="'+String(item.starred)+'" aria-label="'+(item.starred?'Unstar ':'Star ')+esc(identity)+'">'+(item.starred?'★':'☆')+'</button></div>';
+        var identity=[row.provider,row.model].filter(Boolean).join('/'),context=typeof row.context==='number'?formatContextCount(row.context)+' context tokens':'Context not reported';
+        return heading+'<div class="option-row"><button class="option-select" data-provider="'+esc(row.provider)+'" data-model="'+esc(row.model)+'" aria-current="'+String(row.provider===selected.provider&&row.model===selected.model)+'" title="'+esc(identity+(typeof row.context==='number'?' · '+new Intl.NumberFormat().format(row.context)+' context tokens':''))+'"><span>'+esc(row.name||row.display_name||row.model)+'</span><span class="sub">'+esc(row.provider)+' · '+esc(context)+'</span></button><button class="option-star" data-star-provider="'+esc(row.provider)+'" data-star-model="'+esc(row.model)+'" aria-pressed="'+String(item.starred)+'" aria-label="'+(item.starred?'Unstar ':'Star ')+esc(identity)+'">'+(item.starred?'★':'☆')+'</button></div>';
       }).join('')||'<div class="picker-message">No matching models.</div>';
       if(modelRole==='aux'){
         var aux=modelAux||{},efforts=Array.isArray(aux.efforts)?aux.efforts:[];
-        choices.innerHTML='<button class="role-default" data-aux-default aria-current="'+String(!aux.provider)+'">Use each session’s model</button>'+(aux.provider?'<div class="option-group">Current: '+esc(aux.provider+'/'+aux.model)+'</div>':'')+(efforts.length?'<div class="role-efforts"><button data-aux-effort="" aria-pressed="'+String(!aux.effort)+'">Lightest</button>'+efforts.map(function(level){return '<button data-aux-effort="'+esc(level)+'" aria-pressed="'+String(aux.effort===level)+'">'+esc(level)+'</button>';}).join('')+'</div>':'')+choices.innerHTML;
+        choices.innerHTML='<button class="role-default" data-aux-default aria-current="'+String(!aux.provider)+'">Use each session’s model</button>'+(aux.provider?'<div class="option-group">Current: '+esc(aux.provider+'/'+aux.model)+'</div>':'')+(efforts.length?'<div class="role-efforts aux-effort-list"><button data-aux-effort="" aria-pressed="'+String(!aux.effort)+'">Lightest</button>'+efforts.map(function(level){return '<button data-aux-effort="'+esc(level)+'" aria-pressed="'+String(aux.effort===level)+'">'+esc(level)+'</button>';}).join('')+'</div>':'')+choices.innerHTML;
       }else if(modelRole==='backup')choices.innerHTML='<button id="cancelBackupAdd">← Back to backups</button>'+choices.innerHTML;
     }
     if(starFocus.model){var replacement=Array.from(choices.querySelectorAll('[data-star-model]')).find(function(button){return button.dataset.starModel===starFocus.model&&button.dataset.starProvider===starFocus.provider;});if(replacement)replacement.focus({preventScroll:true});}

@@ -81,8 +81,21 @@ try {
   const options={type:'modelOptions',requestId:optionsRequest,models:[{provider:'alpha',model:'m1',name:'Fast model',context:32000},{provider:'beta',model:'m2',name:'Deep model',context:128000}],target:{provider:'alpha',model:'m1',effort:'low',efforts:['low','high']},favorites:[{provider:'beta',model:'m2'}],context:{used:1000,limit:32000}};
   await emit(options);
   assert.equal(await page.locator('#optionChoices .option-select').first().getAttribute('data-model'),'m2');
-  assert((await page.locator('#optionStatus').textContent()).includes('1,000 / 32,000'));
-  assert((await page.locator('#optionChoices').textContent()).includes('128,000 context tokens'));
+  assert((await page.locator('#optionStatus').textContent()).includes('1 K / 32 K'));
+  assert((await page.locator('#optionChoices').textContent()).includes('128 K context tokens'));
+  for(const sample of [{used:999,limit:1000,label:'999 / 1 K'},{used:2300,limit:1050000,label:'2.3 K / 1.1 M'},{used:999950,limit:1000000,label:'1 M / 1 M'}]){
+    await emit({...options,context:{used:sample.used,limit:sample.limit}});
+    assert((await page.locator('#optionStatus').textContent()).includes(sample.label));
+    assert((await page.locator('#optionStatus').getAttribute('title')).includes(new Intl.NumberFormat().format(sample.limit)));
+  }
+  await emit({...options,models:[...options.models,{provider:'large',model:'m3',context:1050000}]});
+  assert((await page.locator('[data-model="m3"]').textContent()).includes('1.1 M context tokens'));
+  assert((await page.locator('[data-model="m3"]').getAttribute('title')).includes('1,050,000'));
+  await emit(options);
+  await emit({...waiting,view:{...waiting.view,totals:{input:2300,output:12345}}});
+  assert((await page.locator('#statusLine').textContent()).includes('12345 out / ctx 2.3 K'));
+  assert((await page.locator('#statusLine>span').last().getAttribute('title')).includes('2,300'));
+  await emit(waiting);
   await page.getByRole('button',{name:'Star alpha/m1',exact:true}).click();
   assert(await page.evaluate(()=>window.posted.some(m=>m.type==='favoriteModel'&&m.provider==='alpha'&&m.starred)));
   assert(!(await page.evaluate(()=>window.posted.some(m=>m.type==='selectModel'))));
@@ -101,6 +114,8 @@ try {
   assert((await page.locator('#optionChoices').textContent()).includes('No reasoning options'));
   await emit({...options,requestId:effortRequest});
   assert.deepEqual(await page.locator('#optionChoices [data-effort]').allTextContents(),['low','high']);
+  const effortRects=await page.locator('[data-effort]').evaluateAll(rows=>rows.map(row=>row.getBoundingClientRect().toJSON()));
+  assert(effortRects[1].top>effortRects[0].top);assert(effortRects.every(r=>r.width>250));
   await page.locator('[data-effort="high"]').click();
   assert(await page.evaluate(()=>window.posted.some(m=>m.type==='selectEffort'&&m.effort==='high')));
   await emit({type:'optionApplied',requestId:effortRequest});
@@ -114,6 +129,8 @@ try {
   assert(await page.evaluate(()=>window.posted.some(m=>m.type==='selectAuxiliary'&&m.provider==='beta'&&m.model==='m2')));
   await emit({type:'roleApplied',requestId:roleRequest,role:'aux',data:{provider:'beta',model:'m2',effort:'high',efforts:['low','high']}});
   assert.equal(await page.locator('[data-model-role="aux"]').getAttribute('aria-selected'),'true');
+  const auxRects=await page.locator('[data-aux-effort]').evaluateAll(rows=>rows.map(row=>row.getBoundingClientRect().toJSON()));
+  assert(auxRects.every((r,i)=>r.width>250&&(!i||r.top>auxRects[i-1].top)));
   await page.locator('[data-aux-effort=""]').click();
   assert(await page.evaluate(()=>window.posted.some(m=>m.type==='selectAuxiliary'&&m.effort===null)));
   await emit({type:'roleApplied',requestId:roleRequest,role:'aux',data:{provider:'beta',model:'m2',effort:null,efforts:['low','high']}});

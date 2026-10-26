@@ -42,9 +42,10 @@ jobs:
     needs: verify
     if: github.event_name == 'release' && github.repository == 'sirouk/nodecode-vscode'
     runs-on: ubuntu-latest
-    # VSCE_PAT lives in the "CI" environment. Declaring it here grants this
-    # release-only job access without exposing deployment secrets to PR checks.
-    environment: CI
+    # VSCE_PAT is a repository-level secret (Settings -> Secrets and variables ->
+    # Actions). No environment scoping: the job reads it directly.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -94,3 +95,10 @@ jobs:
           vsix="nodecode-vscode-$(node -p "require('./package.json').version").vsix"
           [ -f "$vsix" ] || { echo "npm run package did not produce $vsix" >&2; exit 1; }
           npx vsce publish --packagePath "$vsix"
+
+      - name: Attach the vsix to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          vsix="nodecode-vscode-$(node -p "require('./package.json').version").vsix"
+          gh release upload "$GITHUB_REF_NAME" "$vsix" --clobber

@@ -277,7 +277,22 @@ try {
   assert(!(await page.locator('.msg.assistant').textContent()).includes('Nodecode'));
   assert.equal(await page.locator('.save-state').textContent(),'Draft fork');
   const avatar=await page.locator('.message-avatar').boundingBox(),content=await page.locator('.assistant-content').boundingBox();
-  assert.equal(avatar.width,18);assert(Math.abs(avatar.y-content.y)<=2);
+  assert.equal(avatar.width,15);assert(Math.abs(avatar.y-content.y)<=2);
+  await emit({...cosmetic,view:{...cosmetic.view,parts:[{kind:'user',text:'A longer user message '.repeat(100)},cosmetic.view.parts[1]]}});
+  await page.locator('.reasoning').evaluate(e=>e.open=true);
+  for(const width of [360,1200]){
+    await page.setViewportSize({width,height:760});
+    const widths=await page.evaluate(()=>{const row=document.querySelector('#transcript').getBoundingClientRect(),body=document.querySelector('.assistant-content').getBoundingClientRect(),user=document.querySelector('.msg.user .bubble').getBoundingClientRect(),icon=document.querySelector('.message-avatar').getBoundingClientRect();return {row:row.width,body:body.width,user:user.width,userRight:user.right,rowRight:row.right,iconLeft:icon.left,thought:document.querySelector('.rbody').getBoundingClientRect().width,overflow:document.documentElement.scrollWidth>innerWidth};});
+    assert(Math.abs(widths.body-widths.row)<1);
+    assert(Math.abs(widths.user-widths.row*.9)<1);
+    assert(widths.thought>=widths.row-15);
+    assert(Math.abs(widths.userRight-widths.rowRight)<1);
+    assert(widths.iconLeft>=0);assert.equal(widths.overflow,false);
+    if(width===1200)assert(widths.row>1000);
+  }
+  await page.setViewportSize({width:360,height:700});
+  await emit(cosmetic);await page.locator('.reasoning').evaluate(e=>e.open=false);
+
   assert.equal(await page.locator('.msg.assistant .message-actions').evaluate(e=>getComputedStyle(e).opacity),'0');
   if(process.env.NODECODE_MESSAGE_REST_SCREENSHOT)await page.screenshot({path:process.env.NODECODE_MESSAGE_REST_SCREENSHOT});
   const fixedTop=await page.locator('.reply-text').evaluate(e=>e.getBoundingClientRect().top);

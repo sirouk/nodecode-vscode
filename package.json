@@ -2,7 +2,7 @@
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
   "description": "Watch and steer live Nodecode sessions from VS Code: streaming replies, queued prompts, checkpoints, forks, background processes.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",

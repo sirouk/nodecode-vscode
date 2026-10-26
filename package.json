@@ -1,0 +1,118 @@
+{
+  "name": "nodecode-vscode",
+  "displayName": "Nodecode",
+  "description": "Watch and steer live Nodecode sessions from VS Code: streaming replies, queued prompts, checkpoints, forks, background processes.",
+  "version": "0.1.0",
+  "publisher": "sirouk",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "keywords": [
+    "nodecode",
+    "ai agent",
+    "coding agent",
+    "chat",
+    "sessions",
+    "checkpoints"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sirouk/nodecode-vscode"
+  },
+  "homepage": "https://github.com/sirouk/nodecode-vscode",
+  "bugs": "https://github.com/sirouk/nodecode-vscode/issues",
+  "galleryBanner": {
+    "color": "#1c1e26",
+    "theme": "dark"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Launches the local nodecode CLI, which reads and writes files in the workspace."
+    },
+    "virtualWorkspaces": false
+  },
+  "engines": { "vscode": "^1.96.0" },
+  "categories": ["AI", "Chat", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Nodecode",
+      "properties": {
+        "nodecode.cliPath": {
+          "type": "string",
+          "default": "nodecode",
+          "description": "Path to the nodecode CLI binary, or a bare name resolved against PATH."
+        },
+        "nodecode.diagnostics": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose diagnostics in the Nodecode output channel."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "nodecode", "title": "Nodecode", "icon": "media/icon.svg" }
+      ]
+    },
+    "views": {
+      "nodecode": [
+        { "id": "nodecodeSessions", "name": "Sessions", "contextualTitle": "Nodecode Sessions" }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "nodecodeSessions",
+        "contents": "No Nodecode sessions found.\n[New session in terminal](command:nodecode.newSessionInTerminal)\n[Open session picker](command:nodecode.openSessionPicker)"
+      }
+    ],
+    "commands": [
+      { "command": "nodecode.openPanel", "title": "Open Session Panel", "category": "Nodecode", "icon": "$(comment-discussion)" },
+      { "command": "nodecode.openSessionPicker", "title": "Open Existing Session…", "category": "Nodecode", "icon": "$(list-selection)" },
+      { "command": "nodecode.newSessionInTerminal", "title": "New Session in Terminal", "category": "Nodecode", "icon": "$(terminal)" },
+      { "command": "nodecode.refreshSessions", "title": "Refresh Sessions", "category": "Nodecode", "icon": "$(refresh)" },
+      { "command": "nodecode.forkSession", "title": "Fork Session", "category": "Nodecode", "icon": "$(git-branch)" },
+      { "command": "nodecode.renameSession", "title": "Rename Session", "category": "Nodecode", "icon": "$(pencil)" },
+      { "command": "nodecode.deleteSession", "title": "Delete Session", "category": "Nodecode", "icon": "$(trash)" },
+      { "command": "nodecode.focusSessionTerminal", "title": "Reveal Session Terminal", "category": "Nodecode", "icon": "$(terminal-view)" },
+      { "command": "nodecode.viewSessionLogs", "title": "Export Session History", "category": "Nodecode", "icon": "$(output)" },
+      { "command": "nodecode.cancelActiveTurn", "title": "Cancel Active Turn", "category": "Nodecode", "icon": "$(debug-stop)" },
+      { "command": "nodecode.undoLastTurn", "title": "Undo Last Turn (Checkpoint)", "category": "Nodecode", "icon": "$(discard)" },
+      { "command": "nodecode.pickModel", "title": "Choose Model…", "category": "Nodecode", "icon": "$(symbol-misc)" },
+      { "command": "nodecode.pickEffort", "title": "Choose Effort…", "category": "Nodecode", "icon": "$(gauge)" },
+      { "command": "nodecode.storeNodecodeMd", "title": "Write nodecode.md to Workspace", "category": "Nodecode", "icon": "$(book)" },
+      { "command": "nodecode.showActivationLog", "title": "Show Activation Log", "category": "Nodecode" },
+      { "command": "nodecode.viewExtensionLogs", "title": "Show Diagnostics Output", "category": "Nodecode", "icon": "$(pulse)" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "nodecode.refreshSessions", "when": "view == nodecodeSessions", "group": "navigation" },
+        { "command": "nodecode.newSessionInTerminal", "when": "view == nodecodeSessions", "group": "navigation" }
+      ],
+      "view/item/context": [
+        { "command": "nodecode.openPanel", "when": "view == nodecodeSessions && viewItem == session", "group": "inline" },
+        { "command": "nodecode.focusSessionTerminal", "when": "view == nodecodeSessions && viewItem == session", "group": "inline" },
+        { "command": "nodecode.forkSession", "when": "view == nodecodeSessions && viewItem == session", "group": "inline" },
+        { "command": "nodecode.renameSession", "when": "view == nodecodeSessions && viewItem == session", "group": "1_modification" },
+        { "command": "nodecode.viewSessionLogs", "when": "view == nodecodeSessions && viewItem == session", "group": "2_actions" },
+        { "command": "nodecode.deleteSession", "when": "view == nodecodeSessions && viewItem == session", "group": "9_danger" }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "typecheck": "tsc --noEmit",
+    "test": "node ./test/parity.mjs",
+    "package": "npx @vscode/vsce package --no-dependencies",
+    "icon": "node test/render-icon.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.4.0"
+  }
+}

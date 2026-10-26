@@ -1,0 +1,15 @@
+node_modules
+out/
+*.vsix
+
+.env
+.env.*
+.sentinel
+.wf-test
+
+*.vsix
+
+.env
+.env.*
+.sentinel
+.wf-test

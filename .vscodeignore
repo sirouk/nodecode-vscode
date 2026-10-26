@@ -1,0 +1,20 @@
+.vscode/**
+.vscode-test/**
+src/**
+test/**
+node_modules/**
+tsconfig.json
+package-lock.json
+.gitignore
+.vscodeignore
+*.vsix
+out/**/*.map
+media/*.map
+
+# Maintainer-only. .env holds the Marketplace PAT: vsce globs with dot:true and
+# never reads .gitignore, so without these lines the token ships to every user.
+.env
+.env.*
+
+release.sh
+.github/**

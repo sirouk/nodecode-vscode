@@ -2,7 +2,7 @@
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
   "description": "Watch and steer live Nodecode sessions from VS Code: streaming replies, queued prompts, checkpoints, forks, background processes.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -31,9 +31,17 @@
     },
     "virtualWorkspaces": false
   },
-  "engines": { "vscode": "^1.96.0" },
-  "categories": ["AI", "Chat", "Other"],
-  "activationEvents": ["onStartupFinished"],
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
@@ -53,12 +61,20 @@
     },
     "viewsContainers": {
       "activitybar": [
-        { "id": "nodecode", "title": "Nodecode", "icon": "media/icon.svg" }
+        {
+          "id": "nodecode",
+          "title": "Nodecode",
+          "icon": "media/icon.svg"
+        }
       ]
     },
     "views": {
       "nodecode": [
-        { "id": "nodecodeSessions", "name": "Sessions", "contextualTitle": "Nodecode Sessions" }
+        {
+          "id": "nodecodeSessions",
+          "name": "Sessions",
+          "contextualTitle": "Nodecode Sessions"
+        }
       ]
     },
     "viewsWelcome": [
@@ -68,35 +84,146 @@
       }
     ],
     "commands": [
-      { "command": "nodecode.openPanel", "title": "Open Session Panel", "category": "Nodecode", "icon": "$(comment-discussion)" },
-      { "command": "nodecode.openSessionPicker", "title": "Open Existing Session…", "category": "Nodecode", "icon": "$(list-selection)" },
-      { "command": "nodecode.newSessionInTerminal", "title": "New Session in Terminal", "category": "Nodecode", "icon": "$(terminal)" },
-      { "command": "nodecode.refreshSessions", "title": "Refresh Sessions", "category": "Nodecode", "icon": "$(refresh)" },
-      { "command": "nodecode.forkSession", "title": "Fork Session", "category": "Nodecode", "icon": "$(git-branch)" },
-      { "command": "nodecode.renameSession", "title": "Rename Session", "category": "Nodecode", "icon": "$(pencil)" },
-      { "command": "nodecode.deleteSession", "title": "Delete Session", "category": "Nodecode", "icon": "$(trash)" },
-      { "command": "nodecode.focusSessionTerminal", "title": "Reveal Session Terminal", "category": "Nodecode", "icon": "$(terminal-view)" },
-      { "command": "nodecode.viewSessionLogs", "title": "Export Session History", "category": "Nodecode", "icon": "$(output)" },
-      { "command": "nodecode.cancelActiveTurn", "title": "Cancel Active Turn", "category": "Nodecode", "icon": "$(debug-stop)" },
-      { "command": "nodecode.undoLastTurn", "title": "Undo Last Turn (Checkpoint)", "category": "Nodecode", "icon": "$(discard)" },
-      { "command": "nodecode.pickModel", "title": "Choose Model…", "category": "Nodecode", "icon": "$(symbol-misc)" },
-      { "command": "nodecode.pickEffort", "title": "Choose Effort…", "category": "Nodecode", "icon": "$(gauge)" },
-      { "command": "nodecode.storeNodecodeMd", "title": "Write nodecode.md to Workspace", "category": "Nodecode", "icon": "$(book)" },
-      { "command": "nodecode.showActivationLog", "title": "Show Activation Log", "category": "Nodecode" },
-      { "command": "nodecode.viewExtensionLogs", "title": "Show Diagnostics Output", "category": "Nodecode", "icon": "$(pulse)" }
+      {
+        "command": "nodecode.openPanel",
+        "title": "Open Session Panel",
+        "category": "Nodecode",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "nodecode.openSessionPicker",
+        "title": "Open Existing Session…",
+        "category": "Nodecode",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "nodecode.newSessionInTerminal",
+        "title": "New Session in Terminal",
+        "category": "Nodecode",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "nodecode.refreshSessions",
+        "title": "Refresh Sessions",
+        "category": "Nodecode",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "nodecode.forkSession",
+        "title": "Fork Session",
+        "category": "Nodecode",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "nodecode.renameSession",
+        "title": "Rename Session",
+        "category": "Nodecode",
+        "icon": "$(pencil)"
+      },
+      {
+        "command": "nodecode.deleteSession",
+        "title": "Delete Session",
+        "category": "Nodecode",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "nodecode.focusSessionTerminal",
+        "title": "Reveal Session Terminal",
+        "category": "Nodecode",
+        "icon": "$(terminal-view)"
+      },
+      {
+        "command": "nodecode.viewSessionLogs",
+        "title": "Export Session History",
+        "category": "Nodecode",
+        "icon": "$(output)"
+      },
+      {
+        "command": "nodecode.cancelActiveTurn",
+        "title": "Cancel Active Turn",
+        "category": "Nodecode",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "nodecode.undoLastTurn",
+        "title": "Undo Last Turn (Checkpoint)",
+        "category": "Nodecode",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "nodecode.pickModel",
+        "title": "Choose Model…",
+        "category": "Nodecode",
+        "icon": "$(symbol-misc)"
+      },
+      {
+        "command": "nodecode.pickEffort",
+        "title": "Choose Effort…",
+        "category": "Nodecode",
+        "icon": "$(gauge)"
+      },
+      {
+        "command": "nodecode.storeNodecodeMd",
+        "title": "Write nodecode.md to Workspace",
+        "category": "Nodecode",
+        "icon": "$(book)"
+      },
+      {
+        "command": "nodecode.showActivationLog",
+        "title": "Show Activation Log",
+        "category": "Nodecode"
+      },
+      {
+        "command": "nodecode.viewExtensionLogs",
+        "title": "Show Diagnostics Output",
+        "category": "Nodecode",
+        "icon": "$(pulse)"
+      }
     ],
     "menus": {
       "view/title": [
-        { "command": "nodecode.refreshSessions", "when": "view == nodecodeSessions", "group": "navigation" },
-        { "command": "nodecode.newSessionInTerminal", "when": "view == nodecodeSessions", "group": "navigation" }
+        {
+          "command": "nodecode.refreshSessions",
+          "when": "view == nodecodeSessions",
+          "group": "navigation"
+        },
+        {
+          "command": "nodecode.newSessionInTerminal",
+          "when": "view == nodecodeSessions",
+          "group": "navigation"
+        }
       ],
       "view/item/context": [
-        { "command": "nodecode.openPanel", "when": "view == nodecodeSessions && viewItem == session", "group": "inline" },
-        { "command": "nodecode.focusSessionTerminal", "when": "view == nodecodeSessions && viewItem == session", "group": "inline" },
-        { "command": "nodecode.forkSession", "when": "view == nodecodeSessions && viewItem == session", "group": "inline" },
-        { "command": "nodecode.renameSession", "when": "view == nodecodeSessions && viewItem == session", "group": "1_modification" },
-        { "command": "nodecode.viewSessionLogs", "when": "view == nodecodeSessions && viewItem == session", "group": "2_actions" },
-        { "command": "nodecode.deleteSession", "when": "view == nodecodeSessions && viewItem == session", "group": "9_danger" }
+        {
+          "command": "nodecode.openPanel",
+          "when": "view == nodecodeSessions && viewItem == session",
+          "group": "inline"
+        },
+        {
+          "command": "nodecode.focusSessionTerminal",
+          "when": "view == nodecodeSessions && viewItem == session",
+          "group": "inline"
+        },
+        {
+          "command": "nodecode.forkSession",
+          "when": "view == nodecodeSessions && viewItem == session",
+          "group": "inline"
+        },
+        {
+          "command": "nodecode.renameSession",
+          "when": "view == nodecodeSessions && viewItem == session",
+          "group": "1_modification"
+        },
+        {
+          "command": "nodecode.viewSessionLogs",
+          "when": "view == nodecodeSessions && viewItem == session",
+          "group": "2_actions"
+        },
+        {
+          "command": "nodecode.deleteSession",
+          "when": "view == nodecodeSessions && viewItem == session",
+          "group": "9_danger"
+        }
       ]
     }
   },

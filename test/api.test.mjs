@@ -29,6 +29,9 @@ test('gateway requests preserve session target and assign new session identity',
     assert.deepEqual(requests[2].body, {session_id:child,parent:'parent',anchor_turn_id:'historical-turn'});
     assert.equal(requests[2].method, 'POST');
     assert.equal(requests[2].url, '/api/gateway/sessions');
+    await api.sessionDetail('session/with spaces');
+    assert.equal(requests[3].url, '/api/gateway/sessions/session%2Fwith%20spaces');
+    assert.equal(requests[3].method, 'GET');
   } finally {server.close(); await once(server,'close');}
 });
 

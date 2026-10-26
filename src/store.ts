@@ -59,6 +59,8 @@ export interface UsageTotals {
 }
 
 export interface StoreView {
+  bookmarkedTurnIds: string[];
+  standby?: boolean;
   replayComplete: boolean;
   threads: SessionThread[];
   ancestors: SessionThread[];
@@ -153,6 +155,16 @@ export function messageReasoning(message: SessionMessage | undefined): string {
 }
 
 export class SessionStore {
+  private bookmarkedTurnIds: string[] = [];
+  private standbyValue: boolean | undefined;
+  setCheckpointBookmarks(ids: string[]): void { this.bookmarkedTurnIds = [...ids]; this.bump(); }
+  setSessionDetail(detail: import("./api").SessionDetail): void {
+    if (this.sessionIdValue && detail.session_id !== this.sessionIdValue) return;
+    if (this.standbyValue === false && detail.standby === true) return;
+    this.standbyValue = detail.standby === true;
+    this.bump();
+  }
+
   private replayCompleteValue = false;
   private parts: ChatPart[] = [];
   private queueSnapshot: TurnQueueSnapshot | null = null;
@@ -294,6 +306,7 @@ export class SessionStore {
     const eventSessionId = typeof frame.session_id === "string" ? frame.session_id : this.sessionIdValue;
     switch (event.type) {
       case "session.created": {
+        if (eventSessionId === this.sessionIdValue) this.standbyValue = false;
         const cwd = asString(payload.cwd);
         if (cwd) this.cwdValue = cwd;
         const id = asString(payload.id);
@@ -681,6 +694,8 @@ export class SessionStore {
         this.providerValue ?? (typeof this.lastUsageValue?.provider === "string" ? this.lastUsageValue.provider : undefined),
       effort: this.effortValue,
       processes: this.processes.view(),
+      bookmarkedTurnIds: [...this.bookmarkedTurnIds],
+      standby: this.standbyValue,
       noticeCount: this.noticeCountValue,
     };
   }

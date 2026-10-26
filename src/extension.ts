@@ -10,6 +10,7 @@ import { SessionController, deleteSessionTree } from "./manager";
 import { SessionPanel, SessionSidebar, type PanelCallbacks } from "./panel";
 import { registerSessions, type CommandDeps } from "./sessions";
 import { MAX_SELECTED_FILE_BYTES, MAX_SELECTED_TOTAL_BYTES, type SelectedFileInput } from "./file-browser";
+import { CheckpointBookmarks } from "./checkpoint-bookmarks";
 import { readRuntimeMetadata } from "./runtime-metadata";
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -17,6 +18,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const discovery = new NodecodeDiscovery(notes);
   const cli = new NodecodeCli(discovery, notes);
   const api = new NodecodeApi(discovery, notes);
+  const checkpointBookmarks = new CheckpointBookmarks(context.globalState);
   discovery.watch(context);
 
   // --- status bar: CLI + gateway state, click opens the session picker -----
@@ -85,6 +87,7 @@ export function activate(context: vscode.ExtensionContext): void {
     let controller = controllers.get(sessionId);
     if (!controller) {
       controller = new SessionController(cli, notes, api, bootCwd ?? "", sessionId, context.globalStorageUri?.scheme === "file" ? context.globalStorageUri.fsPath : undefined);
+      controller.store.setCheckpointBookmarks(checkpointBookmarks.list(sessionId));
       controllers.set(sessionId, controller);
     }
     if (opts?.connect) controller.connect();
@@ -242,8 +245,16 @@ export function activate(context: vscode.ExtensionContext): void {
     openInEditor: (sid) => SessionPanel.createOrShow(context.extensionUri, controllerFor(sid, { connect: true }), panelCallbacks, notes),
     newSession: () => { void vscode.commands.executeCommand("nodecode.newSession"); },
     openSession: (sid) => openPanel(sid),
+    toggleCheckpointBookmark: async (sid, turnId) => {
+      const controller = controllerFor(sid);
+      controller.assertCheckpointTurn(turnId);
+      const ids = await checkpointBookmarks.toggle(sid, turnId);
+      controller.store.setCheckpointBookmarks(ids);
+      return ids;
+    },
     forkAtMessage: async (sid, turnId) => {
-      const forked = await controllerFor(sid).forkAtMessage(turnId);
+      const controller = controllerFor(sid);
+      const forked = await checkpointBookmarks.fork(controller, turnId);
       SessionPanel.createOrShow(context.extensionUri, controllerFor(forked, {connect:true}), panelCallbacks, notes);
     },
     forkSession: (sid) =>

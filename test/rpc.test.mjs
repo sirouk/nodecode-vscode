@@ -178,7 +178,7 @@ test('image-only prompts remain admissible and binary files cannot masquerade as
 
 test('slash control stays on native API and refreshes only affected session state',async()=>{
   const calls=[];
-  const api={runSlash:async(line,id)=>{calls.push(['slash',line,id]);return{text:'done'};},header:async()=>({}),target:async()=>({}),sessions:async()=>[]};
+  const api={runSlash:async(line,id)=>{calls.push(['slash',line,id]);return{text:'done'};},header:async()=>({}),sessionDetail:async()=>({session_id:'slash-session',cwd:process.cwd()}),target:async()=>({}),sessions:async()=>[]};
   const controller=new SessionController({}, {log(){}},api,process.cwd(),'slash-session');
   controller.rpc.sendCommand=()=>{throw Error('slash must never become a model prompt');};
   controller.rpc.resync=()=>calls.push(['resync']);
@@ -265,13 +265,14 @@ test('malformed output recovers from last cursor without consuming later bytes',
 });
 
 test('stale controller refreshes cannot overwrite newer state or update after dispose',async()=>{
-  const targets=[],headers=[];
-  const controller=new SessionController({}, {log(){}}, {target:()=>new Promise(resolve=>targets.push(resolve)),header:()=>new Promise(resolve=>headers.push(resolve))},process.cwd(),'s');
+  const targets=[],headers=[],details=[];
+  const controller=new SessionController({}, {log(){}}, {target:()=>new Promise(resolve=>targets.push(resolve)),header:()=>new Promise(resolve=>headers.push(resolve)),sessionDetail:()=>new Promise(resolve=>details.push(resolve))},process.cwd(),'s');
   controller.refreshTarget();controller.refreshTarget();
   targets[1]({model:'new',provider:'p'});targets[0]({model:'old',provider:'p'});await delay(0);
   assert.equal(controller.store.view().model,'new');
-  controller.refreshHeader();controller.dispose();headers[0]({title:'late'});await delay(0);
+  controller.refreshHeader();controller.dispose();headers[0]({title:'late'});details[0]({session_id:'s',cwd:process.cwd(),standby:true});await delay(0);
   assert.notEqual(controller.store.view().title,'late');
+  assert.equal(controller.store.view().standby,undefined);
 });
 
 test('interrupted replacement full replay cannot resume from an obsolete branch cursor',async()=>{

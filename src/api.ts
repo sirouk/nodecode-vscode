@@ -61,6 +61,8 @@ export interface SessionHeader {
   [key: string]: unknown;
 }
 
+export interface SessionDetail { session_id: string; cwd: string; parent?: string | null; standby?: boolean }
+
 export interface CheckpointRow {
   id?: string;
   turn_id?: string;
@@ -262,6 +264,10 @@ export class NodecodeApi {
 
   header(sessionId: string): Promise<SessionHeader> {
     return this.request<SessionHeader>("GET", `/api/gateway/sessions/${encodeURIComponent(sessionId)}/header`);
+  }
+
+  sessionDetail(sessionId: string): Promise<SessionDetail> {
+    return this.request("GET", `/api/gateway/sessions/${encodeURIComponent(sessionId)}`);
   }
 
   checkpoints(sessionId: string, limit = 40): Promise<CheckpointRow[] | { checkpoints: CheckpointRow[] }> {

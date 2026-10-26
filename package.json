@@ -194,13 +194,6 @@
       }
     ],
     "menus": {
-      "view/title": [
-        {
-          "command": "nodecode.newSession",
-          "when": "view == nodecodeChat",
-          "group": "navigation"
-        }
-      ],
       "editor/context": [
         {
           "command": "nodecode.addSelectionToChat",

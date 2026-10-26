@@ -4,11 +4,13 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 
 class Element {
-  constructor(tag, text='') {this.tagName=tag.toUpperCase();this.children=[];this.style={};this.className='';this._text=text;this.classList={add:()=>{},remove:()=>{}};}
+  constructor(tag, text='') {this.attributes={};this.tagName=tag.toUpperCase();this.children=[];this.style={};this.className='';this._text=text;this.classList={add:()=>{},remove:()=>{}};}
   set textContent(text){this._text=String(text);this.children=[];}
   get textContent(){return this._text+this.children.map(c=>c.textContent).join('');}
   appendChild(child){this.children.push(child);return child;}
   append(...children){children.forEach(c=>this.appendChild(c));}
+  setAttribute(name,value){this.attributes[name]=String(value);}
+  getAttribute(name){return this.attributes[name]??null;}
   addEventListener(){}
   get lastElementChild(){return this.children.at(-1);}
 }
@@ -22,6 +24,8 @@ test('native fences accept matching long markers, tilde and heading levels',()=>
   assert.deepEqual(all(root,'code').map(n=>n.textContent),['```inside','x=1']);
   assert.equal(all(root,'code')[1].className,'language-python');
   assert.equal(all(root,'h6')[0].textContent,'Small');
+  assert.equal(all(root,'button')[0].getAttribute('aria-label'),'Copy code');
+  assert.equal(all(root,'button')[0].textContent,'');
 });
 
 test('native table splitting keeps code and escaped pipes and column alignment',()=>{

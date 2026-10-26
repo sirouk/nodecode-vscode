@@ -101,6 +101,9 @@ export class SessionController {
   refreshHeader(): void {
     if (this.disposed) return;
     const revision = ++this.headerRevision;
+    this.api.sessionDetail(this.sessionId)
+      .then(detail => { if (!this.disposed && revision === this.headerRevision) this.store.setSessionDetail(detail); })
+      .catch(error => this.notes.log(`session detail refresh failed: ${String(error)}`));
     this.api
       .header(this.sessionId)
       .then((header) => { if (!this.disposed && revision === this.headerRevision) this.store.applyHeader(header); })
@@ -160,11 +163,15 @@ export class SessionController {
     return withFileReferences(this.workspaceRoot, text, files);
   }
 
-  async forkAtMessage(turnId: string): Promise<string> {
+  assertCheckpointTurn(turnId: string): void {
     const view = this.store.view();
     if (this.disposed || (view.running && view.activeTurnId === turnId) || !view.parts.some(part => part.kind === "assistant" && part.durable && !part.streaming && !part.voided && part.forkTurnId === turnId)) {
-      throw new Error("Choose a recorded assistant message to fork its turn.");
+      throw new Error("Choose a recorded assistant message to bookmark or fork its turn.");
     }
+  }
+
+  async forkAtMessage(turnId: string): Promise<string> {
+    this.assertCheckpointTurn(turnId);
     // Omit cwd: native forks inherit their parent's directory and history.
     const id = await this.api.forkSession(this.sessionId, turnId);
     if (!id) throw new Error("Nodecode did not return the forked session.");

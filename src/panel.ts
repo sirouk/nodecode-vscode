@@ -50,6 +50,7 @@ export interface PanelCallbacks {
   openSession(sessionId: string): void;
   forkSession(sessionId: string): void;
   forkAtMessage(sessionId:string,turnId:string):Promise<void>;
+  toggleCheckpointBookmark(sessionId:string,turnId:string):Promise<string[]>;
   renameSession(sessionId: string, name?: string): void | Promise<void | string>;
   exportSession(sessionId: string): void;
   revealTerminal(sessionId: string): void;
@@ -419,6 +420,12 @@ export class SessionPanel {
         case "checkpointHistory":
           this.callbacks.showCheckpointHistory(id, this.controller);
           return;
+        case "toggleCheckpointBookmark":
+          if(typeof message.turnId==="string") {
+            const ids=await this.callbacks.toggleCheckpointBookmark(id,message.turnId);
+            this.postMessage({type:"bookmarkFinished",turnId:message.turnId,ids});
+          }
+          return;
         case "forkAtMessage":
           if(typeof message.turnId === "string") {
             await this.callbacks.forkAtMessage(id,message.turnId);
@@ -477,6 +484,7 @@ export class SessionPanel {
           return;
       }
     } catch (error) {
+      if(message.type==="toggleCheckpointBookmark")this.postMessage({type:"bookmarkFinished",turnId:message.turnId,error:String(error)});
       if(message.type==="forkAtMessage")this.postMessage({type:"forkFinished",turnId:message.turnId,error:String(error)});
       if(message.type==="runtimeMetadata"){this.postMessage({type:"runtimeMetadata",error:String(error),requestId:message.requestId});return;}
       if(message.type==="browseRuntimeFiles"){this.postMessage({type:"runtimeFiles",error:String(error),requestId:message.requestId});return;}
@@ -499,7 +507,7 @@ export class SessionPanel {
       "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">",
       `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${this.panel.webview.cspSource} https: http://127.0.0.1:* data:">`,
       "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">",
-      `<style>${PANEL_CSS}${HISTORY_CSS}${ATTACHMENT_CSS}</style></head><body>${PANEL_BODY.replaceAll("__MARK_URI__", this.markUri)}`,
+      `<style>${PANEL_CSS}${HISTORY_CSS}${ATTACHMENT_CSS}${MESSAGE_CSS}</style></head><body>${PANEL_BODY.replaceAll("__MARK_URI__", this.markUri)}`,
       `<script nonce="${nonce}" src="${this.markdownUri}"></script>`,
       `<script nonce="${nonce}">${CLIENT_JS.replaceAll("__MARK_URI__", this.markUri).replace("__SESSION_ID__", JSON.stringify(this.controller.sessionId))}</script>`,
       "</body></html>",
@@ -562,7 +570,7 @@ export class SessionSidebar implements vscode.WebviewViewProvider, vscode.Dispos
       this.welcomeGeneration++;
       const mark = view.webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "icon.svg"));
       const nonce = String(Math.floor(Math.random() * 1e15));
-      view.webview.html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${view.webview.cspSource}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'"><style>${PANEL_CSS}${HISTORY_CSS}${ATTACHMENT_CSS}</style></head><body>${RUNTIME_MARKUP}<div class="welcome" style="padding:24px;min-height:85vh"><img src="${mark}" alt="Nodecode axolotl"><h1>Build with nodecode.</h1><p>Your workspace, a conversation, and room to think.</p><button class="primary" id="new">New conversation</button><div id="sessionPickerWrap"><button id="browse" aria-expanded="false" aria-controls="sessionPicker">Browse sessions</button><div id="sessionPicker" class="hidden" role="dialog" aria-label="Sessions"><div class="picker-heading"><strong>Sessions</strong><button id="closeSessions" aria-label="Close sessions">×</button></div>${HISTORY_MODES}<input id="sessionSearch" class="history-search" type="search" aria-label="Search sessions" placeholder="Search names or messages…" autocomplete="off"><div id="sessionSearchStatus" class="history-status" role="status"></div><div id="sessionChoices"></div></div></div></div><script nonce="${nonce}">
+      view.webview.html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${view.webview.cspSource}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'"><style>${PANEL_CSS}${HISTORY_CSS}${ATTACHMENT_CSS}${MESSAGE_CSS}</style></head><body>${RUNTIME_MARKUP}<div class="welcome" style="padding:24px;min-height:85vh"><img src="${mark}" alt="Nodecode axolotl"><h1>Build with nodecode.</h1><p>Your workspace, a conversation, and room to think.</p><button class="primary" id="new">New conversation</button><div id="sessionPickerWrap"><button id="browse" aria-expanded="false" aria-controls="sessionPicker">Browse sessions</button><div id="sessionPicker" class="hidden" role="dialog" aria-label="Sessions"><div class="picker-heading"><strong>Sessions</strong><button id="closeSessions" aria-label="Close sessions">×</button></div>${HISTORY_MODES}<input id="sessionSearch" class="history-search" type="search" aria-label="Search sessions" placeholder="Search names or messages…" autocomplete="off"><div id="sessionSearchStatus" class="history-status" role="status"></div><div id="sessionChoices"></div></div></div></div><script nonce="${nonce}">
       const vscode=acquireVsCodeApi(),button=document.getElementById('browse'),picker=document.getElementById('sessionPicker'),choices=document.getElementById('sessionChoices'),search=document.getElementById('sessionSearch'),status=document.getElementById('sessionSearchStatus');let generation=0,timer,roster=[],lastRows=[],historyMode='lineage',restoreScroll=0;
       ${HISTORY_TREE_JS}
       function saveHistory(){const state={open:!picker.classList.contains('hidden'),query:search.value,mode:historyMode,scroll:choices.scrollTop};const saved=vscode.getState()||{};saved.historyBrowser=state;vscode.setState(saved);vscode.postMessage({type:'historyBrowserState',state});}
@@ -774,6 +782,9 @@ ${ACTIVITY_CSS}
 
 function icon(name: string): string {
   const paths: Record<string, string> = {
+    copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h4"/>',
+    bookmark: '<path d="M6 3h12v18l-6-4-6 4V3Z"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     menu: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
     history: '<path d="M3 11a9 9 0 1 1 3 8M3 4v7h7M12 7v5l3 2"/>',
@@ -795,6 +806,9 @@ function icon(name: string): string {
 function actionButton(id: string, label: string, symbol: string, extra = ""): string {
   return '<button id="' + id + '" title="' + label + '" aria-label="' + label + '" class="icon-btn ' + extra + '">' + icon(symbol) + '</button>';
 }
+const MESSAGE_CSS = `
+.msg.assistant .bubble{display:grid;grid-template-columns:18px minmax(0,1fr);gap:8px;align-items:start}.message-avatar{width:18px;height:18px;border-radius:4px;margin-top:2px}.assistant-content{position:relative;min-width:0;padding-right:66px}.msg.user .bubble{position:relative;padding-right:36px}.message-actions{position:absolute;right:0;top:0;display:flex;align-items:center;gap:2px;opacity:0;pointer-events:none}.msg.user .message-actions{right:6px;top:7px}.bookmark-turn.saved .icon{fill:var(--accent);stroke:var(--accent)}.copy-text,.fork-turn,.bookmark-turn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:2px;margin:0}.copy-text .icon,.fork-turn .icon,.bookmark-turn .icon{width:14px;height:14px}.reasoning summary{position:relative;padding-right:23px}.reasoning summary>.copy-text{position:absolute;right:0;top:3px;opacity:0;pointer-events:none}.msg:hover:not(:has(.reasoning:hover,.codeblock:hover)) .message-actions,.msg:focus-within:not(:has(.reasoning:focus-within,.codeblock:focus-within)) .message-actions,.message-actions:focus-within{opacity:1;pointer-events:auto}.reasoning:hover>summary>.copy-text,.reasoning:focus-within>summary>.copy-text{opacity:1;pointer-events:auto}.codeblock-copy{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;opacity:0;pointer-events:none;padding:2px}.codeblock-copy svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7}.codeblock:hover .codeblock-copy,.codeblock:focus-within .codeblock-copy{opacity:1;pointer-events:auto}@media(hover:none){.message-actions,.reasoning summary>.copy-text,.codeblock-copy{opacity:1;pointer-events:auto}}
+`;
 const PANEL_BODY = `
 <div id="app">
   <header id="topbar">
@@ -862,7 +876,7 @@ const CLIENT_JS = String.raw`
   var vscode = acquireVsCodeApi();
   var state = { view: null, connection: 'connecting', attempts: 0, history: [] };
   var attachments = [],pendingReads=0;
-  var forkingTurns={};
+  var forkingTurns={},bookmarkingTurns={};
   var steerMode = false;
   var sending = false;
   var sessionId = __SESSION_ID__;
@@ -891,6 +905,7 @@ const CLIENT_JS = String.raw`
   window.addEventListener('message', function(ev){
     var m = ev.data;
     if (!m) return;
+    if(m.type==='bookmarkFinished'){delete bookmarkingTurns[m.turnId];if(Array.isArray(m.ids)&&state.view)state.view.bookmarkedTurnIds=m.ids;renderAll(followLatest);return;}
     if(m.type==='forkFinished'){delete forkingTurns[m.turnId];renderAll(followLatest);return;}
     if(m.type==='textAttachmentChunk'){receiveTextChunk(m);return;}
     if(m.type==='modelOptions'){if(m.requestId===optionRequest&&optionKind){modelRows=m.models||[];modelFavorites=m.favorites||[];modelTarget=m.target||{};modelContext=m.context||{};receiveRoleOptions(m);renderOptions();}return;}
@@ -953,14 +968,14 @@ const CLIENT_JS = String.raw`
   function imageHtml(part){ return (part.images || []).map(function(image){return '<img class="message-image" src="' + esc(image.url) + '" alt="Conversation image" loading="lazy">';}).join(''); }
   function textFileHtml(part){return (part.textFiles||[]).map(function(file){return '<button class="message-file" data-a="openTextAttachment" data-p="'+esc(file.ref)+'" title="'+esc(file.name)+' · '+file.byteLength+' bytes">'+esc(file.name)+'</button>';}).join('');}
   function fileHtml(part){return (part.files||[]).filter(function(file){return !(part.text||'').includes('@'+file);}).map(function(file){return '<span class="message-file" title="'+esc(file)+'">@'+esc(file.split(/[\\/]/).pop())+'</span>';}).join('');}
-  function forkHtml(part){return part.forkTurnId&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' title="Fork from this turn into a new editor. Includes all recorded messages in this turn; this conversation is kept.">Fork</button>':'';}
+  function forkHtml(part){var saved=(state.view&&state.view.bookmarkedTurnIds||[]).includes(part.forkTurnId);return part.forkTurnId&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' aria-label="Fork from this turn" title="Fork from this turn into a new editor. Includes all recorded messages in this turn; this conversation is kept.">${icon('fork')}</button><button class="bookmark-turn '+(saved?'saved':'')+'" data-a="toggleCheckpointBookmark" data-p="'+esc(part.forkTurnId)+'" aria-pressed="'+String(saved)+'" aria-label="'+(saved?'Remove bookmark':'Bookmark checkpoint')+'" title="'+(saved?'Remove bookmark':'Bookmark this recorded checkpoint; does not create a new file snapshot')+'" '+(bookmarkingTurns[part.forkTurnId]?'disabled':'')+'>${icon('bookmark')}</button>':'';}
   function partHtml(part, index){
-    if (part.kind === 'user') return '<div class="msg user"><div class="bubble">' + md(part.text) + '<div class="message-files">' + fileHtml(part) + textFileHtml(part) + '</div>' + imageHtml(part) + '</div></div>';
+    if (part.kind === 'user') return '<div class="msg user"><div class="bubble"><div class="message-actions"><button class="copy-text" data-a="copyUser" data-p="'+index+'" aria-label="Copy message" title="Copy message">${icon('copy')}</button></div>' + md(part.text) + '<div class="message-files">' + fileHtml(part) + textFileHtml(part) + '</div>' + imageHtml(part) + '</div></div>';
     if (part.kind === 'assistant') {
       var key = 'reasoning-' + index;
-      var r = part.reasoning ? '<details class="reasoning" data-detail="' + key + '"><summary><span class="reasoning-label">' + (part.streaming && !part.text ? 'Thinking…' : 'Thought process') + '</span><button class="copy-text" data-a="copyThinking" data-p="' + index + '" title="Copy thought process">Copy</button></summary><div class="rbody" tabindex="0" aria-label="Thought process">' + esc(part.reasoning) + '</div></details>' : '';
+      var r = part.reasoning ? '<details class="reasoning" data-detail="' + key + '"><summary><span class="reasoning-label">' + (part.streaming && !part.text ? 'Thinking…' : 'Thought process') + '</span><button class="copy-text" data-a="copyThinking" data-p="' + index + '" aria-label="Copy thought process" title="Copy thought process">${icon('copy')}</button></summary><div class="rbody" tabindex="0" aria-label="Thought process">' + esc(part.reasoning) + '</div></details>' : '';
       var caret = part.streaming ? '<span class="caret"></span>' : '';
-      return '<div class="msg assistant' + (part.voided ? ' voided' : '') + '"><div class="bubble"><div class="speaker"><img src="__MARK_URI__" alt="">Nodecode<button class="copy-text" data-a="copyReply" data-p="' + index + '" title="Copy reply and thought process">Copy</button><span class="message-fork">'+forkHtml(part)+'</span></div>' + r + '<div class="reply-text">' + (part.text ? md(part.text) : '') + '</div><div class="reply-images">' + imageHtml(part) + '</div><span class="reply-caret">' + caret + '</span>' + '</div></div>';
+      return '<div class="msg assistant' + (part.voided ? ' voided' : '') + '"><div class="bubble"><img class="message-avatar" src="__MARK_URI__" alt="Nodecode"><div class="assistant-content"><div class="message-actions"><button class="copy-text" data-a="copyReply" data-p="' + index + '" aria-label="Copy reply and thought process" title="Copy reply and thought process">${icon('copy')}</button><span class="message-fork">'+forkHtml(part)+'</span></div>' + r + '<div class="reply-text">' + (part.text ? md(part.text) : '') + '</div><div class="reply-images">' + imageHtml(part) + '</div><span class="reply-caret">' + caret + '</span>' + '</div></div></div>';
     }
     if (part.kind === 'tool') return toolHtml(part.call);
     if (part.kind === 'system') return '<div class="sys ' + esc(part.level || 'info') + '">' + (part.childSessionId?'<button data-a="openThread" data-p="'+esc(part.childSessionId)+'">'+esc(part.text)+'</button>':esc(part.text)) + '</div>';
@@ -1052,7 +1067,7 @@ const CLIENT_JS = String.raw`
       var template = document.createElement('div'); template.innerHTML = partHtml(part, index);
       thought = template.querySelector('.reasoning');
       thought.open = expanded[thought.dataset.detail] !== undefined ? expanded[thought.dataset.detail] : !!part.streaming;
-      bubble.insertBefore(thought, bubble.querySelector('.reply-text'));
+      bubble.querySelector('.assistant-content').insertBefore(thought, bubble.querySelector('.reply-text'));
     }
     if (thought && part.reasoning) {
       var label = thought.querySelector('.reasoning-label'), text = part.streaming && !part.text ? 'Thinking…' : 'Thought process';
@@ -1243,8 +1258,9 @@ const CLIENT_JS = String.raw`
     var t = view.totals || {};
     if (t.costKnown) sline.push('$' + (t.costUsd || 0).toFixed(4));
     if (t.output) sline.push((t.output || 0) + ' out / ctx ' + (t.input || 0));
+    var savedState=view.standby===true?(view.parentId?'Draft fork':'Draft'):view.standby===false?'Saved':'';
     var status = state.connection === 'connected' ? (sending ? 'Sending…' : view.running ? 'Working' : 'Ready') : state.connection;
-    statusLine.innerHTML = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span>' + esc(sline.join(' · ')) + '</span>';
+    statusLine.innerHTML = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span>' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
     var steerable = view.activeTurnSteerable && view.activeTurnId;
     steerBtn.className = steerable ? ('mode' + (steerMode ? ' steering' : '')) : 'mode hidden';
     steerBtn.setAttribute('aria-pressed', String(steerMode));
@@ -1448,6 +1464,7 @@ const CLIENT_JS = String.raw`
       grow();
     }
   });
+  document.body.addEventListener('mousedown',function(ev){if(ev.target.closest('.copy-text,.codeblock-copy'))ev.preventDefault();});
   document.body.addEventListener('click', function(ev){
     var el = ev.target.closest('[data-a]');
     if (!el) return;
@@ -1457,14 +1474,14 @@ const CLIENT_JS = String.raw`
     if(action==='openTextAttachment'){if(payload)vscode.postMessage({type:'openTextAttachment',ref:payload});}
     else if(action==='removeTextAttachment'){if(!sending){var file=textFiles.find(function(f){return f.requestId===Number(payload);});if(file){if(file.attachment)vscode.postMessage({type:'releaseTextAttachment',ref:file.attachment.ref});else vscode.postMessage({type:'cancelTextAttachment',requestId:file.requestId});textFiles=textFiles.filter(function(f){return f!==file;});renderTextFiles();saveDraft();renderAll(followLatest);}}}
     else if(action==='retryTextAttachment'){var file=textFiles.find(function(f){return f.requestId===Number(payload);});if(file)stageTextFile(file);}
-    else if (action === 'removeImage') { if (!sending) { attachments.splice(Number(payload),1);renderAttachments();renderAll(nearBottom()); } } else if (action === 'copyReply' || action === 'copyThinking') {
+    else if (action === 'removeImage') { if (!sending) { attachments.splice(Number(payload),1);renderAttachments();renderAll(nearBottom()); } } else if (action === 'copyReply' || action === 'copyThinking' || action === 'copyUser') {
       ev.preventDefault(); ev.stopPropagation();
       var part = (state.view.parts || [])[Number(payload)];
       if (part) {
-        var text = action === 'copyThinking' ? part.reasoning : (part.reasoning ? 'Thought process\n' + part.reasoning + '\n\n' : '') + part.text;
-        NodecodeMarkdown.copyToClipboard(text, function(){el.textContent='Copied';setTimeout(function(){el.textContent='Copy';},1200);});
+        var text = action==='copyUser'?part.text: action === 'copyThinking' ? part.reasoning : (part.reasoning ? 'Thought process\n' + part.reasoning + '\n\n' : '') + part.text;
+        NodecodeMarkdown.copyToClipboard(text, function(){var label=action==='copyUser'?'Copy message':action==='copyThinking'?'Copy thought process':'Copy reply and thought process';el.innerHTML='${icon('check')}';el.setAttribute('aria-label','Copied');setTimeout(function(){el.innerHTML='${icon('copy')}';el.setAttribute('aria-label',label);},1200);});
       }
-    } else if(action==='forkAtMessage'){if(!forkingTurns[payload]){forkingTurns[payload]=true;el.disabled=true;vscode.postMessage({type:'forkAtMessage',turnId:payload});}} else if (action === 'chooseSession') { saveHistoryBrowser(); vscode.postMessage({type:'openThread',sessionId:payload}); }
+    } else if(action==='toggleCheckpointBookmark'){if(!bookmarkingTurns[payload]){bookmarkingTurns[payload]=true;el.disabled=true;vscode.postMessage({type:'toggleCheckpointBookmark',turnId:payload});}} else if(action==='forkAtMessage'){if(!forkingTurns[payload]){forkingTurns[payload]=true;el.disabled=true;vscode.postMessage({type:'forkAtMessage',turnId:payload});}} else if (action === 'chooseSession') { saveHistoryBrowser(); vscode.postMessage({type:'openThread',sessionId:payload}); }
     else if (action === 'renameSession') { editSessionName(el.parentElement.querySelector('.session-choice'),payload); }
     else if (action === 'deleteSession') { vscode.postMessage({type:'deleteSession',sessionId:payload}); }
     else if (action === 'withdraw') vscode.postMessage({ type: 'withdraw', promptId: payload });
@@ -1494,7 +1511,10 @@ const CLIENT_JS = String.raw`
   wire('refreshBtn', 'refresh');
   wire('delBtn', 'delete');
   E('websiteBtn').addEventListener('click',function(){E('menuWrap').open=false;vscode.postMessage({type:'openExternal',url:'https://nodecode.ai/'});});
-  document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape') {if(optionKind){ev.preventDefault();closeOptions(true);return;}E('menuWrap').open = false;if(!E('sessionPicker').classList.contains('hidden')){ev.preventDefault();closeSessions(true);}} });
+  function dismissOverflowOutside(ev){var menu=E('menuWrap');if(menu.open&&!ev.composedPath().includes(menu))menu.open=false;}
+  document.addEventListener('pointerdown',dismissOverflowOutside,true);
+  document.addEventListener('click',dismissOverflowOutside,true);
+  document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape') {if(optionKind){ev.preventDefault();closeOptions(true);return;}if(E('menuWrap').open){ev.preventDefault();E('menuWrap').open=false;E('menuWrap').querySelector('summary').focus();return;}if(!E('sessionPicker').classList.contains('hidden')){ev.preventDefault();closeSessions(true);}} });
   renderAttachments();
   updateThoughtSize();
   grow();

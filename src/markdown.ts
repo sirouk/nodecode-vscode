@@ -16,6 +16,10 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
 
 export function copyToClipboard(text: string, onDone?: () => void): void {
 	const fallback = () => {
+        const focus=document.activeElement as HTMLElement | null;
+        const selection=window.getSelection();
+        const ranges=selection ? Array.from({length:selection.rangeCount},(_,i)=>selection.getRangeAt(i).cloneRange()) : [];
+        const input=focus instanceof HTMLTextAreaElement || focus instanceof HTMLInputElement ? {start:focus.selectionStart,end:focus.selectionEnd} : undefined;
 		const ta = document.createElement("textarea");
 		ta.value = text;
 		ta.style.position = "fixed";
@@ -28,6 +32,9 @@ export function copyToClipboard(text: string, onDone?: () => void): void {
 			// ignore
 		}
 		ta.remove();
+        focus?.focus({preventScroll:true});
+        if(selection){selection.removeAllRanges();ranges.forEach(range=>selection.addRange(range));}
+        if(input && !ranges.length && (focus instanceof HTMLTextAreaElement || focus instanceof HTMLInputElement))focus.setSelectionRange(input.start,input.end);
 		onDone?.();
 	};
 	if (navigator.clipboard?.writeText) {
@@ -272,12 +279,14 @@ export function renderMarkdown(markdown: string, container: HTMLElement, links: 
 			const wrapper = el("div", "codeblock");
 			const head = el("div", "codeblock-head");
 			head.appendChild(el("span", "codeblock-lang", lang || "code"));
-			const copyBtn = el("button", "codeblock-copy", "Copy");
+			const copyBtn = el("button", "codeblock-copy");
+            const clipboardIcon='<svg aria-hidden="true" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h4"/></svg>';
+            copyBtn.innerHTML=clipboardIcon;copyBtn.setAttribute("aria-label","Copy code");copyBtn.title="Copy code";
 			copyBtn.addEventListener("click", (event) => {
 				event.stopPropagation();
 				copyToClipboard(codeText, () => {
-					copyBtn.textContent = "Copied";
-					setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
+					copyBtn.innerHTML='<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>';copyBtn.setAttribute("aria-label","Copied");
+                    setTimeout(() => {copyBtn.innerHTML=clipboardIcon;copyBtn.setAttribute("aria-label","Copy code");}, 1200);
 				});
 			});
 			head.appendChild(copyBtn);

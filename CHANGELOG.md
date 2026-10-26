@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Persistent history browsing with nested lineage and recent-session views; fork completed assistant turns into a separate editor conversation.
+- Compact inline reply avatars and contextual icon-only copy controls preserve selections; bookmark recorded checkpoints and show native draft/save state.
 - Keep selected @file references inline at the caret with edit-aware context tracking, separate from + attachments.
 - Inline searchable model and reasoning menus with persisted favorites, native context limits, and separate Main, Aux, Decider and Backup role settings.
 - Automatic long-text attachments, multiple file/image previews, retryable staging, and separate native-runtime browsing and local-computer file selection.

@@ -40,7 +40,8 @@ jobs:
           git diff --exit-code -- media/icon.png
 
   publish:
-    needs: verify
+    # No needs:verify — verify is branch-only, and a skipped prerequisite
+    # would skip this job too on tag pushes.
     if: github.ref_type == 'tag' && github.repository == 'sirouk/nodecode-vscode'
     runs-on: ubuntu-latest
     # VSCE_PAT is a repository-level secret (Settings -> Secrets and variables ->

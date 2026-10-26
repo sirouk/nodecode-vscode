@@ -2,7 +2,7 @@
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
   "description": "Nodecode in VS Code: live conversations, thinking, tools, child threads, checkpoints and model controls.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -87,7 +87,7 @@
       },
       {
         "command": "nodecode.openSessionPicker",
-        "title": "Open Existing Session\u2026",
+        "title": "Open Existing Session…",
         "category": "Nodecode",
         "icon": "$(list-selection)"
       },
@@ -153,13 +153,13 @@
       },
       {
         "command": "nodecode.pickModel",
-        "title": "Choose Model\u2026",
+        "title": "Choose Model…",
         "category": "Nodecode",
         "icon": "$(symbol-misc)"
       },
       {
         "command": "nodecode.pickEffort",
-        "title": "Choose Effort\u2026",
+        "title": "Choose Effort…",
         "category": "Nodecode",
         "icon": "$(gauge)"
       },

@@ -1,0 +1,285 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { SessionStore, messageText, messageReasoning } = require('../out/store.js');
+const event = (sequence, type, payload = {}) => ({ type: 'session_stream_event', sequence, event: { type, payload } });
+
+test('message forks use recorded native turn identities and reject unknown or active turns', async () => {
+  const {SessionController} = require('../out/manager.js');
+  const calls=[];
+  const controller=new SessionController({}, {log(){}}, {forkSession:async(...args)=>{calls.push(args);return 'new-child';}}, '/workspace', 'parent');
+  const apply=(sequence,type,turn_id,payload={})=>controller.store.applyFrame({...event(sequence,type,payload),turn_id});
+  try {
+    apply(1,'turn.started','turn-one');
+    apply(2,'turn.input_committed','turn-one',{message:'First question'});
+    apply(3,'turn.assistant_message_completed','turn-one',{message:{content:'First answer'}});
+    await assert.rejects(controller.forkAtMessage('turn-one'),/recorded assistant/);
+    apply(4,'turn.completed','turn-one');
+    apply(5,'turn.started','turn-two');
+    apply(6,'turn.assistant_message_completed','turn-two',{message:{content:'Second answer'}});
+    apply(7,'turn.completed','turn-two');
+    const parts=controller.store.view().parts;
+    assert.deepEqual(parts.filter(p=>p.kind==='assistant').map(p=>p.forkTurnId),['turn-one','turn-two']);
+    assert.equal(parts.find(p=>p.kind==='user').forkTurnId,undefined);
+    assert.equal(await controller.forkAtMessage('turn-one'),'new-child');
+    assert.deepEqual(calls,[['parent','turn-one']]);
+    assert.deepEqual(controller.store.view().parts,parts);
+    await assert.rejects(controller.forkAtMessage('invented'),/recorded assistant/);
+  } finally {controller.dispose();}
+});
+
+test('durable reasoning is separate from the visible answer', () => {
+  const message = { role: 'assistant', content: 'The answer', reasoning_content: 'Considered the options' };
+  assert.equal(messageText(message), 'The answer');
+  assert.equal(messageReasoning(message), 'Considered the options');
+  const blocks = { content: [{ type: 'thinking', thinking: 'Private analysis' }, { type: 'text', text: 'Result' }] };
+  assert.equal(messageText(blocks), 'Result');
+  assert.equal(messageReasoning(blocks), 'Private analysis');
+});
+
+test('live reasoning is retained when the completed answer lands', () => {
+  const store = new SessionStore();
+  store.applyFrame(event(1, 'turn.started'));
+  store.applyFrame({ type: 'item_delta', delta: { type: 'reasoning', text: 'Working through it' } });
+  store.applyFrame({ type: 'item_delta', delta: { type: 'text', text: 'Partial' } });
+  store.applyFrame(event(2, 'turn.assistant_message_completed', { message: { content: 'Complete answer', reasoning_content: 'Working through it' } }));
+  store.applyFrame(event(3, 'turn.completed'));
+  const assistant = store.view().parts.filter(p => p.kind === 'assistant');
+  assert.equal(assistant.length, 1);
+  assert.equal(assistant[0].text, 'Complete answer');
+  assert.equal(assistant[0].reasoning, 'Working through it');
+  assert.equal(assistant[0].streaming, false);
+});
+
+test('replay is idempotent and clears stale transient state', () => {
+  const store = new SessionStore();
+  const frames = [event(1, 'session.created', { id: 'parent', cwd: '/workspace' }), event(2, 'turn.started'), event(3, 'turn.assistant_message_completed', { message: { content: 'Done', reasoning_content: 'Reasoned' } }), event(4, 'turn.usage', { 'input-tokens': 100, 'output-tokens': 20, 'total-tokens': 120, cost_known: true, cost_usd: 0.25 }), event(5, 'turn.completed')];
+  store.applyFrames(frames);
+  const before = store.view();
+  store.applyFrame({ type: 'session_input_queue_snapshot_updated', snapshot: { active_turn: 'stale', pending_prompts: [{ prompt_id: 'stale' }] } });
+  store.applyFrame({ type: 'session_background_process_updated', process: { exec_id: 'stale', command: 'sleep', status: 'running' } });
+  store.applyFrame({ type: 'session_stream_resumed', session_id: 'parent', accumulated_frames: frames });
+  const after = store.view();
+  assert.deepEqual(after.parts, before.parts);
+  assert.deepEqual(after.totals, before.totals);
+  assert.equal(after.running, false);
+  assert.deepEqual(after.queue, []);
+  assert.deepEqual(after.processes, []);
+  store.applyFrames(frames);
+  assert.deepEqual(store.view().parts, before.parts);
+  assert.deepEqual(store.view().totals, before.totals);
+});
+
+test('tool results complete the matching tool without duplicating it', () => {
+  const store = new SessionStore();
+  store.applyFrames([event(1, 'turn.started'), event(2, 'turn.tool_call_started', { 'call-id': 'tool1', 'tool-name': 'shell', arguments: '{"command":"pwd"}' }), event(3, 'turn.tool_result', { 'call-id': 'tool1', result: '/workspace', 'duration-ms': 12 })]);
+  const tools = store.view().parts.filter(p => p.kind === 'tool');
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].call.done, true);
+  assert.equal(tools[0].call.result, '/workspace');
+});
+
+test('thread roster scopes children to the current parent', () => {
+  const store = new SessionStore();
+  store.setThreads([
+    { id: 'parent', title: 'Parent' },
+    { id: 'child', title: 'Research', parent_id: 'parent', depth: 1, relation: 'thread' },
+    { id: 'unrelated', title: 'Other', parent_id: 'elsewhere' }
+  ], 'parent');
+  assert.deepEqual(store.view().threads.map(t => t.id), ['child']);
+});
+
+test('stream retry clears both discarded answer and reasoning', () => {
+  const store = new SessionStore();
+  store.applyFrame({ type: 'item_delta', delta: { type: 'reasoning', text: 'Discard this' } });
+  store.applyFrame({ type: 'item_delta', delta: { type: 'text', text: 'Partial answer' } });
+  store.applyFrame({ type: 'item_delta', delta: { type: 'stream_reset' } });
+  const last = store.view().parts.at(-1);
+  assert.equal(last.text, '');
+  assert.equal(last.reasoning, '');
+});
+
+test('activity snapshots replace running thread state', () => {
+  const store = new SessionStore();
+  store.setThreads([{ id: 'child', parent_id: 'parent', title: 'Child', relation: 'detached' }], 'parent');
+  store.applyFrame({ type: 'organism.activity', sessions: [{ id: 'child', status: 'running' }] });
+  assert.equal(store.view().threads[0].status, 'running');
+  store.applyFrame({ type: 'organism.activity', sessions: [] });
+  assert.equal(store.view().threads[0].status, 'idle');
+});
+
+test('real sync envelopes normalize live and chunked replay facts', () => {
+  const { normalizeRpcFrame } = require('../out/protocol.js');
+  const store = new SessionStore();
+  const fact = (seq, type, payload) => ({ seq, session_id: 'parent', event: { type, payload } });
+  const initial = normalizeRpcFrame({ sequence: 5, payload: { type: 'session_stream_resumed', session_id: 'parent', replay_chunk_index: 0, replay_chunk_final: false, accumulated_frames: [fact(1, 'turn.started', {}), fact(2, 'turn.assistant_message_completed', { message: { content: 'First', reasoning_content: 'Thinking' } })] } });
+  assert.equal(initial.type, 'session_stream_resumed');
+  assert.equal(initial.accumulated_frames[1].sequence, 2);
+  store.applyFrame(initial);
+  store.applyFrame(normalizeRpcFrame({ sequence: 6, payload: { type: 'session_stream_resumed', session_id: 'parent', replay_chunk_index: 1, replay_chunk_final: true, accumulated_frames: [fact(3, 'turn.completed', {})] } }));
+  assert.equal(store.view().parts.length, 1);
+  assert.equal(store.view().parts[0].reasoning, 'Thinking');
+  store.applyFrame(normalizeRpcFrame({ sequence: 7, payload: { type: 'session_stream_event', frame: fact(4, 'turn.input_committed', { message: { content: 'Next' } }) } }));
+  assert.equal(store.view().parts.at(-1).text, 'Next');
+  // Standalone frame compatibility remains supported for existing clients.
+  assert.equal(normalizeRpcFrame(event(5, 'turn.completed')).type, 'session_stream_event');
+});
+
+test('multiple panels receive store updates until each unsubscribes', () => {
+  const store = new SessionStore();
+  let editor = 0, sidebar = 0;
+  const first = store.subscribe(() => editor++);
+  const second = store.subscribe(() => sidebar++);
+  store.applyFrame({type:'session_titled',title:'One'});
+  assert.equal(editor, 1); assert.equal(sidebar, 1);
+  first.dispose();
+  store.applyFrame({type:'session_titled',title:'Two'});
+  assert.equal(editor, 1); assert.equal(sidebar, 2);
+  second.dispose();
+});
+
+test('durable image-only messages survive replay', () => {
+  const store = new SessionStore();
+  store.applyFrames([
+    event(1, 'turn.input_committed', {role:'user', message:{content:[]}, metadata:{images:[{id:'image-1',media_type:'image/png'}]}}),
+    event(2, 'turn.assistant_message_completed', {message:{content:[]}, metadata:{images:[{id:'image-2',media_type:'image/jpeg'}]}})
+  ]);
+  assert.equal(store.view().parts.length, 2);
+  assert.deepEqual(store.view().parts[0].images, [{id:'image-1',mediaType:'image/png'}]);
+  assert.deepEqual(store.view().parts[1].images, [{id:'image-2',mediaType:'image/jpeg'}]);
+});
+
+test('native string user messages survive initial replay and live follow-ups in order', () => {
+  const { normalizeRpcFrame } = require('../out/protocol.js');
+  const fact = (seq, type, payload) => ({seq, session_id:'native', event:{type,payload}});
+  const store = new SessionStore();
+  store.applyFrame(normalizeRpcFrame({sequence:1,payload:{type:'session_stream_resumed',session_id:'native',replay_chunk_final:true,accumulated_frames:[
+    fact(27,'turn.input_committed',{role:'user',message:'Tell me a few jokes','prompt-id':'c1'}),
+    fact(28,'turn.started',{input:'Tell me a few jokes'}),
+    fact(35,'turn.assistant_message_completed',{role:'assistant',message:{role:'assistant',content:'Some jokes.'}}),
+    fact(36,'turn.completed',{}),
+  ]}}));
+  const followup = normalizeRpcFrame({sequence:2,payload:{type:'session_stream_event',frame:fact(43,'turn.input_committed',{role:'user',message:'lol','prompt-id':'c2'})}});
+  store.applyFrame(followup);
+  store.applyFrame(followup);
+  store.applyFrame(event(44,'turn.started',{input:'lol'}));
+  store.applyFrame(event(47,'turn.assistant_message_completed',{role:'assistant',message:{role:'assistant',content:'The fridge and I are now in a cold war.'}}));
+  assert.deepEqual(store.view().parts.map(p=>[p.kind,p.text]), [
+    ['user','Tell me a few jokes'], ['assistant','Some jokes.'], ['user','lol'], ['assistant','The fridge and I are now in a cold war.'],
+  ]);
+  assert.deepEqual(store.userPrompts(), ['Tell me a few jokes','lol']);
+});
+
+test('native tool input streams hydrate once and retain display metadata and failure', () => {
+  const store = new SessionStore();
+  store.applyFrame(event(1,'turn.started'));
+  store.applyFrame({type:'item_delta',delta:{type:'tool_call',index:0,name:'eval',arguments:'{"code":'}});
+  store.applyFrame({type:'item_delta',delta:{type:'tool_call',index:0,name:'eval',arguments:'{"code":"(+ 1 2)"}'}});
+  assert.equal(store.view().parts[0].call.arguments, '{"code":"(+ 1 2)"}');
+  store.applyFrame(event(2,'turn.tool_call_started',{'call-id':'call1','tool-name':'eval',arguments:'{"code":"(+ 1 2)"}'}));
+  const metadata={image:{path:'/workspace/chart.png',media_type:'image/png'},snippet:{note:'Plot chart'}};
+  store.applyFrame(event(3,'turn.tool_result',{'call-id':'call1','tool-name':'eval',result:'{"error":"refused"}',failed:true,metadata,'duration-ms':12}));
+  assert.equal(store.view().parts.length,1);
+  assert.deepEqual(store.view().parts[0].call, {callId:'call1',name:'eval',arguments:'{"code":"(+ 1 2)"}',done:true,status:'failed',result:'{"error":"refused"}',failed:true,metadata,durationMs:12});
+});
+
+test('native queued input is rendered only on promotion', () => {
+  const store = new SessionStore();
+  store.applyFrame(event(1,'turn.input_committed',{role:'user',message:'later',disposition:'follow-up','prompt-id':'p1'}));
+  assert.equal(store.view().parts.length,0);
+  store.applyFrame(event(2,'turn.input_committed',{role:'user',message:'later',disposition:'started','prompt-id':'p1'}));
+  assert.deepEqual(store.userPrompts(),['later']);
+});
+
+test('native voided attempts preserve paid output and continuation excludes sealed prefix', () => {
+  const store = new SessionStore();
+  store.applyFrame(event(1,'turn.started'));
+  store.applyFrame({type:'item_delta',delta:{type:'reasoning',text:'old thought'}});
+  store.applyFrame({type:'item_delta',delta:{type:'text',text:'old 😀'}});
+  store.applyFrame(event(2,'turn.attempt_voided',{attempt:1,reasoning:'old thought',text:'old 😀',detail:'stream interrupted',disposition:'continued'}));
+  store.applyFrame({type:'item_delta',delta:{type:'stream_reset'}});
+  store.applyFrame({type:'item_delta',delta:{type:'text',text:'new'}});
+  store.applyFrame(event(3,'turn.assistant_message_completed',{message:{content:'old 😀new',reasoning_content:'old thoughtnext'},'continued-content-chars':5,'continued-reasoning-chars':11}));
+  const replies=store.view().parts.filter(p=>p.kind==='assistant');
+  assert.equal(replies.length,2);
+  assert.equal(replies[0].text,'old 😀');
+  assert.match(replies[0].voided,/stream interrupted/);
+  assert.equal(replies[1].text,'new');
+  assert.equal(replies[1].reasoning,'next');
+});
+
+test('native retry, fallback, context and termination details remain visible', () => {
+  const store = new SessionStore();
+  store.applyFrames([
+    event(1,'turn.started'),
+    event(2,'turn.provider_retry',{provider:'local','delay-seconds':2,detail:'busy'}),
+    event(3,'turn.provider_fallback',{'from-model':'a','to-model':'b',detail:'unavailable'}),
+    event(4,'session.context.evicted',{'turn-count':2,'message-count':4,'retained-message-count':3}),
+    event(5,'turn.usage',{'finish-reason':'length'}),
+    event(6,'turn.completed'),
+    event(7,'turn.started'),
+    event(8,'turn.failed',{detail:'Actual provider failure'}),
+  ]);
+  const notices=store.view().parts.filter(p=>p.kind==='system').map(p=>p.text);
+  assert(notices.some(t=>t.includes('busy')));
+  assert(notices.some(t=>t.includes('a → b')));
+  assert(notices.some(t=>t.includes('4 messages; 3 retained')));
+  assert(notices.includes('Response ended: length'));
+  assert(notices.includes('Actual provider failure'));
+});
+
+test('assistant round hydrates before interleaved streamed tool input without duplicate text',()=>{
+  const store=new SessionStore();
+  store.applyFrame(event(1,'turn.started'));
+  store.applyFrame({type:'item_delta',delta:{type:'reasoning',text:'Plan'}});
+  store.applyFrame({type:'item_delta',delta:{type:'text',text:'Reading now'}});
+  store.applyFrame({type:'item_delta',delta:{type:'tool_call',index:0,name:'eval',arguments:'{"code":"read"}'}});
+  store.applyFrame(event(2,'turn.assistant_message_completed',{message:{content:'Reading now',reasoning_content:'Plan'}}));
+  store.applyFrame(event(3,'turn.tool_call_started',{'call-id':'actual','tool-name':'eval',arguments:'{"code":"read"}'}));
+  assert.deepEqual(store.view().parts.map(p=>p.kind),['assistant','tool']);
+  assert.equal(store.view().parts[0].text,'Reading now');
+  assert.equal(store.view().parts[0].durable,true);
+});
+
+test('replay readiness waits for full final chunk rather than fast tail preview', () => {
+  const store = new SessionStore();
+  const replay = fields => ({type:'session_stream_resumed',session_id:'session',accumulated_frames:[],...fields});
+  assert.equal(store.view().replayComplete,false);
+  store.applyFrame(replay({replay_tail:true,replay_chunk_index:0,replay_chunk_final:true}));
+  assert.equal(store.view().replayComplete,false);
+  store.applyFrame(replay({replay_chunk_index:0,replay_chunk_final:false}));
+  assert.equal(store.view().replayComplete,false);
+  store.applyFrame(replay({replay_chunk_index:1,replay_chunk_final:true}));
+  assert.equal(store.view().replayComplete,true);
+  store.applyFrame(replay({replay_chunk_index:0,replay_chunk_final:false}));
+  assert.equal(store.view().replayComplete,false);
+  store.applyFrame(replay({replay_chunk_index:1,replay_chunk_final:true}));
+  assert.equal(store.view().replayComplete,true);
+});
+
+test('cursor resume replaces stale partial overlay while preserving durable messages and sequence gaps',()=>{
+  const store=new SessionStore();
+  store.applyFrame({type:'session_stream_resumed',session_id:'s',cursor:10,replay_chunk_final:true,accumulated_frames:[
+    event(1,'turn.input_committed',{message:'original',role:'user'}),event(10,'turn.started'),
+  ]});
+  store.applyFrame({type:'item_delta',delta:{type:'text',text:'partial'}});
+  store.applyFrame({type:'item_delta',delta:{type:'tool_call',index:0,name:'eval',arguments:'{"code":'}});
+  store.applyFrame({type:'session_stream_resumed',session_id:'s',resumed_after:10,cursor:22,replay_chunk_final:true,accumulated_frames:[]});
+  store.applyFrame({type:'item_delta',delta:{type:'text',text:'partial'}});
+  assert.deepEqual(store.view().parts.map(p=>[p.kind,p.text]),[['user','original'],['assistant','partial']]);
+  store.applyFrame(event(22,'turn.assistant_message_completed',{message:{content:'complete'}}));
+  store.applyFrame(event(22,'turn.assistant_message_completed',{message:{content:'duplicate'}}));
+  assert.equal(store.view().parts.at(-1).text,'complete');
+});
+
+test('native omitted final flag does not finish an indexed history replay',()=>{
+  const {normalizeRpcFrame}=require('../out/protocol.js');
+  const store=new SessionStore();
+  store.applyFrame(normalizeRpcFrame({sequence:1,payload:{type:'session_stream_resumed',session_id:'s',replay_chunk_index:0,admission_state:'ready',accumulated_frames:[{seq:1,event:{type:'turn.started',payload:{}}}]}}));
+  assert.equal(store.view().replayComplete,false);
+  assert.equal(store.view().running,true);
+  store.applyFrame(normalizeRpcFrame({sequence:2,payload:{type:'session_stream_resumed',session_id:'s',replay_chunk_index:1,replay_chunk_final:true,admission_state:'ready',cursor:2,accumulated_frames:[]}}));
+  assert.equal(store.view().replayComplete,true);
+  assert.equal(store.view().running,false);
+});

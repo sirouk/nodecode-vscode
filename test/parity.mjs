@@ -7,11 +7,19 @@
 //      paths respond with JSON and CORS permits the extension's host use.
 // Non-zero exit on any hard failure; unavailable pieces print skip notes.
 
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const BIN = process.env.NODECODE_BIN ?? "nodecode";
-const GATEWAY = process.env.NODECODE_GATEWAY_URL ?? "http://127.0.0.1:3918";
+const nodecodeHome = process.env.NODECODE_HOME || path.join(os.homedir(), ".nodecode");
+let owner;
+let token = "";
+try { owner = JSON.parse(fs.readFileSync(path.join(nodecodeHome, "history.db.owner"), "utf8")); } catch {}
+try { token = fs.readFileSync(path.join(nodecodeHome, "operator-token"), "utf8").trim(); } catch {}
+const GATEWAY = process.env.NODECODE_GATEWAY_URL ?? (owner?.port ? `http://127.0.0.1:${owner.port}` : "http://127.0.0.1:3918");
 
 const results = [];
 const record = (name, pass, detail) => {
@@ -42,7 +50,7 @@ const run = (args, timeoutMs = 20000) =>
 
 const httpGet = (pathStr, timeoutMs = 5000) =>
   new Promise((resolve) => {
-    const req = http.get(`${GATEWAY}/api/gateway${pathStr}`, (res) => {
+    const req = http.get(`${GATEWAY}/api/gateway${pathStr}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} }, (res) => {
       let body = "";
       res.on("data", (chunk) => (body += chunk));
       res.on("end", () => resolve({ status: res.statusCode ?? 0, body, json: undefined }));
@@ -85,15 +93,17 @@ const ping = await httpGet("/sessions");
   } catch {
     json = undefined;
   }
-  const up = ping.status >= 200 && (ping.status < 300 || ping.status === 401) && json !== undefined;
+  const up = ping.status >= 200 && ping.status < 300 && Array.isArray(json);
   if (up) {
     record(
       "/api/gateway/sessions returns JSON when a gateway is up",
       true,
       `http ${ping.status}, ${Array.isArray(json) ? `${json.length} rows` : typeof json}`,
     );
+  } else if (owner?.port || process.env.NODECODE_GATEWAY_URL) {
+    record("discovered gateway sessions endpoint is accessible", false, `http ${ping.status}${ping.error ? `, ${ping.error}` : ""}`);
   } else {
-    console.log(`skip gateway probe — no nodecode daemon answering at ${GATEWAY}`);
+    console.log(`skip gateway probe — no nodecode daemon discovered at ${GATEWAY}`);
   }
 }
 

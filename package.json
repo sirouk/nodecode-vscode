@@ -1,7 +1,7 @@
 {
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
-  "description": "Watch and steer live Nodecode sessions from VS Code: streaming replies, queued prompts, checkpoints, forks, background processes.",
+  "description": "Nodecode in VS Code: live conversations, thinking, tools, child threads, checkpoints and model controls.",
   "version": "0.1.2",
   "publisher": "sirouk",
   "license": "MIT",
@@ -21,7 +21,7 @@
   "homepage": "https://github.com/sirouk/nodecode-vscode",
   "bugs": "https://github.com/sirouk/nodecode-vscode/issues",
   "galleryBanner": {
-    "color": "#1c1e26",
+    "color": "#171716",
     "theme": "dark"
   },
   "capabilities": {
@@ -64,25 +64,20 @@
         {
           "id": "nodecode",
           "title": "Nodecode",
-          "icon": "media/icon.svg"
+          "icon": "media/activity.svg"
         }
       ]
     },
     "views": {
       "nodecode": [
         {
-          "id": "nodecodeSessions",
-          "name": "Sessions",
-          "contextualTitle": "Nodecode Sessions"
+          "id": "nodecodeChat",
+          "type": "webview",
+          "name": "Nodecode",
+          "contextualTitle": "Nodecode"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "nodecodeSessions",
-        "contents": "No Nodecode sessions found.\n[New session in terminal](command:nodecode.newSessionInTerminal)\n[Open session picker](command:nodecode.openSessionPicker)"
-      }
-    ],
     "commands": [
       {
         "command": "nodecode.openPanel",
@@ -92,9 +87,15 @@
       },
       {
         "command": "nodecode.openSessionPicker",
-        "title": "Open Existing Session…",
+        "title": "Open Existing Session\u2026",
         "category": "Nodecode",
         "icon": "$(list-selection)"
+      },
+      {
+        "command": "nodecode.newSession",
+        "title": "New Conversation",
+        "category": "Nodecode",
+        "icon": "$(add)"
       },
       {
         "command": "nodecode.newSessionInTerminal",
@@ -152,13 +153,13 @@
       },
       {
         "command": "nodecode.pickModel",
-        "title": "Choose Model…",
+        "title": "Choose Model\u2026",
         "category": "Nodecode",
         "icon": "$(symbol-misc)"
       },
       {
         "command": "nodecode.pickEffort",
-        "title": "Choose Effort…",
+        "title": "Choose Effort\u2026",
         "category": "Nodecode",
         "icon": "$(gauge)"
       },
@@ -178,61 +179,57 @@
         "title": "Show Diagnostics Output",
         "category": "Nodecode",
         "icon": "$(pulse)"
+      },
+      {
+        "command": "nodecode.addSelectionToChat",
+        "title": "Add Selection to Conversation",
+        "category": "Nodecode",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "nodecode.addActiveFileToChat",
+        "title": "Add Active File to Conversation",
+        "category": "Nodecode",
+        "icon": "$(file-code)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "nodecode.refreshSessions",
-          "when": "view == nodecodeSessions",
-          "group": "navigation"
-        },
-        {
-          "command": "nodecode.newSessionInTerminal",
-          "when": "view == nodecodeSessions",
+          "command": "nodecode.newSession",
+          "when": "view == nodecodeChat",
           "group": "navigation"
         }
       ],
-      "view/item/context": [
+      "editor/context": [
         {
-          "command": "nodecode.openPanel",
-          "when": "view == nodecodeSessions && viewItem == session",
-          "group": "inline"
-        },
+          "command": "nodecode.addSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "nodecode"
+        }
+      ],
+      "editor/title/context": [
         {
-          "command": "nodecode.focusSessionTerminal",
-          "when": "view == nodecodeSessions && viewItem == session",
-          "group": "inline"
-        },
-        {
-          "command": "nodecode.forkSession",
-          "when": "view == nodecodeSessions && viewItem == session",
-          "group": "inline"
-        },
-        {
-          "command": "nodecode.renameSession",
-          "when": "view == nodecodeSessions && viewItem == session",
-          "group": "1_modification"
-        },
-        {
-          "command": "nodecode.viewSessionLogs",
-          "when": "view == nodecodeSessions && viewItem == session",
-          "group": "2_actions"
-        },
-        {
-          "command": "nodecode.deleteSession",
-          "when": "view == nodecodeSessions && viewItem == session",
-          "group": "9_danger"
+          "command": "nodecode.addActiveFileToChat",
+          "group": "nodecode"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "nodecode.addSelectionToChat",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "typecheck": "tsc --noEmit",
-    "test": "node ./test/parity.mjs",
+    "test": "npm run compile && node --test test/*.test.mjs && node ./test/parity.mjs",
     "package": "npx @vscode/vsce package --no-dependencies",
     "icon": "node test/render-icon.mjs"
   },

@@ -386,7 +386,7 @@ apply_release_changes "$chosen_tag" "$DRY_RUN"
 # the whole file set instead — a denylist only ever knows about yesterday's
 # mistake. .github/workflows/publish.yml asserts the SAME list in CI: a release
 # that only updates this copy passes here and then fails at the publish step.
-unexpected="$(./node_modules/.bin/vsce ls --no-dependencies 2>/dev/null | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|out/[^/]+\.js|media/icon\.png|media/icon\.svg)$' || true)"
+unexpected="$(./node_modules/.bin/vsce ls --no-dependencies 2>/dev/null | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|out/[^/]+\.js|media/icon\.png|media/(icon|activity)\.svg)$' || true)"
 if [ -n "$unexpected" ]; then
     printf '[release] refusing to package: unexpected files would ship inside the .vsix:\n' >&2
     printf '%s\n' "$unexpected" | sed 's#^#[release]   #' >&2

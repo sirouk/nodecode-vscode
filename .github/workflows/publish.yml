@@ -73,7 +73,7 @@ jobs:
           # vsce globs with dot:true and ignores .gitignore, so anything untracked
           # in the checkout ships. Assert the whole file set; keep this list in
           # step with the same allowlist in release.sh.
-          unexpected="$(npx vsce ls --no-dependencies | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|out/[^/]+\.js|media/icon\.png|media/icon\.svg)$' || true)"
+          unexpected="$(npx vsce ls --no-dependencies | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|out/[^/]+\.js|media/icon\.png|media/(icon|activity)\.svg)$' || true)"
           if [ -n "$unexpected" ]; then
             echo "refusing to package: unexpected files would ship inside the vsix:" >&2
             echo "$unexpected" >&2

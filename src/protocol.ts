@@ -23,15 +23,33 @@ export interface RpcCommandBase {
   session_id?: string;
 }
 
+export interface ImageAttachment {
+  mediaType: string;
+  data: string;
+}
+
+export interface TextFileAttachment {
+  ref: string;
+  name: string;
+  path: string;
+  byteLength: number;
+  origin?: "nodecode" | "computer" | "paste";
+  originalPath?: string;
+}
+
+export type PromptContent = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: string; data: string } };
+
 export interface StartTurnCommand extends RpcCommandBase {
   type: "start_turn";
   prompt: string;
+  content?: PromptContent[];
 }
 
 export interface SteerTurnCommand extends RpcCommandBase {
   type: "steer_turn";
   expected_turn_id: string;
   prompt: string;
+  content?: PromptContent[];
 }
 
 export interface WithdrawPromptCommand extends RpcCommandBase {
@@ -98,6 +116,17 @@ export interface SessionStreamResumedFrame extends RpcFrameBase {
   accumulated_frames: SessionStreamEventFrame[];
   cursor?: number | null;
   resumed_after?: number | null;
+  replay_chunk_index?: number;
+  replay_chunk_final?: boolean;
+  replay_tail?: boolean;
+  admission_state?: "ready" | "active";
+  title?: string;
+}
+
+/** Native indexed chunks omit replay_chunk_final until the final chunk. */
+export function isReplayComplete(frame: SessionStreamResumedFrame): boolean {
+  return !frame.replay_tail && (frame.replay_chunk_final === true ||
+    (frame.replay_chunk_index == null && frame.replay_chunk_final !== false));
 }
 
 export interface ItemDelta {
@@ -236,14 +265,14 @@ export interface ToolCallInfo {
 
 export type SessionStreamEvent =
   | { type: "session.created"; payload: { id?: string; cwd?: string; parent?: string | null; "created-at"?: string } }
-  | { type: "turn.input_committed"; payload: { role?: string; message?: SessionMessage; "prompt-id"?: string; sequence?: number; disposition?: string } }
+  | { type: "turn.input_committed"; payload: { role?: string; message?: SessionMessage | string; "prompt-id"?: string; sequence?: number; disposition?: string } }
   | { type: "turn.started"; payload: { input?: unknown } }
   | { type: "turn.assistant_message_completed"; payload: { message?: SessionMessage } }
   | { type: "turn.usage"; payload: RpcUsage }
   | { type: "turn.tool_call_started"; payload: { "call-id"?: string; "tool-name"?: string; arguments?: string } }
   | { type: "turn.tool_result"; payload: { "call-id"?: string; "tool-name"?: string; result?: string; "duration-ms"?: number; failed?: boolean; metadata?: Record<string, unknown> } }
   | { type: "turn.completed"; payload: { "turn-number"?: number; "message-count"?: number } }
-  | { type: "turn.failed"; payload: { message?: string; code?: string } }
+  | { type: "turn.failed"; payload: { detail?: string; message?: string; code?: string } }
   | { type: "turn.cancelled"; payload: Record<string, unknown> }
   | { type: string; payload?: Record<string, unknown> };
 
@@ -276,4 +305,29 @@ export function isStreamEventFrame(f: RpcFrame): f is SessionStreamEventFrame {
 
 export function isTerminalEventType(t: string): boolean {
   return t === "turn.completed" || t === "turn.failed" || t === "turn.cancelled";
+}
+
+/** Project the gateway sync envelope into the extension's frame vocabulary. */
+export function normalizeRpcFrame(value: unknown): RpcFrame | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const root = value as Record<string, unknown>;
+  const payload = root.payload && typeof root.payload === "object"
+    ? root.payload as Record<string, unknown> : root;
+  if (typeof payload.type !== "string") return undefined;
+  const frame = { ...root, ...payload } as RpcFrame;
+  delete frame.payload;
+  if (frame.type === "session_stream_event") {
+    const fact = payload.frame && typeof payload.frame === "object"
+      ? payload.frame as Record<string, unknown> : payload;
+    return { ...frame, ...fact, type: "session_stream_event", sequence: Number(fact.seq ?? fact.sequence ?? root.sequence ?? 0) };
+  }
+  if (frame.type === "session_stream_resumed") {
+    const replay = frame as SessionStreamResumedFrame;
+    if (replay.replay_chunk_index !== undefined && replay.replay_chunk_final === undefined) replay.replay_chunk_final = false;
+    replay.accumulated_frames = (Array.isArray(payload.accumulated_frames) ? payload.accumulated_frames : []).map((value) => {
+      const fact = value as Record<string, unknown>;
+      return { ...fact, type: "session_stream_event", sequence: Number(fact.seq ?? fact.sequence ?? 0) } as SessionStreamEventFrame;
+    });
+  }
+  return frame;
 }

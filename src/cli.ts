@@ -4,16 +4,51 @@
 import { ChildProcess, execFileSync, spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import * as vscode from "vscode";
 import { NodecodeDiscovery, Notifications } from "./discovery";
 import { NODECODE_CLI_UNKNOWN_VERSION } from "./protocol";
 
-export type EnsureReadyResult = "ok" | { failure: string; fixableByDaemon: boolean };
+export const NODECODE_INSTALL_URL = "https://nodecode.ai/install.sh";
+export const NODECODE_INSTALL_COMMAND = "curl -fsSL https://nodecode.ai/install.sh | sh";
+export const NODECODE_WINDOWS_INSTALL_COMMAND = "irm https://nodecode.ai/install.ps1 | iex";
+export type RuntimeFailureReason = "missing-cli" | "unusable-cli" | "gateway-unavailable";
+export type EnsureReadyResult = "ok" | { failure: string; reason: RuntimeFailureReason; fixableByDaemon: boolean };
+export interface RuntimeStatus {
+  state: "ready" | RuntimeFailureReason;
+  message: string;
+  binary?: string;
+  installCommand?: string;
+  installUrl: string;
+  canRestart: boolean;
+}
+
+export function resolveCliBinary(configured: string, options: {pathEnv:string;home:string;platform:string;localAppData?:string} = {pathEnv:process.env.PATH ?? "", home:os.homedir(), platform:process.platform,localAppData:process.env.LOCALAPPDATA}): string | undefined {
+  const executable = (file: string): boolean => {
+    try { if (!fs.statSync(file).isFile()) return false; fs.accessSync(file, options.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK); return true; }
+    catch { return false; }
+  };
+  if (configured.includes("/") || configured.includes("\\")) return executable(configured) ? configured : undefined;
+  const extensions = options.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
+  for (const directory of options.pathEnv.split(options.platform === "win32" ? ";" : path.delimiter)) {
+    if (!directory) continue;
+    for (const ext of extensions) { const candidate = path.join(directory, configured + ext); if (executable(candidate)) return candidate; }
+  }
+  // GUI-launched VS Code often misses the installer's ~/.local/bin PATH entry.
+  if (configured === "nodecode") {
+    const candidates = options.platform === "win32"
+      ? [path.join(options.localAppData ?? path.join(options.home,"AppData","Local"),"Programs","nodecode","current","nodecode.exe")]
+      : [path.join(options.home,".local","bin","nodecode"),path.join(options.home,".local","share","nodecode","current","nodecode")];
+    for (const candidate of candidates) if (executable(candidate)) return candidate;
+  }
+  return undefined;
+}
 
 export class NodecodeCli {
   private readonly discovery: NodecodeDiscovery;
   private readonly notes: Notifications;
   version: string = NODECODE_CLI_UNKNOWN_VERSION;
+  private versionFailure = "";
 
   constructor(discovery: NodecodeDiscovery, notes: Notifications) {
     this.discovery = discovery;
@@ -28,23 +63,11 @@ export class NodecodeCli {
   }
 
   resolve(): string | undefined {
-    const configured = this.configuredPath();
-    if (configured.includes("/")) {
-      return fs.existsSync(configured) ? configured : undefined;
-    }
-    const pathEnv = process.env.PATH ?? "";
-    const exts = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
-    for (const dir of pathEnv.split(path.delimiter)) {
-      if (!dir) continue;
-      for (const ext of exts) {
-        const candidate = path.join(dir, configured + ext);
-        if (fs.existsSync(candidate)) return candidate;
-      }
-    }
-    return undefined;
+    return resolveCliBinary(this.configuredPath());
   }
 
   readVersion(binary: string): string {
+    this.versionFailure = "";
     try {
       const out = execFileSync(binary, ["--version"], {
         encoding: "utf8",
@@ -52,8 +75,9 @@ export class NodecodeCli {
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
       this.version = out || NODECODE_CLI_UNKNOWN_VERSION;
-    } catch {
+    } catch (error) {
       this.version = NODECODE_CLI_UNKNOWN_VERSION;
+      this.versionFailure = error instanceof Error ? error.message.split("\n")[0] : String(error);
     }
     return this.version;
   }
@@ -67,9 +91,10 @@ export class NodecodeCli {
         configured === "nodecode"
           ? "`nodecode` is not on PATH. Install Nodecode or set nodecode.cliPath to the binary."
           : `nodecode.cliPath points at ${configured}, which does not exist.`;
-      return { failure, fixableByDaemon: false };
+      return { failure, reason: "missing-cli", fixableByDaemon: false };
     }
     this.readVersion(binary);
+    if (this.versionFailure) return {failure:`Nodecode was found at ${binary}, but could not start: ${this.versionFailure}`,reason:"unusable-cli",fixableByDaemon:false};
     let endpoint = this.discovery.current();
     if (!endpoint) endpoint = await this.discovery.probe();
     if (!endpoint) {
@@ -77,7 +102,7 @@ export class NodecodeCli {
       const failure = fixable
         ? "The Nodecode gateway is not answering, but its store is still present — it can be restarted."
         : "No Nodecode gateway is running in this home (no history.db.owner). Start one (nodecode serve) and retry.";
-      return { failure, fixableByDaemon: fixable };
+      return { failure, reason:"gateway-unavailable", fixableByDaemon: fixable };
     }
     return "ok";
   }
@@ -100,10 +125,11 @@ export class NodecodeCli {
     }
   }
 
-  spawnRpc(sessionId: string | undefined, cwd: string): ChildProcess | undefined {
+  spawnRpc(sessionId: string | undefined, cwd: string, cursor?: number): ChildProcess | undefined {
     const binary = this.resolve();
     if (!binary) return undefined;
     const args = sessionId ? ["rpc", sessionId] : ["rpc"];
+    if (sessionId && cursor !== undefined) args.push("--cursor", String(cursor));
     return spawn(binary, args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],

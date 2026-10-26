@@ -1,6 +1,4 @@
-// Sessions feature module: the tree view and every contributed nodecode.*
-// command, riding on the api/cli/discovery/manager modules. Panel callbacks
-// for the webview live in extension.ts; this file owns the roster UI.
+// Session commands; the searchable history popover lives in panel.ts.
 
 import * as path from "path";
 import * as vscode from "vscode";
@@ -19,7 +17,9 @@ export interface CommandDeps {
   openPanel(sessionId: string): void;
   revealTerminal(sessionId: string): void;
   forgetController(sessionId: string): void;
+  deleteSession(sessionId: string): void | Promise<void>;
   workspaceRoot(): string;
+  showHistory(): void;
 }
 
 function rowTitle(row: SessionRow): string {
@@ -33,83 +33,18 @@ function rowTitle(row: SessionRow): string {
   );
 }
 
-function fmtAgo(iso?: string): string {
-  if (!iso) return "";
-  const then = Date.parse(iso);
-  if (!Number.isFinite(then)) return "";
-  const s = Math.max(0, (Date.now() - then) / 1000);
-  if (s < 60) return `${Math.floor(s)}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
 function rowsFrom(input: unknown): SessionRow[] {
   if (Array.isArray(input)) return input as SessionRow[];
   const boxed = input as { sessions?: SessionRow[] };
   return Array.isArray(boxed?.sessions) ? boxed.sessions : [];
 }
 
-export class SessionItem extends vscode.TreeItem {
-  constructor(readonly row: SessionRow) {
-    super(rowTitle(row), vscode.TreeItemCollapsibleState.None);
-    this.id = row.id;
-    this.contextValue = "session";
-    const ago = fmtAgo(row.updated_at);
-    this.description = [ago, row.depth ? `fork d${row.depth}` : ""].filter(Boolean).join(" · ");
-    const tip = new vscode.MarkdownString(undefined, true);
-    tip.appendMarkdown(`**${rowTitle(row)}**\n\n`);
-    if (row.prompt) tip.appendMarkdown(`${row.prompt.slice(0, 400)}\n\n`);
-    tip.appendMarkdown(`\`${row.id}\``);
-    if (row.working_directory) tip.appendMarkdown(`  ·  \`${row.working_directory}\``);
-    if (row.parent_id) tip.appendMarkdown(`  ·  fork of \`${row.parent_id as string}\``);
-    this.tooltip = tip;
-    this.iconPath = new vscode.ThemeIcon(row.fork ? "git-branch" : "comment-discussion");
-    this.command = { command: "nodecode.openPanel", title: "Open Session Panel", arguments: [row] };
-  }
-}
-
-export class SessionsProvider implements vscode.TreeDataProvider<SessionItem> {
-  private readonly emitter = new vscode.EventEmitter<SessionItem | undefined>();
-  readonly onDidChangeTreeData = this.emitter.event;
-  private rows: SessionRow[] = [];
-
-  constructor(private readonly api: NodecodeApi, private readonly notes: Notifications) {}
-
-  refresh(): void {
-    this.emitter.fire(undefined);
-  }
-
-  async load(): Promise<void> {
-    try {
-      const rows = rowsFrom(await this.api.sessions());
-      rows.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
-      this.rows = rows;
-    } catch (error) {
-      this.notes.log(`sessions load failed: ${String(error)}`);
-    }
-    this.refresh();
-  }
-
-  getTreeItem(element: SessionItem): vscode.TreeItem {
-    return element;
-  }
-
-  getChildren(): SessionItem[] {
-    return this.rows.map((row) => new SessionItem(row));
-  }
-
-  find(id: string): SessionRow | undefined {
-    return this.rows.find((row) => row.id === id);
-  }
-}
-
 async function sessionIdOf(deps: CommandDeps, arg: unknown): Promise<string | undefined> {
   const direct =
     typeof arg === "string"
       ? arg
-      : (arg as SessionItem | SessionRow | undefined) &&
-        (((arg as SessionItem).row?.id ?? (arg as SessionRow).id) as string | undefined);
+      : (arg as { row?: SessionRow; id?: string } | undefined) &&
+        (((arg as { row?: SessionRow }).row?.id ?? (arg as SessionRow).id) as string | undefined);
   if (direct) return direct;
   const rows = rowsFrom(await deps.api.sessions().catch(() => []));
   if (!rows.length) {
@@ -133,18 +68,9 @@ const NODECODE_MD = [
   "",
 ].join("\n");
 
-/**
- * Register the Sessions tree view and every nodecode.* command in
- * package.json. Returns a handle whose `refresh` reloads from the gateway
- * (used by panel callbacks in extension.ts after rename/delete/fork).
- */
-export function registerSessions(deps: CommandDeps): { refresh(): Promise<void> } {
-  const provider = new SessionsProvider(deps.api, deps.notes);
-  const tree = vscode.window.createTreeView("nodecodeSessions", {
-    treeDataProvider: provider,
-    showCollapseAll: false,
-  });
-  const subs: vscode.Disposable[] = [tree];
+/** Register session commands without a second sidebar view. */
+export function registerSessions(deps: CommandDeps): void {
+  const subs: vscode.Disposable[] = [];
   const cmd = (id: string, fn: (...args: any[]) => unknown): void => {
     subs.push(vscode.commands.registerCommand(id, fn));
   };
@@ -158,18 +84,14 @@ export function registerSessions(deps: CommandDeps): { refresh(): Promise<void> 
     }
   };
 
-  // --- tree view commands ------------------------------------------------
-  cmd("nodecode.refreshSessions", () => void provider.load());
+  cmd("nodecode.refreshSessions", () => deps.showHistory());
 
   cmd("nodecode.openPanel", async (arg: unknown) => {
     const sid = await sessionIdOf(deps, arg);
     if (sid) deps.openPanel(sid);
   });
 
-  cmd("nodecode.openSessionPicker", async () => {
-    const sid = await sessionIdOf(deps, undefined);
-    if (sid) deps.openPanel(sid);
-  });
+  cmd("nodecode.openSessionPicker", () => deps.showHistory());
 
   cmd("nodecode.newSessionInTerminal", async () => {
     const ready = await deps.cli.ensureReady();
@@ -194,7 +116,7 @@ export function registerSessions(deps: CommandDeps): { refresh(): Promise<void> 
         shellPath: binary,
       }).show();
     }
-    setTimeout(() => void provider.load(), 800);
+
   });
 
   cmd("nodecode.focusSessionTerminal", async (arg: unknown) => {
@@ -207,7 +129,6 @@ export function registerSessions(deps: CommandDeps): { refresh(): Promise<void> 
     if (!sid) return;
     const forked = await retry("fork", () => deps.api.forkSession(sid, undefined, deps.workspaceRoot()));
     if (forked) {
-      void provider.load();
       deps.openPanel(forked);
     }
   });
@@ -218,22 +139,12 @@ export function registerSessions(deps: CommandDeps): { refresh(): Promise<void> 
     const name = await vscode.window.showInputBox({ prompt: "New name for this Nodecode session" });
     if (!name) return;
     await retry("rename", () => deps.api.setTitle(sid, name));
-    void provider.load();
   });
 
   cmd("nodecode.deleteSession", async (arg: unknown) => {
     const sid = await sessionIdOf(deps, arg);
     if (!sid) return;
-    const choice = await vscode.window.showWarningMessage(
-      `Delete Nodecode session ${sid}? The session history will be removed.`,
-      { modal: true },
-      "Delete",
-    );
-    if (choice !== "Delete") return;
-    if (await retry("delete", () => deps.api.deleteSession(sid))) {
-      deps.forgetController(sid);
-      void provider.load();
-    }
+    await deps.deleteSession(sid);
   });
 
   cmd("nodecode.viewSessionLogs", async (arg: unknown) => {
@@ -286,7 +197,7 @@ export function registerSessions(deps: CommandDeps): { refresh(): Promise<void> 
   cmd("nodecode.pickEffort", async (arg: unknown) => {
     const sid = await sessionIdOf(deps, arg);
     if (!sid) return;
-    const target = await retry("target", () => deps.api.target());
+    const target = await retry("target", () => deps.api.target(sid));
     if (!target) return;
     const ladder = [
       ...new Set<string>([
@@ -321,11 +232,5 @@ export function registerSessions(deps: CommandDeps): { refresh(): Promise<void> 
   cmd("nodecode.showActivationLog", () => deps.notes.show());
   cmd("nodecode.viewExtensionLogs", () => deps.notes.show());
 
-  // --- self-healing: reload the roster whenever the gateway state shifts ---
-  subs.push(deps.discovery.onDidChange(() => void provider.load()));
-  subs.push(vscode.window.onDidCloseTerminal(() => void provider.load()));
   deps.context.subscriptions.push(vscode.Disposable.from(...subs));
-
-  void provider.load();
-  return { refresh: () => provider.load() };
 }

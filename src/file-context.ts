@@ -46,13 +46,20 @@ export async function withFileReferences(root: string, text: string, files: unkn
     if (path.isAbsolute(selected) || !within(absoluteRoot, absolute)) throw new Error("File references must stay inside the workspace.");
     const canonical = await realpath(absolute);
     if (!within(canonicalRoot, canonical)) throw new Error("File references must stay inside the workspace, including symbolic links.");
-    if (!(await stat(canonical)).isFile()) throw new Error(`Select a regular file: ${selected}`);
-    const handle = await open(canonical, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    const expected = await stat(canonical, {bigint:true});
+    if (!expected.isFile()) throw new Error(`Select a regular file: ${selected}`);
+    const handle = await open(canonical, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
     let bytes: Buffer;
     try {
-      const stat = await handle.stat();
-      if (!stat.isFile()) throw new Error(`Select a file, not a directory: ${selected}`);
-      if (stat.size > MAX_FILE_BYTES) throw new Error(`${selected} exceeds the 100 KiB file limit.`);
+      const info = await handle.stat({bigint:true});
+      const current = await realpath(absolute);
+      if (current !== canonical || !within(canonicalRoot, current)) throw new Error(`File reference changed while opening: ${selected}. Select it again.`);
+      const currentInfo = await stat(current, {bigint:true});
+      // O_NOFOLLOW covers the final component; identity and canonical-path checks
+      // also catch replacements of an intermediate directory before opening.
+      if (info.dev !== expected.dev || info.ino !== expected.ino || info.dev !== currentInfo.dev || info.ino !== currentInfo.ino) throw new Error(`File reference changed while opening: ${selected}. Select it again.`);
+      if (!info.isFile()) throw new Error(`Select a file, not a directory: ${selected}`);
+      if (info.size > BigInt(MAX_FILE_BYTES)) throw new Error(`${selected} exceeds the 100 KiB file limit.`);
       const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
       let offset = 0;
       while (offset < buffer.length) {

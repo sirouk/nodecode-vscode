@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,stat,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,readdir,stat,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createRequire} from 'node:module';
@@ -44,7 +44,7 @@ test('chunk validation refuses incomplete uploads, invalid Unicode and oversized
 }));
 
 test('oversized message becomes readable file reference and keeps original bytes',()=>fixture(async root=>{
-  const controller=new SessionController({}, {log(){}},{},root,'s',root);
+  const controller=new SessionController({}, {log(){}},{assertLocalRuntimeFiles:async()=>{}},root,'s',root);
   const text='original user request\n'+'x'.repeat(200000);
   const prompt=await controller.withAttachments(text,[],[],{});
   const result=splitTextFileReferences(prompt);
@@ -53,4 +53,148 @@ test('oversized message becomes readable file reference and keeps original bytes
   assert.equal(await readFile(result.textFiles[0].path,'utf8'),text);
   assert(prompt.includes('original message'));assert(prompt.length<2000);
   controller.dispose();
+}));
+
+
+test('every local text-file staging and send route verifies the runtime filesystem',()=>fixture(async root=>{
+  const source={},calls=[];
+  const controller=new SessionController({}, {log(){}},{assertLocalRuntimeFiles:async()=>{calls.push('check');throw Error('different filesystem');}},root,'s',root);
+  try{
+    await assert.rejects(controller.stageTextAttachmentChunk({text:'paste',name:'paste.txt',requestId:1,index:0,totalChunks:1},source),/different filesystem/);
+    await assert.rejects(controller.withAttachments('x'.repeat(200001),[],[],source),/different filesystem/);
+    const local=new TextAttachmentStore(root,'s'),attachment=await local.stage('saved local draft','saved.txt',{});
+    await assert.rejects(controller.withAttachments('Read',[],[attachment.ref],source),/different filesystem/);
+    assert.equal(calls.length,3);
+    assert.equal(await controller.withAttachments('plain remote prompt',[],[],source),'plain remote prompt');
+    assert.equal(calls.length,3);
+  }finally{controller.dispose();}
+}));
+
+test('explicit removal deletes unsent files but preserves active holders and committed history',()=>fixture(async root=>{
+  const store=new TextAttachmentStore(root,'s'),first={},second={};
+  const draft=await store.stage('draft','draft.txt',first);
+  await store.resolve([draft.ref],second);
+  await store.release(draft.ref,first);
+  assert.equal(await readFile(draft.path,'utf8'),'draft');
+  await store.release(draft.ref,second);
+  await assert.rejects(stat(draft.path),{code:'ENOENT'});
+  assert.deepEqual(await readdir(join(root,'text-attachments')),[]);
+  const accepted=await store.stage('accepted','accepted.txt',first);
+  await store.commit([accepted.ref],first);
+  await store.release(accepted.ref,first);
+  assert.equal(await readFile(accepted.path,'utf8'),'accepted');
+  const restarted=new TextAttachmentStore(root,'s'),third={};
+  await restarted.resolve([accepted.ref],third);await restarted.release(accepted.ref,third);
+  assert.equal(await readFile(accepted.path,'utf8'),'accepted');
+}));
+
+test('closing a view preserves its saved draft while later explicit removal reclaims storage',()=>fixture(async root=>{
+  const first=new TextAttachmentStore(root,'s'),source={};
+  const draft=await first.stage('unsent saved draft','draft.txt',source);first.close(source);
+  assert.equal(await readFile(draft.path,'utf8'),'unsent saved draft');
+  const reopened=new TextAttachmentStore(root,'s'),restored={};
+  await reopened.resolve([draft.ref],restored);await reopened.release(draft.ref,restored);
+  await assert.rejects(stat(draft.path),{code:'ENOENT'});
+}));
+
+test('a fork opens only the exact text attachment present in its inherited history',()=>fixture(async root=>{
+  const parent=new TextAttachmentStore(root,'parent'),source={};
+  const inherited=await parent.stage('ancestor contents','ancestor.txt',source);
+  const unrelated=await parent.stage('not inherited','unrelated.txt',source);
+  const child=new SessionController({}, {log(){}},{assertLocalRuntimeFiles:async()=>{}},root,'child',root);
+  try{
+    child.store.applyFrame({type:'session_stream_event',session_id:'child',sequence:1,event:{type:'turn.input_committed',payload:{role:'user',message:appendTextFileReferences('Inherited input',[inherited])}}});
+    assert.equal(await child.openTextAttachment(inherited.ref,{}),inherited.path);
+    await assert.rejects(child.openTextAttachment(unrelated.ref,{}),/another session/);
+    await assert.rejects(child.withAttachments('Reuse',[],[inherited.ref],{}),/another session/);
+    const forged={...unrelated,path:inherited.path};
+    child.store.applyFrame({type:'session_stream_event',session_id:'child',sequence:2,event:{type:'turn.input_committed',payload:{role:'user',message:appendTextFileReferences('Forged mismatch',[forged])}}});
+    await assert.rejects(child.openTextAttachment(unrelated.ref,{}),/another session/);
+  }finally{child.dispose();}
+}));
+
+test('controller commits all prepared text files, including automatically staged messages',()=>fixture(async root=>{
+  const controller=new SessionController({}, {log(){}},{assertLocalRuntimeFiles:async()=>{}},root,'s',root),source={};
+  try{
+    const staged=(await controller.stageTextAttachmentChunk({text:'selected file',name:'selected.txt',requestId:1,index:0,totalChunks:1},source)).attachment;
+    const prompt=await controller.withAttachments('x'.repeat(200001),[],[staged.ref],source);
+    const files=splitTextFileReferences(prompt).textFiles;
+    assert.equal(files.length,2);
+    await controller.commitTextAttachments(prompt,source);
+    for(const file of files){await controller.releaseTextAttachment(file.ref,source);assert.equal((await stat(file.path)).size,file.byteLength);}
+  }finally{controller.dispose();}
+}));
+
+test('failed staging metadata writes remove the incomplete text file',()=>fixture(async root=>{
+  const fs=require('fs/promises'),open=fs.open;
+  fs.open=async(file,...args)=>{if(String(file).endsWith('.json'))throw Error('metadata write failed');return open(file,...args);};
+  try{
+    await assert.rejects(new TextAttachmentStore(root,'s').stage('partial write','partial.txt',{}),/metadata write failed/);
+    assert.deepEqual(await readdir(join(root,'text-attachments')),[]);
+  }finally{fs.open=open;}
+}));
+
+test('failed workspace reference preparation removes only its generated message file',()=>fixture(async root=>{
+  const controller=new SessionController({}, {log(){}},{assertLocalRuntimeFiles:async()=>{}},root,'s',root),source={};
+  try{
+    const selected=(await controller.stageTextAttachmentChunk({text:'keep draft',name:'draft.txt',requestId:1,index:0,totalChunks:1},source)).attachment;
+    await assert.rejects(controller.withAttachments('x'.repeat(200001),['does-not-exist'],[selected.ref],source));
+    assert.equal(await readFile(selected.path,'utf8'),'keep draft');
+    assert.equal((await readdir(join(root,'text-attachments'))).filter(name=>name.endsWith('.txt')).length,1);
+  }finally{controller.dispose();}
+}));
+
+
+test('separate panel stores preserve another holder until every view explicitly removes the draft',()=>fixture(async root=>{
+  const first=new TextAttachmentStore(root,'s'),second=new TextAttachmentStore(root,'s'),a={},b={};
+  const file=await first.stage('shared saved draft','shared.txt',a);
+  await second.resolve([file.ref],b);await first.release(file.ref,a);
+  assert.equal(await readFile(file.path,'utf8'),'shared saved draft');
+  await second.release(file.ref,b);await assert.rejects(stat(file.path),{code:'ENOENT'});
+}));
+
+test('a restored draft can be removed directly without a previous host-side hold',()=>fixture(async root=>{
+  const first=new TextAttachmentStore(root,'s'),source={};
+  const file=await first.stage('saved draft','saved.txt',source);first.close(source);
+  await new TextAttachmentStore(root,'s').release(file.ref,{});
+  await assert.rejects(stat(file.path),{code:'ENOENT'});
+}));
+
+test('definitively rejected preparation releases its generated file but keeps selected drafts',()=>fixture(async root=>{
+  const controller=new SessionController({}, {log(){}},{assertLocalRuntimeFiles:async()=>{}},root,'s',root),source={};
+  try{
+    const selected=(await controller.stageTextAttachmentChunk({text:'keep draft',name:'draft.txt',requestId:1,index:0,totalChunks:1},source)).attachment;
+    const prompt=await controller.withAttachments('x'.repeat(200001),[],[selected.ref],source),files=splitTextFileReferences(prompt).textFiles;
+    await controller.releasePreparedTextAttachments(prompt,source,[selected.ref]);
+    assert.equal(await readFile(selected.path,'utf8'),'keep draft');
+    await assert.rejects(stat(files.find(file=>file.ref!==selected.ref).path),{code:'ENOENT'});
+  }finally{controller.dispose();}
+}));
+
+test('failed metadata commit preserves the draft files rather than deleting history input',()=>fixture(async root=>{
+  const store=new TextAttachmentStore(root,'s'),source={},file=await store.stage('admitted input','saved.txt',source);
+  const fs=require('fs/promises'),rename=fs.rename;
+  fs.rename=async()=>{throw Error('metadata commit failed');};
+  try{
+    await assert.rejects(store.commit([file.ref],source),/metadata commit failed/);
+    assert.equal(await readFile(file.path,'utf8'),'admitted input');
+    assert.equal((await readdir(join(root,'text-attachments'))).some(name=>name.endsWith('.tmp')),false);
+    await store.release(file.ref,source);
+    assert.equal(await readFile(file.path,'utf8'),'admitted input');
+  }finally{fs.rename=rename;}
+  await store.commit([file.ref],source);
+  await store.release(file.ref,source);
+  assert.equal(await readFile(file.path,'utf8'),'admitted input');
+}));
+
+
+test('a send-scoped holder survives closing the composer until admission is settled',()=>fixture(async root=>{
+  const store=new TextAttachmentStore(root,'s'),composer={},submission={};
+  const file=await store.stage('pending admission','pending.txt',composer);
+  await store.resolve([file.ref],submission);store.close(composer);
+  await store.release(file.ref,{});
+  assert.equal(await readFile(file.path,'utf8'),'pending admission');
+  await store.commit([file.ref],submission);store.close(submission);
+  await store.release(file.ref,{});
+  assert.equal(await readFile(file.path,'utf8'),'pending admission');
 }));

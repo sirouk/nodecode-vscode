@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Make Enter and Send steer active responses by default, with a separate explicit Queue action; retain steering targets through attachment preparation, reject stale or unavailable steering without silently queuing, and distinguish pending steers from follow-ups.
+- Track native turn starts and prompt promotions directly so fresh turns remain steerable and historical queue snapshots cannot revive delivered inputs or completed turns.
+- Replace plain-text workspace patches with shared, theme-aware unified diff previews, compact file rows, line-number gutters and independent file-opening controls; retain selection, focus, expansion and scroll state across updates and webview recreation.
+- Show the latest completed recorded change per file, distinguish unknown counts from zero, and isolate repeated tool IDs across turns; label binary, missing, incomplete and explicitly truncated previews honestly.
+
+- Preserve image drafts, prompt-history navigation and in-flight submissions across webview recreation; correlate send acknowledgements without resubmitting or clearing newer edits.
+- Retain admitted and outcome-unknown text attachments, reclaim explicitly discarded unsent files, and preserve saved drafts and inherited-history attachment access.
+- Verify local-runtime identity for text-file staging and reject reproduced file/symlink substitutions before reading selected file contents.
+- Propagate native menu and turn-control failures, preserve provider identity when model names match, and recover failed favorite and attachment-browser controls.
+- Settle fork/bookmark buttons without waiting for another session update, and refresh thread navigation when only the parent changes.
+- Reconcile replay/header accounting without double-counting, distinguish cumulative tokens from current context usage, and isolate inherited session state and delayed tool results.
+- Preserve native eviction counts and explicit process-output truncation markers.
+- Handle broken RPC input streams, truncated HTTP responses, detached daemon spawn failures and stale discovery probes; reconnect every detached controller when deletion fails.
+- Bound pathological Markdown blockquote nesting and preserve mixed-list indentation, ordering and ownership.
+- Gate tag publication on verification, synchronize lockfile versions, and align changelog promotion, secret checks and release-run monitoring with the tag-push workflow.
+
 - Match native Markdown fences, tables, task lists and emphasis; preserve tool stream hydration, interruption details, image/diff metadata and workspace file links.
 - Open long histories at recent messages, load earlier rows on scroll, and preserve selected text and the visible reading anchor across streaming and replay.
 

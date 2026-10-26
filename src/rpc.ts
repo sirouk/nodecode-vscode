@@ -89,6 +89,12 @@ export class RpcProcess {
       return;
     }
     this.proc = child;
+    child.stdin?.on("error", (error) => {
+      // Retired streams may still emit EPIPE after being stopped or replaced.
+      if (this.proc !== child || this.stopping) return;
+      this.notes.log(`rpc stdin error: ${String(error)}`);
+      this.reconnect();
+    });
     this.pendingLine = "";
     this.pendingStderr = "";
     this.setState(this.everConnected ? "disconnected" : "connecting");

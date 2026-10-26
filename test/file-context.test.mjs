@@ -65,7 +65,7 @@ test('combined limit and invalid metadata fail without disguising ordinary user 
 
 test('inline mentions preserve composed words and snapshots once alongside separate attachments', () => fixture(async root => {
   await writeFile(join(root, 'source.ts'), 'export const selected = true;');
-  const controller = new SessionController({}, {log(){}}, {}, root, 'inline-test', join(root, 'private'));
+  const controller = new SessionController({}, {log(){}}, {assertLocalRuntimeFiles:async()=>{}}, root, 'inline-test', join(root, 'private'));
   const source = {};
   try {
     const attachment = await controller.textAttachments.stage('separate attachment body', 'notes.txt', source);

@@ -87,3 +87,58 @@ test('explicit angle-wrapped destinations preserve spaces and reject unsafe sche
   assert.equal(parsed.path,'docs/My Report.md');
   assert.equal(parsed.startLine,10);
 });
+
+test('deep blockquotes remain bounded and preserve the remaining source as text',()=>{
+  const root=render('> '.repeat(5000)+'deep **content**');
+  assert.ok(all(root,'blockquote').length<=64);
+  assert.match(root.textContent,/> .*deep \*\*content\*\*$/);
+});
+
+test('list nesting follows indentation without manufacturing empty levels',()=>{
+  const root=render('- parent\n    - child\n- sibling');
+  assert.equal(root.children.length,1);
+  const list=root.children[0];
+  assert.deepEqual(list.children.map(n=>n.textContent),['parentchild','sibling']);
+  const nested=list.children[0].children.find(n=>n.tagName==='UL');
+  assert.deepEqual(nested.children.map(n=>n.textContent),['child']);
+  assert.equal(all(root,'ul').length,2);
+  assert.equal(all(root,'li').length,3);
+});
+
+test('list kind changes create adjacent lists at their owning indentation',()=>{
+  const root=render('- first\n3. second\n- third\n  4. fourth\n  - fifth\n  6. sixth');
+  assert.deepEqual(root.children.map(n=>n.tagName),['UL','OL','UL']);
+  assert.equal(root.children[1].start,3);
+  assert.deepEqual(root.children.map(n=>n.textContent),['first','second','thirdfourthfifthsixth']);
+  const nested=root.children[2].children[0].children.filter(n=>['UL','OL'].includes(n.tagName));
+  assert.deepEqual(nested.map(n=>n.tagName),['OL','UL','OL']);
+  assert.deepEqual(nested.map(n=>n.textContent),['fourth','fifth','sixth']);
+  assert.equal(nested[0].start,4);
+  assert.equal(nested[2].start,6);
+});
+
+test('dedenting then nesting appends under the current item in source order',()=>{
+  const root=render('- first\n  - second\n    - third\n- fourth\n  - fifth');
+  assert.equal(root.textContent,'firstsecondthirdfourthfifth');
+  const top=root.children[0].children;
+  assert.deepEqual(top.map(n=>n.textContent),['firstsecondthird','fourthfifth']);
+  assert.equal(all(root,'li').length,5);
+  assert.equal(all(top[1],'ul')[0].children[0].textContent,'fifth');
+});
+
+test('uneven nested indentation keeps source order when returning to a shallower list',()=>{
+  const root=render('- first\n  - second\n      - third\n    - fourth');
+  assert.equal(root.textContent,'firstsecondthirdfourth');
+  assert.equal(all(root,'li').length,4);
+  assert.deepEqual(all(root,'li')[1].children.filter(n=>n.tagName==='UL').map(n=>n.textContent),['third','fourth']);
+});
+
+
+test('ordinary nested quotes retain inline formatting and ordered task lists',()=>{
+  const root=render('> **outer**\n> > 7. [x] inner [web](https://example.com)');
+  assert.equal(all(root,'blockquote').length,2);
+  assert.equal(all(root,'strong')[0].textContent,'outer');
+  assert.equal(all(root,'ol')[0].start,7);
+  assert.equal(all(root,'input')[0].checked,true);
+  assert.equal(all(root,'a')[0].href,'https://example.com/');
+});

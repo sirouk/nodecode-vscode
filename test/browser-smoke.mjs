@@ -41,20 +41,23 @@ try {
     threads: [{ id: 'child', title: 'Research child', status: 'running', relation: 'detached' }],
     parts: Array.from({length: 16}, (_, i) => ({ kind: 'assistant', text: ('Paragraph ' + i + '. ').repeat(30), reasoning: i === 0 ? 'Reasoning line\n'.repeat(80) : '', streaming: false }))
   }};
-  const emit = async value => page.evaluate(m => window.dispatchEvent(new MessageEvent('message', { data: m })), value);
+  const emit = async value => {
+    if (value.type==='sendAccepted'||value.type==='sendRejected') value={...value,requestId:await page.evaluate(()=>window.posted.filter(m=>m.type==='send').at(-1)?.requestId)};
+    return page.evaluate(m => window.dispatchEvent(new MessageEvent('message', { data: m })), value);
+  };
   // A new thread can have an active turn before its first response/acknowledgement.
   // Keep its protocol identifier out of the visible status at sidebar widths.
   await page.setViewportSize({width: 360, height: 700});
-  const waiting = { ...state, view: { ...state.view, parts: [], threads: [], running: true, activeTurnId: 'turn-' + 'long-identifier-'.repeat(12) } };
+  const waiting = { ...state, view: { ...state.view, parts: [], threads: [], running: true, activeTurnSteerable: true, activeTurnId: 'turn-' + 'long-identifier-'.repeat(12) } };
   await emit(waiting);
   assert.equal(await page.locator('#statusLine .connection').textContent(), 'Working');
   assert.equal(await page.locator('#statusLine .connection').getAttribute('title'), 'Turn ID: ' + waiting.view.activeTurnId);
   assert(!(await page.locator('#statusLine').textContent()).includes(waiting.view.activeTurnId));
   await page.locator('#composer').fill('New thread prompt');
   await page.locator('#sendBtn').click();
-  assert.equal(await page.locator('#statusLine .connection').textContent(), 'Sending…');
+  assert.equal(await page.locator('#statusLine .connection').textContent(), 'Steering…');
   await emit(waiting);
-  assert.equal(await page.locator('#statusLine .connection').textContent(), 'Sending…');
+  assert.equal(await page.locator('#statusLine .connection').textContent(), 'Steering…');
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth && document.querySelector('#statusLine').scrollWidth <= document.querySelector('#statusLine').clientWidth));
   if (process.env.NODECODE_WAITING_SCREENSHOT) await page.screenshot({path: process.env.NODECODE_WAITING_SCREENSHOT});
   await emit({type:'sendAccepted',text:'New thread prompt'});
@@ -92,7 +95,7 @@ try {
   assert((await page.locator('[data-model="m3"]').textContent()).includes('1.1 M context tokens'));
   assert((await page.locator('[data-model="m3"]').getAttribute('title')).includes('1,050,000'));
   await emit(options);
-  await emit({...waiting,view:{...waiting.view,totals:{input:2300,output:12345}}});
+  await emit({...waiting,view:{...waiting.view,totals:{input:99000,output:12345},contextUsage:{input:2000,cached:200,cacheWrite:100}}});
   assert((await page.locator('#statusLine').textContent()).includes('12345 out / ctx 2.3 K'));
   assert((await page.locator('#statusLine>span').last().getAttribute('title')).includes('2,300'));
   await emit(waiting);
@@ -476,7 +479,7 @@ try {
   await page.getByRole('button',{name:/Nested child/}).click();
   assert(await page.evaluate(()=>window.posted.some(m=>m.type==='openThread'&&m.sessionId==='nested')));
   await page.locator('#fileDetails > summary').click();
-  await page.getByRole('button',{name:'src/demo.ts',exact:true}).click();
+  await page.getByRole('button',{name:'Open file src/demo.ts',exact:true}).click();
   assert(await page.evaluate(()=>window.posted.some(m=>m.type==='openFile'&&m.path==='src/demo.ts')));
   await page.locator('#processDetails > summary').click();await page.locator('.activity-process > summary').click();
   const output=page.locator('.process-output');await output.evaluate(e=>{e.scrollTop=80;});await page.waitForTimeout(20);
@@ -614,7 +617,7 @@ try {
   await emit({type:'forkFinished',turnId:'turn-recorded'});
   assert(!(await page.locator('[data-a="forkAtMessage"]').isDisabled()));
   assert((await page.locator('#transcript').textContent()).includes('Recorded answer'));
-  await emit({...state,view:{...state.view,running:true,activeTurnId:'turn-recorded',parts:[{kind:'assistant',text:'Recorded answer',reasoning:'',streaming:false,durable:true,forkTurnId:'turn-recorded'}]}});
+  await emit({...state,view:{...state.view,running:true,activeTurnId:'turn-recorded',activeTurnSteerable:true,parts:[{kind:'assistant',text:'Recorded answer',reasoning:'',streaming:false,durable:true,forkTurnId:'turn-recorded'}]}});
   assert.equal(await page.locator('[data-a="forkAtMessage"]').count(),0);
   // Long text becomes a staged file without sending or losing its content on failure.
   await page.locator('#composer').fill('L'.repeat(32000));

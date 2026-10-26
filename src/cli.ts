@@ -118,8 +118,11 @@ export class NodecodeCli {
         detached: true,
         stdio: "ignore",
       });
+      child.on("error", (error) => this.notes.log(`Failed to respawn gateway: ${String(error)}`));
+      child.once("spawn", () => {
+        this.notes.log(`Respawned gateway: ${binary} serve --store ${store} (pid ${child.pid})`);
+      });
       child.unref();
-      this.notes.log(`Respawned gateway: ${binary} serve --store ${store} (pid ${child.pid})`);
     } catch (error) {
       this.notes.log(`Failed to respawn gateway: ${String(error)}`);
     }

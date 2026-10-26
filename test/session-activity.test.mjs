@@ -76,3 +76,46 @@ test('reused registry id starts a fresh output buffer and clears old exit data',
   processes.update({shell_session_id:7,tool_call_id:'new',status:'running',offset:0,output_b64:b64('new')});
   const current=processes.view()[0];assert.equal(current.output,'new');assert.equal(current.exitCode,undefined);assert.equal(current.error,undefined);assert.equal(current.toolCallId,'new');
 });
+
+
+test('explicit native tail_cut survives initial and replacement byte snapshots',()=>{
+  for(const text of ['', 'partial output']) {
+    const processes=new BackgroundProcesses();
+    processes.update({shell_session_id:7,status:'exited',offset:0,output_b64:b64(text),tail_cut:true});
+    assert.equal(processes.view()[0].outputTruncated,true);
+    assert.equal(processes.view()[0].output,text);
+  }
+  const processes=new BackgroundProcesses();
+  processes.update({shell_session_id:7,status:'running',offset:0,output_b64:b64('before')});
+  processes.update({shell_session_id:7,status:'exited',offset:100,output_b64:b64('after'),tail_cut:true});
+  assert.equal(processes.view()[0].outputTruncated,true);
+  assert.equal(processes.view()[0].output,'after');
+});
+
+
+test('recorded diff receipts distinguish session and turn ownership while deduplicating a repeated call',()=>{
+  const tool=(sessionId,turnId,patch)=>({kind:'tool',call:{sessionId,turnId,callId:'reused',metadata:{workspace_diff:{files:[{path:'a.ts',added:1,removed:0,patch}]}}}});
+  const parts=[tool('own','one','first'),tool('own','one','repeated'),tool('own','two','second'),tool('parent','one','parent')];
+  const own=recordedFileChanges(parts,'own');
+  assert.equal(own[0].changeCount,2);assert.equal(own[0].patch,'second');
+  assert.equal(recordedFileChanges(parts)[0].changeCount,3);
+  const unscoped=[1,2].map(turnNumber=>({kind:'tool',turnNumber,call:{callId:'same',metadata:{workspace_diff:{files:[{path:'b.ts'}]}}}}));
+  assert.equal(recordedFileChanges(unscoped)[0].changeCount,2);
+});
+
+test('recorded diff metadata rejects malformed rows and keeps invalid line counts unknown',()=>{
+  for(const invalid of [-1,1.5,NaN,Infinity,Number.MAX_SAFE_INTEGER+1,'2',null]){
+    const files=recordedFileChanges([{kind:'tool',call:{callId:'one',metadata:{workspace_diff:{files:[null,false,'path',{},[],{path:''},{path:4},{path:'a.ts',added:invalid,removed:invalid}]}}}}]);
+    assert.equal(files.length,1);assert.equal(files[0].added,undefined);assert.equal(files[0].removed,undefined);
+  }
+  const zero=recordedFileChanges([{kind:'tool',call:{callId:'one',metadata:{workspace_diff:{files:[{path:'zero.ts',added:0,removed:0}]}}}}])[0];
+  assert.equal(zero.added,0);assert.equal(zero.removed,0);
+});
+
+test('explicit legacy diff truncation is retained only when the native document marks it',()=>{
+  for(const truncated of [true,false,undefined]){
+    const files=recordedFileChanges([{kind:'tool',call:{callId:'one',metadata:{workspace_diff:{truncated,files:[{path:'a.ts',patch:'retained patch'}]}}}}]);
+    assert.equal(files[0].truncated,truncated===true?true:undefined);
+    assert.equal(Object.hasOwn(files[0],'truncated'),truncated===true);
+  }
+});

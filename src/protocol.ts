@@ -162,6 +162,7 @@ export interface PendingPrompt {
   command_id?: string;
   content?: string;
   sequence?: number;
+  disposition?: "steer";
 }
 
 export interface TurnQueueSnapshot {

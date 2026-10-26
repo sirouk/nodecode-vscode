@@ -105,33 +105,31 @@ export function activate(context: vscode.ExtensionContext): void {
     bootCwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
 
   // One `nodecode resume SID` terminal per session; reveal reuses it.
-  const revealTerminal: CommandDeps["revealTerminal"] = (sessionId: string) => {
-    void (async () => {
-      await boot();
-      const binary = cli.resolve();
-      if (!binary) {
-        void vscode.window.showErrorMessage(
-          "nodecode: CLI not found — install nodecode or set nodecode.cliPath.",
-        );
-        return;
-      }
-      const short = sessionId.length > 20 ? `${sessionId.slice(0, 20)}…` : sessionId;
-      const name = `nodecode ${short}`;
-      const existing = vscode.window.terminals.find(
-        (t) => (t.creationOptions as { name?: string } | undefined)?.name === name,
+  const revealTerminal: CommandDeps["revealTerminal"] = async (sessionId: string) => {
+    await boot();
+    const binary = cli.resolve();
+    if (!binary) {
+      void vscode.window.showErrorMessage(
+        "nodecode: CLI not found — install nodecode or set nodecode.cliPath.",
       );
-      if (existing) {
-        existing.show();
-        return;
-      }
-      const terminal = vscode.window.createTerminal({
-        name,
-        cwd: bootCwd,
-        shellPath: binary,
-        shellArgs: ["resume", sessionId],
-      });
-      terminal.show();
-    })();
+      return;
+    }
+    const short = sessionId.length > 20 ? `${sessionId.slice(0, 20)}…` : sessionId;
+    const name = `nodecode ${short}`;
+    const existing = vscode.window.terminals.find(
+      (t) => (t.creationOptions as { name?: string } | undefined)?.name === name,
+    );
+    if (existing) {
+      existing.show();
+      return;
+    }
+    const terminal = vscode.window.createTerminal({
+      name,
+      cwd: bootCwd,
+      shellPath: binary,
+      shellArgs: ["resume", sessionId],
+    });
+    terminal.show();
   };
 
   // --- panel callbacks: the webview's actions against real api/manager -------
@@ -257,15 +255,14 @@ export function activate(context: vscode.ExtensionContext): void {
       const forked = await checkpointBookmarks.fork(controller, turnId);
       SessionPanel.createOrShow(context.extensionUri, controllerFor(forked, {connect:true}), panelCallbacks, notes);
     },
-    forkSession: (sid) =>
-      void (async () => {
-        const forked = await api.forkSession(sid, undefined, bootCwd);
-        if (forked) {
-          openPanel(forked);
-        } else {
-          void vscode.window.showErrorMessage("nodecode: fork failed.");
-        }
-      })(),
+    forkSession: async (sid) => {
+      const forked = await api.forkSession(sid, undefined, bootCwd);
+      if (forked) {
+        openPanel(forked);
+      } else {
+        void vscode.window.showErrorMessage("nodecode: fork failed.");
+      }
+    },
     renameSession: async (sid, proposedName) => {
       const name = proposedName ?? await vscode.window.showInputBox({ prompt: "New name for this session" });
       if (name?.trim()) {
@@ -274,18 +271,17 @@ export function activate(context: vscode.ExtensionContext): void {
         return renamed.title || undefined;
       }
     },
-    exportSession: (sid) =>
-      void (async () => {
-        const lines = await api.exportJsonl(sid);
-        const uri = await vscode.window.showSaveDialog({
-          defaultUri: bootCwd ? vscode.Uri.file(path.join(bootCwd, `${sid}.jsonl`)) : undefined,
-          filters: { "JSON Lines": ["jsonl"], "All Files": ["*"] },
-        });
-        if (uri) {
-          await vscode.workspace.fs.writeFile(uri, Buffer.from(lines, "utf8"));
-          await vscode.window.showTextDocument(uri);
-        }
-      })(),
+    exportSession: async (sid) => {
+      const lines = await api.exportJsonl(sid);
+      const uri = await vscode.window.showSaveDialog({
+        defaultUri: bootCwd ? vscode.Uri.file(path.join(bootCwd, `${sid}.jsonl`)) : undefined,
+        filters: { "JSON Lines": ["jsonl"], "All Files": ["*"] },
+      });
+      if (uri) {
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(lines, "utf8"));
+        await vscode.window.showTextDocument(uri);
+      }
+    },
     revealTerminal: (sid) => revealTerminal(sid),
     deleteSession: async (sid) => {
       const choice = await vscode.window.showWarningMessage(
@@ -309,50 +305,52 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showErrorMessage(`Nodecode: delete failed — ${message}`);
       }
     },
-    showCheckpointHistory: (sid, controller) =>
-      void (async () => {
-        const checkpoints = await api.checkpoints(sid, 100);
-        const rows = Array.isArray(checkpoints) ? checkpoints : checkpoints.checkpoints;
-        const pick = await vscode.window.showQuickPick(
-          rows.map((c) => ({
-            label:
-              typeof c.prompt === "string"
-                ? c.prompt.replace(/\s+/g, " ").slice(0, 60)
-                : `turn ${c.turn_number ?? c.turn_id ?? "?"}`,
-            description: c.is_head ? "current" : undefined,
-            detail: String(c.turn_id ?? c.id ?? ""),
-          })),
-          { placeHolder: "Pick a checkpoint to restore (changes files)" },
-        );
-        if (pick) await controller.navigateCheckpoint({ targetTurnId: pick.detail });
-      })(),
-    pickModel: (sid, controller) =>
-      void (async () => {
-        const models = await api.models();
-        const list = Array.isArray(models) ? models : models.models;
-        const pick = await vscode.window.showQuickPick(
-          list.map((m) => ({
-            label: m.display_name ?? m.id ?? m.model ?? "unknown",
-            description: m.provider,
-          })),
-          { placeHolder: "Choose a model" },
-        );
-        if (!pick) return;
-        const chosen = list.find((m) => (m.display_name ?? m.id ?? m.model) === pick.label);
-        if (chosen) await api.setModel(sid, chosen.provider ?? null, chosen.model ?? null);
-      })(),
-    pickEffort: (sid, controller) =>
-      void (async () => {
-        const target = await api.target(sid).catch(() => undefined);
-        const ladder = [
-          ...new Set<string>([
-            ...(target?.efforts ?? []),
-            ...(target?.effort ? [target.effort] : []),
-          ]),
-        ];
-        const pick = await vscode.window.showQuickPick(ladder, { placeHolder: "Choose effort" });
-        if (pick) await api.setEffort(sid, pick);
-      })(),
+    showCheckpointHistory: async (sid, controller) => {
+      const checkpoints = await api.checkpoints(sid, 100);
+      const rows = Array.isArray(checkpoints) ? checkpoints : checkpoints.checkpoints;
+      const pick = await vscode.window.showQuickPick(
+        rows.map((c) => ({
+          label:
+            typeof c.prompt === "string"
+              ? c.prompt.replace(/\s+/g, " ").slice(0, 60)
+              : `turn ${c.turn_number ?? c.turn_id ?? "?"}`,
+          description: c.is_head ? "current" : undefined,
+          detail: String(c.turn_id ?? c.id ?? ""),
+        })),
+        { placeHolder: "Pick a checkpoint to restore (changes files)" },
+      );
+      if (pick) {
+        const result = await controller.navigateCheckpoint({ targetTurnId: pick.detail });
+        if (!result) throw new Error("Session is not connected");
+        if (result.status === "rejected") throw new Error(result.message || "Checkpoint restore rejected");
+      }
+    },
+    pickModel: async (sid, controller) => {
+      const models = await api.models();
+      const list = Array.isArray(models) ? models : models.models;
+      const pick = await vscode.window.showQuickPick(
+        list.map((m) => ({
+          label: m.display_name ?? m.id ?? m.model ?? "unknown",
+          description: m.provider,
+          target: m,
+        })),
+        { placeHolder: "Choose a model" },
+      );
+      if (!pick) return;
+      const chosen = pick.target;
+      await api.setModel(sid, chosen.provider ?? null, chosen.model ?? null);
+    },
+    pickEffort: async (sid, controller) => {
+      const target = await api.target(sid);
+      const ladder = [
+        ...new Set<string>([
+          ...(target?.efforts ?? []),
+          ...(target?.effort ? [target.effort] : []),
+        ]),
+      ];
+      const pick = await vscode.window.showQuickPick(ladder, { placeHolder: "Choose effort" });
+      if (pick) await api.setEffort(sid, pick);
+    },
     revealSessionsView: () => sidebar.showHistory(),
   };
 

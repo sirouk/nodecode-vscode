@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 const { NodecodeApi } = require('../out/api.js');
 const { RpcProcess } = require('../out/rpc.js');
 const { SessionStore } = require('../out/store.js');
+const { isReplayComplete } = require('../out/protocol.js');
 
 test('live discovered gateway: session target and actual RPC replay', { timeout: 15000 }, async t => {
   const home = process.env.NODECODE_HOME || path.join(os.homedir(), '.nodecode');
@@ -33,7 +34,7 @@ test('live discovered gateway: session target and actual RPC replay', { timeout:
       const timer = setTimeout(() => reject(new Error('No normalized session replay received within 8 seconds')), 8000);
       rpc.onFrame = frame => {
         store.applyFrame(frame);
-        if (frame.type === 'session_stream_resumed' && frame.replay_chunk_final !== false) { clearTimeout(timer); resolve(frame); }
+        if (frame.type === 'session_stream_resumed' && isReplayComplete(frame)) { clearTimeout(timer); resolve(frame); }
       };
     });
     rpc.start();

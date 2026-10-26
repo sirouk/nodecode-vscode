@@ -60,6 +60,7 @@ export class Notifications {
 export class NodecodeDiscovery {
   private lastEndpoint: GatewayEndpoint | null = null;
   private restorable = false;
+  private probeGeneration = 0;
   private timer: NodeJS.Timeout | undefined;
   private readonly emitter = new vscode.EventEmitter<GatewayEndpoint | null>();
   readonly onDidChange = this.emitter.event;
@@ -105,8 +106,9 @@ export class NodecodeDiscovery {
 
   /** Single probe pass. Never throws. */
   async probe(): Promise<GatewayEndpoint | null> {
+    const generation = ++this.probeGeneration;
     const owner = this.readOwner();
-    if (!owner || typeof owner.port !== "number") {
+    if (!owner || typeof owner.port !== "number" || !Number.isInteger(owner.port) || owner.port < 1 || owner.port > 65535) {
       this.restorable = false;
       this.setEndpoint(null);
       return null;
@@ -120,6 +122,7 @@ export class NodecodeDiscovery {
       restorable: true,
     };
     const ok = await this.ping(endpoint);
+    if (generation !== this.probeGeneration) return this.lastEndpoint;
     if (ok) {
       endpoint.restorable = false;
       this.setEndpoint(endpoint);
@@ -131,7 +134,7 @@ export class NodecodeDiscovery {
   }
 
   private ping(endpoint: GatewayEndpoint): Promise<boolean> {
-    return new Promise((resolve) => {
+    return new Promise<boolean>((resolve) => {
       const req = http.request(
         `${endpoint.baseUrl}/api/gateway/target`,
         {
@@ -150,7 +153,7 @@ export class NodecodeDiscovery {
       });
       req.on("error", () => resolve(false));
       req.end();
-    });
+    }).catch(() => false);
   }
 
   private setEndpoint(next: GatewayEndpoint | null): void {

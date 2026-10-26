@@ -6,6 +6,7 @@ import { NodecodeApi, SessionRow } from "./api";
 import { NodecodeCli } from "./cli";
 import { NodecodeDiscovery, Notifications } from "./discovery";
 import { SessionController } from "./manager";
+import { GatewayTurnCommandResult } from "./protocol";
 
 export interface CommandDeps {
   context: vscode.ExtensionContext;
@@ -15,7 +16,7 @@ export interface CommandDeps {
   notes: Notifications;
   controllerFor(sessionId: string, opts?: { connect?: boolean }): SessionController;
   openPanel(sessionId: string): void;
-  revealTerminal(sessionId: string): void;
+  revealTerminal(sessionId: string): void | Promise<void>;
   forgetController(sessionId: string): void;
   deleteSession(sessionId: string): void | Promise<void>;
   workspaceRoot(): string;
@@ -84,6 +85,12 @@ export function registerSessions(deps: CommandDeps): void {
     }
   };
 
+  const requireAccepted = async (done: Promise<GatewayTurnCommandResult> | undefined): Promise<void> => {
+    const result = await done;
+    if (!result) throw new Error("Session is not connected");
+    if (result.status === "rejected") throw new Error(result.message || "Command rejected");
+  };
+
   cmd("nodecode.refreshSessions", () => deps.showHistory());
 
   cmd("nodecode.openPanel", async (arg: unknown) => {
@@ -121,7 +128,7 @@ export function registerSessions(deps: CommandDeps): void {
 
   cmd("nodecode.focusSessionTerminal", async (arg: unknown) => {
     const sid = await sessionIdOf(deps, arg);
-    if (sid) deps.revealTerminal(sid);
+    if (sid) await deps.revealTerminal(sid);
   });
 
   cmd("nodecode.forkSession", async (arg: unknown) => {
@@ -167,13 +174,13 @@ export function registerSessions(deps: CommandDeps): void {
     const sid = await sessionIdOf(deps, arg);
     if (!sid) return;
     const controller = deps.controllerFor(sid);
-    controller.cancelActive(controller.store.view().activeTurnId);
+    await retry("cancel", () => requireAccepted(controller.cancelActive(controller.store.view().activeTurnId)?.done));
   });
 
   cmd("nodecode.undoLastTurn", async (arg: unknown) => {
     const sid = await sessionIdOf(deps, arg);
     if (!sid) return;
-    await deps.controllerFor(sid).navigateCheckpoint({ direction: "undo" });
+    await retry("undo", () => requireAccepted(deps.controllerFor(sid).navigateCheckpoint({ direction: "undo" })));
   });
 
   cmd("nodecode.pickModel", async (arg: unknown) => {
@@ -186,12 +193,13 @@ export function registerSessions(deps: CommandDeps): void {
       list.map((m) => ({
         label: m.display_name ?? m.id ?? m.model ?? "unknown",
         description: m.provider,
+        target: m,
       })),
       { placeHolder: "Choose a model for this session" },
     );
     if (!pick) return;
-    const chosen = list.find((m) => (m.display_name ?? m.id ?? m.model) === pick.label);
-    if (chosen) await retry("setModel", () => deps.api.setModel(sid, chosen.provider ?? null, chosen.model ?? null));
+    const chosen = pick.target;
+    await retry("setModel", () => deps.api.setModel(sid, chosen.provider ?? null, chosen.model ?? null));
   });
 
   cmd("nodecode.pickEffort", async (arg: unknown) => {

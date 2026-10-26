@@ -34,7 +34,10 @@ export interface ChatToolCall {
   failed?: boolean;
   done: boolean;
   streamIndex?: number;
+  turnId?: string;
   metadata?: Record<string, unknown>;
+  // Result receipt order, independent of the tool row's start position.
+  diffOrder?: number;
   status?: "running" | "done" | "failed" | "stopped" | "background";
 }
 
@@ -58,6 +61,12 @@ export interface UsageTotals {
   turns: number;
 }
 
+export interface ContextUsage {
+  input: number;
+  cached: number;
+  cacheWrite: number;
+}
+
 export interface StoreView {
   bookmarkedTurnIds: string[];
   standby?: boolean;
@@ -78,6 +87,7 @@ export interface StoreView {
   running: boolean;
   lastUsage: RpcUsage | null;
   totals: UsageTotals;
+  contextUsage: ContextUsage;
   model?: string;
   provider?: string;
   effort?: string;
@@ -162,13 +172,19 @@ export class SessionStore {
     if (this.sessionIdValue && detail.session_id !== this.sessionIdValue) return;
     if (this.standbyValue === false && detail.standby === true) return;
     this.standbyValue = detail.standby === true;
+    this.cwdValue = detail.cwd;
     this.bump();
   }
 
   private replayCompleteValue = false;
   private parts: ChatPart[] = [];
   private queueSnapshot: TurnQueueSnapshot | null = null;
+  private readonly startedPromptIds = new Set<string>();
   private lastSequence = 0;
+  private diffOrder = 0;
+  private replayFactSessionId: string | undefined;
+  private usageThrough = 0;
+  private contextUsageValue: ContextUsage = { input: 0, cached: 0, cacheWrite: 0 };
   private turnNumber = 0;
   private activeTurnId: string | null = null;
   private runningSinceTurn = false;
@@ -221,9 +237,7 @@ export class SessionStore {
         this.applyCommandResult(frame as GatewayTurnCommandResultFrame);
         return;
       case "session_input_queue_snapshot_updated":
-        this.queueSnapshot = (frame as { snapshot?: TurnQueueSnapshot }).snapshot ?? null;
-        const active = this.queueSnapshot?.active_turn;
-        if (active !== undefined) this.activeTurnId = active ?? null;
+        this.applyQueueSnapshot((frame as { snapshot?: TurnQueueSnapshot }).snapshot ?? null);
         break;
       case "session_titled":
         this.titleValue = (frame as { title?: string }).title ?? this.titleValue;
@@ -263,7 +277,8 @@ export class SessionStore {
     }
     this.replayCompleteValue = isReplayComplete(frame);
     this.sessionIdValue = frame.session_id ?? this.sessionIdValue;
-    for (const inner of frame.accumulated_frames ?? []) this.applyEvent(inner);
+    if (frame.resumed_after != null && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) this.replayFactSessionId = this.sessionIdValue;
+    for (const inner of frame.accumulated_frames ?? []) this.applyEvent(inner, true);
     if (frame.title) this.titleValue = frame.title;
     if (isReplayComplete(frame) && frame.admission_state === "ready") {
       this.runningSinceTurn = false;
@@ -272,16 +287,27 @@ export class SessionStore {
     this.bump();
   }
 
+  private applyQueueSnapshot(snapshot: TurnQueueSnapshot | null): void {
+    // Snapshot versions share a clock only with other queue snapshots, not facts.
+    if (snapshot?.version !== undefined && this.queueSnapshot?.version !== undefined && snapshot.version < this.queueSnapshot.version) return;
+    this.queueSnapshot = snapshot;
+  }
+
   private reset(): void {
     this.replayCompleteValue = false;
     this.parts = [];
     this.turnNumber = 0;
     this.queueSnapshot = null;
+    this.startedPromptIds.clear();
     this.activeTurnId = null;
     this.lastUsageValue = null;
     this.totalsValue = { input: 0, output: 0, cached: 0, total: 0, costUsd: 0, costKnown: false, turns: 0 };
     this.processes.clear();
     this.lastSequence = 0;
+    this.diffOrder = 0;
+    this.replayFactSessionId = undefined;
+    this.usageThrough = 0;
+    this.contextUsageValue = { input: 0, cached: 0, cacheWrite: 0 };
     this.durableTurnTexts = [];
     this.liveText = "";
     this.liveReasoning = "";
@@ -296,30 +322,38 @@ export class SessionStore {
 
   // ----------------------------------------------------------------- events
 
-  private applyEvent(frame: SessionStreamEventFrame): void {
+  private applyEvent(frame: SessionStreamEventFrame, replay = false): void {
     const seq = typeof frame.sequence === "number" ? frame.sequence : 0;
     if (seq && seq <= this.lastSequence) return; // replay idempotence
     if (seq) this.lastSequence = seq;
     const event = frame.event as SessionStreamEvent | undefined;
     if (!event || typeof event.type !== "string") return;
     const payload = asRecord((event as { payload?: unknown }).payload);
-    const eventSessionId = typeof frame.session_id === "string" ? frame.session_id : this.sessionIdValue;
+    // Replay wrappers name the attached stream, including its inherited facts.
+    // A creation fact starts each ancestor/session segment and names its owner.
+    const createdId = event.type === "session.created" ? asString(payload.id) : "";
+    if (replay && createdId) this.replayFactSessionId = createdId;
+    const eventSessionId = createdId || (replay ? this.replayFactSessionId : undefined) ||
+      (typeof frame.session_id === "string" ? frame.session_id : this.sessionIdValue);
+    const turnId = typeof frame.turn_id === "string" ? frame.turn_id : undefined;
     switch (event.type) {
       case "session.created": {
-        if (eventSessionId === this.sessionIdValue) this.standbyValue = false;
-        const cwd = asString(payload.cwd);
-        if (cwd) this.cwdValue = cwd;
-        const id = asString(payload.id);
-        if (id && !this.sessionIdValue) this.sessionIdValue = id;
+        if (createdId && !this.sessionIdValue) this.sessionIdValue = createdId;
+        if (eventSessionId === this.sessionIdValue) {
+          this.standbyValue = false;
+          const cwd = asString(payload.cwd);
+          if (cwd) this.cwdValue = cwd;
+        }
         break;
       }
       case "session_input_queue_snapshot_updated":
-        this.queueSnapshot = payload.snapshot as TurnQueueSnapshot ?? null;
-        this.activeTurnId = this.queueSnapshot?.active_turn ?? null;
+        this.applyQueueSnapshot(payload.snapshot as TurnQueueSnapshot ?? null);
         break;
       case "turn.input_committed": {
         // Queued inputs become conversation rows only when their started fact arrives.
         if (payload.disposition === "follow-up") break;
+        const promptId = asString(payload["prompt-id"]);
+        if (payload.disposition === "started" && promptId) this.startedPromptIds.add(promptId);
         const text = messageText(payload.message as SessionMessage | string | undefined) || asString(payload.text);
         const role = asString(payload.role) || "user";
         const images = messageImages(payload);
@@ -383,10 +417,11 @@ export class SessionStore {
         const callId = asString(payload["call-id"]);
         const name = asString(payload["tool-name"]) || "tool";
         const args = asString(payload.arguments);
-        const existing = (callId ? this.findTool(callId) : undefined) ?? this.parts.find((part): part is Extract<ChatPart, { kind: "tool" }> =>
+        const existing = (callId ? this.findTool(callId, turnId, eventSessionId) : undefined) ?? this.parts.find((part): part is Extract<ChatPart, { kind: "tool" }> =>
           part.kind === "tool" && part.turnNumber === this.turnNumber && part.call.streamIndex !== undefined && !part.call.done && part.call.name === name);
         if (existing) {
           existing.call.callId = callId || existing.call.callId;
+          if (turnId) existing.call.turnId = turnId;
           if (eventSessionId) existing.call.sessionId = eventSessionId;
           delete existing.call.streamIndex;
           existing.call.name = name;
@@ -394,7 +429,7 @@ export class SessionStore {
         } else {
           this.parts.push({
             kind: "tool",
-            call: { callId: callId || `tool-${this.parts.length}`, ...(eventSessionId ? {sessionId:eventSessionId} : {}), name, arguments: args, done: false },
+            call: { callId: callId || `tool-${this.parts.length}`, ...(turnId ? {turnId} : {}), ...(eventSessionId ? {sessionId:eventSessionId} : {}), name, arguments: args, done: false },
             turnNumber: this.turnNumber,
           });
         }
@@ -405,15 +440,18 @@ export class SessionStore {
         const failed = payload.failed === true;
         const result = asString(payload.result);
         const metadata = asRecord(payload.metadata);
+        const diffOrder = Array.isArray(asRecord(metadata.workspace_diff).files) ? ++this.diffOrder : undefined;
         const background = asRecord(metadata.background_shell);
         if (typeof background.shell_session_id === "number" && eventSessionId === this.sessionIdValue) this.processes.update({...background,tool_call_id:callId});
         const status = metadata.stopped ? "stopped" : failed ? "failed" : asRecord(metadata.background_shell).status === "running" ? "background" : "done";
         const durationMs = typeof payload["duration-ms"] === "number" ? (payload["duration-ms"] as number) : undefined;
-        const existing = callId ? this.findTool(callId) : undefined;
+        const existing = callId ? this.findTool(callId, turnId, eventSessionId) : undefined;
         if (existing) {
           if (eventSessionId) existing.call.sessionId = eventSessionId;
           existing.call.result = result;
           existing.call.metadata = metadata;
+          if (diffOrder !== undefined) existing.call.diffOrder = diffOrder;
+          else delete existing.call.diffOrder;
           existing.call.status = status;
           existing.call.failed = failed;
           if (durationMs !== undefined) existing.call.durationMs = durationMs;
@@ -423,6 +461,7 @@ export class SessionStore {
             kind: "tool",
             call: {
               callId: callId || `tool-${this.parts.length}`,
+              ...(turnId ? {turnId} : {}),
               ...(eventSessionId ? {sessionId:eventSessionId} : {}),
               name: asString(payload["tool-name"]) || "tool",
               arguments: "",
@@ -431,6 +470,7 @@ export class SessionStore {
               durationMs,
               done: true,
               metadata,
+              ...(diffOrder !== undefined ? {diffOrder} : {}),
               status,
             },
             turnNumber: this.turnNumber,
@@ -441,15 +481,18 @@ export class SessionStore {
       case "turn.usage": {
         const usage = payload as RpcUsage;
         this.lastUsageValue = usage;
+        this.totalsValue = { ...this.totalsValue, turns: this.totalsValue.turns + 1 };
+        if (seq && seq <= this.usageThrough) break;
+        if (seq) this.usageThrough = seq;
         const input = typeof usage["input-tokens"] === "number" ? (usage["input-tokens"] as number) : 0;
         const output = typeof usage["output-tokens"] === "number" ? (usage["output-tokens"] as number) : 0;
         const cached = typeof usage["cached-input-tokens"] === "number" ? (usage["cached-input-tokens"] as number) : 0;
         const total = typeof usage["total-tokens"] === "number" ? (usage["total-tokens"] as number) : 0;
-        this.totalsValue.turns += 1;
+        this.contextUsageValue = { input, cached, cacheWrite: typeof usage["cache-write-tokens"] === "number" ? usage["cache-write-tokens"] : 0 };
         this.totalsValue.output += output;
-        this.totalsValue.input = Math.max(this.totalsValue.input, input);
-        this.totalsValue.cached = Math.max(this.totalsValue.cached, cached);
-        this.totalsValue.total = Math.max(this.totalsValue.total, total);
+        this.totalsValue.input += input;
+        this.totalsValue.cached += cached;
+        this.totalsValue.total += total;
         if (usage.cost_known === true && typeof usage.cost_usd === "number") {
           this.totalsValue.costUsd += usage.cost_usd;
           this.totalsValue.costKnown = true;
@@ -461,7 +504,6 @@ export class SessionStore {
       case "turn.completed":
         this.runningSinceTurn = false;
         this.activeTurnId = null;
-        if (this.queueSnapshot) this.queueSnapshot = { ...this.queueSnapshot, active_turn: null, active_turn_steerable: false };
         this.sealLive();
         if (this.lastUsageValue?.["finish-reason"] && !["stop", "tool_calls"].includes(this.lastUsageValue["finish-reason"])) {
           this.parts.push({ kind: "system", text: `Response ended: ${this.lastUsageValue["finish-reason"]}`, level: "warn" });
@@ -470,7 +512,6 @@ export class SessionStore {
       case "turn.failed": {
         this.runningSinceTurn = false;
         this.activeTurnId = null;
-        if (this.queueSnapshot) this.queueSnapshot = { ...this.queueSnapshot, active_turn: null, active_turn_steerable: false };
         this.sealLive();
         const message = asString(payload.detail) || asString(payload.message) || "Turn failed.";
         this.parts.push({ kind: "system", text: message, level: "error" });
@@ -479,7 +520,6 @@ export class SessionStore {
       case "turn.cancelled":
         this.runningSinceTurn = false;
         this.activeTurnId = null;
-        if (this.queueSnapshot) this.queueSnapshot = { ...this.queueSnapshot, active_turn: null, active_turn_steerable: false };
         this.sealLive();
         this.parts.push({ kind: "system", text: "Turn cancelled.", level: "info" });
         break;
@@ -504,7 +544,7 @@ export class SessionStore {
         this.parts.push({ kind: "system", text: `Model fallback: ${asString(payload["from-model"])} → ${asString(payload["to-model"])}${payload.detail ? `: ${asString(payload.detail)}` : ""}`, level: "warn" });
         break;
       case "session.context.evicted":
-        this.parts.push({ kind: "system", text: `Context trimmed: ${asString(payload["turn-count"]) || "0"} turns, ${asString(payload["message-count"]) || "0"} messages; ${asString(payload["retained-message-count"]) || "0"} retained. Earlier messages remain in history.`, level: "info" });
+        this.parts.push({ kind: "system", text: `Context trimmed: ${asString(payload["evicted-turn-count"]) || "0"} turns, ${asString(payload["evicted-message-count"]) || "0"} messages; ${asString(payload["retained-message-count"]) || "0"} retained. Earlier messages remain in history.`, level: "info" });
         break;
       default:
         if (isTerminalEventType(event.type)) {
@@ -516,11 +556,12 @@ export class SessionStore {
     this.bump();
   }
 
-  private findTool(callId: string): Extract<ChatPart, { kind: "tool" }> | undefined {
+  private findTool(callId: string, turnId?: string, sessionId?: string): Extract<ChatPart, { kind: "tool" }> | undefined {
     for (let i = this.parts.length - 1; i >= 0; i -= 1) {
       const part = this.parts[i];
-      if (part.kind === "tool" && part.call.callId === callId) return part;
-      if (part.kind === "user") return undefined;
+      if (part.kind === "tool" && part.call.callId === callId &&
+          (turnId ? part.call.turnId === turnId : part.turnNumber === this.turnNumber) &&
+          (!sessionId || part.call.sessionId === sessionId)) return part;
     }
     return undefined;
   }
@@ -615,9 +656,13 @@ export class SessionStore {
       cost_known?: boolean;
       cost?: number;
     };
-    context_usage?: { model?: string };
+    context_usage?: { input?: number; cached?: number; cache_write?: number; model?: string };
+    through?: number;
   }): void {
     if (header.title) this.titleValue = header.title;
+    // Header totals cover a usage watermark, not the transcript cursor. Never
+    // roll newer rounds back, or re-add replayed rounds already in this sum.
+    if (typeof header.through === "number" && header.through < this.usageThrough) { this.bump(); return; }
     const u = header.session_usage;
     if (u) {
       this.totalsValue = {
@@ -630,7 +675,10 @@ export class SessionStore {
         turns: this.totalsValue.turns,
       };
     }
-    const model = header.context_usage?.model;
+    if (typeof header.through === "number") this.usageThrough = header.through;
+    const context = header.context_usage;
+    if (context) this.contextUsageValue = { input: context.input ?? 0, cached: context.cached ?? 0, cacheWrite: context.cache_write ?? 0 };
+    const model = context?.model;
     if (model) this.modelValue = model;
     this.bump();
   }
@@ -670,8 +718,10 @@ export class SessionStore {
 
   view(): StoreView {
     const snapshot = this.queueSnapshot;
-    const queue = snapshot && Array.isArray(snapshot.pending_prompts) ? snapshot.pending_prompts : [];
-    const activeTurnId = snapshot && snapshot.active_turn !== undefined ? (snapshot.active_turn ?? null) : this.activeTurnId;
+    const queue = snapshot && Array.isArray(snapshot.pending_prompts)
+      ? snapshot.pending_prompts.filter((prompt) => !this.startedPromptIds.has(prompt.prompt_id)) : [];
+    // Native snapshots can outlive their turn, including when sent after replay.
+    const activeTurnId = this.activeTurnId;
     const liveStreaming = this.parts.some(
       (part) => part.kind === "assistant" && part.streaming && (part.text.length > 0 || part.reasoning.length > 0),
     );
@@ -685,10 +735,11 @@ export class SessionStore {
       parts: [...this.parts],
       queue,
       activeTurnId,
-      activeTurnSteerable: snapshot?.active_turn_steerable === true,
+      activeTurnSteerable: activeTurnId !== null && (snapshot?.active_turn !== activeTurnId || snapshot.active_turn_steerable !== false),
       running: this.runningSinceTurn || activeTurnId !== null || liveStreaming,
       lastUsage: this.lastUsageValue,
       totals: this.totalsValue,
+      contextUsage: this.contextUsageValue,
       model: this.modelValue ?? (typeof this.lastUsageValue?.model === "string" ? this.lastUsageValue.model : undefined),
       provider:
         this.providerValue ?? (typeof this.lastUsageValue?.provider === "string" ? this.lastUsageValue.provider : undefined),

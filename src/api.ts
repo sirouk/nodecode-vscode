@@ -56,7 +56,7 @@ export interface SessionHeader {
   session_id: string;
   title?: string;
   session_usage?: SessionUsage;
-  context_usage?: { input?: number; cached?: number; model?: string };
+  context_usage?: { input?: number; cached?: number; cache_write?: number; model?: string };
   through?: number;
   [key: string]: unknown;
 }
@@ -171,6 +171,10 @@ export class NodecodeApi {
         },
         (res) => {
           const chunks: Buffer[] = [];
+          res.on("error", reject);
+          res.on("close", () => {
+            if (!res.complete) reject(new Error("gateway response closed before completion"));
+          });
           res.on("data", (c: Buffer) => chunks.push(c));
           res.on("end", () => {
             const text = Buffer.concat(chunks).toString("utf8");

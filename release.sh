@@ -7,7 +7,7 @@
 # - repo/branch/remote checks (must be on main, tree clean, remote in sync)
 # - tag proposal from prior vX.Y.Z tags; on the first cut (no tags yet) the
 #   proposal defaults to package.json's own version (+optional override)
-# - version consistency: package.json is bumped to the tag and the
+# - version consistency: package.json and package-lock.json are bumped to the tag and the
 #   [Unreleased] changelog entries are promoted into a [X.Y.Z] section
 # - FULL verification battery before anything is allowed to publish:
 #     tsc compile, parity probe against the local nodecode CLI, icon render
@@ -15,10 +15,10 @@
 # - package the .vsix via `npm run package`
 # - commit release commit, tag, push main+tag, publish GitHub release with the vsix
 #
-# Marketplace publishing is owned by the GitHub release: creating it triggers
+# Marketplace publishing is owned by the tag-push workflow: pushing it triggers
 # .github/workflows/publish.yml, which runs `vsce publish` with the repo's
 # VSCE_PAT secret. This script waits for that run and reports its real outcome.
-# VSCE_PUBLISH=1 publishes from the local .env instead (see the plan block).
+# VSCE_PUBLISH=1 also publishes from the local .env (see the race warning in the plan).
 #
 set -euo pipefail
 
@@ -56,8 +56,8 @@ Environment:
   GIT_REMOTE            Force the publish remote (default: guessed from upstream/origin)
   ALLOW_NON_MASTER=1    Allow cutting from a non-main branch (warns, then proceeds)
   ALLOW_VERSION_BUMP=0  Refuse to bump package.json; the version must already match the tag
-  VSCE_PUBLISH=1        Publish to the marketplace from .env instead of letting the
-                        GitHub release's publish.yml workflow do it
+  VSCE_PUBLISH=1        Also publish from .env (tag-triggered CI still runs;
+                        the publishers can race on the same version)
 EOF
 }
 
@@ -83,20 +83,11 @@ preferred_remote() {
 # missing repo secret is visible before the release is cut, not after it red-Xes.
 repo_secret_state() {
     have gh || { printf 'gh is not installed, so this run cannot check it'; return; }
-    local names environment_names
-    names="$(gh secret list --json name -q '.[].name' 2>/dev/null || true)"
-    if printf '%s\n' "$names" | grep -qx VSCE_PAT; then
+    local names
+    if ! names="$(gh secret list --json name -q '.[].name' 2>/dev/null)"; then
+        printf 'this run could not read the repository secrets'
+    elif printf '%s\n' "$names" | grep -qx VSCE_PAT; then
         printf 'VSCE_PAT repo secret is set'
-        return
-    fi
-    # publish.yml deliberately scopes VSCE_PAT to the CI environment so pull
-    # requests cannot access it. Check that scope too; otherwise the release
-    # plan would warn about a secret the publish job can use.
-    environment_names="$(gh secret list --env CI --json name -q '.[].name' 2>/dev/null || true)"
-    if printf '%s\n' "$environment_names" | grep -qx VSCE_PAT; then
-        printf 'VSCE_PAT CI environment secret is set'
-    elif [ -z "$names" ] && [ -z "$environment_names" ]; then
-        printf 'this run could not read the repo or CI environment secrets'
     else
         printf 'VSCE_PAT repo secret is NOT set — that run will fail'
     fi
@@ -187,7 +178,7 @@ gate_remote_sync() {
     if git ls-remote --exit-code --heads "$remote" "$(current_branch)" >/dev/null 2>&1; then
         remote_head="$(git ls-remote "$remote" "refs/heads/$(current_branch)" | awk '{print $1}')"
         if [ "$local_head" != "$remote_head" ]; then
-            fail "local $(current_branch) ($local_head) is not synced with $remote ($current_branch) ($remote_head) — push first"
+            fail "local $(current_branch) ($local_head) is not synced with $remote ($(current_branch)) ($remote_head) — push first"
         fi
     else
         warn "branch $(current_branch) is not yet pushed to $remote — it will be pushed at publish time"
@@ -201,6 +192,7 @@ gate_tag_conformity() {
     if [ "$pkg_version" != "${chosen#v}" ] && [ "$ALLOW_VERSION_BUMP" != "1" ]; then
         fail "package.json version ($pkg_version) does not match the release tag ($chosen); bump it first"
     fi
+    if [ ! -f package-lock.json ]; then fail "package-lock.json is missing; restore the dependency lock before releasing"; fi
     if [ ! -f CHANGELOG.md ]; then fail "CHANGELOG.md is missing"; fi
     # grep's exit codes, not -c arithmetic: a missing section is a hard signal
     # for prom the greps below, never a silent '0-line' comparison.
@@ -221,7 +213,7 @@ gate_tag_conformity() {
 # package.json would leave a dirty tree that blocks the next real cut.
 apply_release_changes() {
     local chosen="$1" dry="${2:-false}" bumped="bumped" promoted="promoted"
-    local pkg_version section
+    local pkg_version lock_version section
     if [ "$dry" = true ]; then bumped="would bump"; promoted="would promote"; fi
     pkg_version="$(node -p 'require("./package.json").version' 2>/dev/null || true)"
     VERSION_STATUS="already ${chosen#v}"
@@ -237,11 +229,31 @@ fs.writeFileSync('package.json', JSON.stringify(pj, null, 2) + String.fromCharCo
 "
         fi
     fi
+    lock_version="$(node -p 'const lock = require("./package-lock.json"); [lock.version, lock.packages[""].version].join("/")')"
+    LOCK_STATUS="already ${chosen#v}"
+    if [ "$lock_version" != "${chosen#v}/${chosen#v}" ]; then
+        LOCK_STATUS="synchronized $lock_version -> ${chosen#v}"
+        if [ "$dry" = true ]; then
+            LOCK_STATUS="would synchronize $lock_version -> ${chosen#v}"
+        else
+            node -e "
+const fs = require('fs');
+const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+lock.version = lock.packages[''].version = '${chosen#v}';
+fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + String.fromCharCode(10));
+"
+        fi
+    fi
     if grep -qE "^## \[${chosen#v}\]" CHANGELOG.md; then section=1; else section=0; fi
     CHANGELOG_STATUS="[${chosen#v}] section already written"
     if [ "$section" = "0" ]; then
         CHANGELOG_STATUS="no [${chosen#v}] section — [Unreleased] is empty, this release ships unlabelled"
-        if grep -qE '^## \[Unreleased\]' CHANGELOG.md && grep -A2 '^## \[Unreleased\]' CHANGELOG.md | grep -qE '^\s*-'; then
+        if awk '
+            !in_unreleased && /^## \[Unreleased\]/ { in_unreleased = 1; next }
+            in_unreleased && /^## / { exit }
+            in_unreleased && /^[[:space:]]*[-*+] / { found = 1 }
+            END { exit !found }
+        ' CHANGELOG.md; then
             CHANGELOG_STATUS="$promoted [Unreleased] into [${chosen#v}]"
             if [ "$dry" != true ]; then
                 log "moving [Unreleased] entries into [${chosen#v}]"
@@ -406,8 +418,8 @@ fi
 
 # ---- who publishes to the marketplace ----
 # Decided BEFORE the plan block so the plan can state what will actually happen.
-# The GitHub release triggers .github/workflows/publish.yml; publishing locally
-# as well would mean two racing publishers and one confusing failure.
+# Pushing the tag triggers .github/workflows/publish.yml; publishing locally
+# as well means two publishers and a duplicate-version failure in one of them.
 if [ -f .env ]; then
     set -a
     # shellcheck disable=SC1091
@@ -425,13 +437,13 @@ if [ "$VSCE_PUBLISH" = "1" ]; then
 fi
 
 if [ "$publish_local" = true ]; then
-    market_line="THIS SCRIPT publishes ${chosen_tag#v} from .env, before creating the release.
-             publish.yml then runs too and will report a duplicate version.
+    market_line="THIS SCRIPT publishes ${chosen_tag#v} from .env. The tag push also
+             triggers publish.yml; one publisher will report a duplicate version.
              Unset VSCE_PUBLISH to let the workflow own it."
 else
-    market_line="the GitHub release triggers .github/workflows/publish.yml, which
+    market_line="the tag push triggers .github/workflows/publish.yml, which
              runs vsce publish ($(repo_secret_state)). This script waits for
-             that run. VSCE_PUBLISH=1 publishes from .env instead."
+             that run. VSCE_PUBLISH=1 also publishes locally and can race CI."
 fi
 
 # ---- summarize ----
@@ -445,6 +457,7 @@ Release plan
   chosen:  $chosen_tag
   vsix:    $vsix_line
   version: package.json ${VERSION_STATUS}
+  lock:    package-lock.json ${LOCK_STATUS}
   changes: CHANGELOG.md ${CHANGELOG_STATUS}
 
 Next: commit + tag + push + GitHub release with the vsix asset.
@@ -459,13 +472,13 @@ commit_title="Release $chosen_tag"
 if [ "$publish_local" = true ]; then
     confirm_prompt="Commit $chosen_tag, tag it, PUBLISH TO THE PUBLIC VS CODE MARKETPLACE, and publish a GitHub release?"
 else
-    confirm_prompt="Commit $chosen_tag, tag it, and publish a GitHub release (which publishes it to the PUBLIC VS Code Marketplace)?"
+    confirm_prompt="Commit $chosen_tag, push its tag to publish to the PUBLIC VS Code Marketplace, and create a GitHub release?"
 fi
 if ! confirm "$confirm_prompt"; then
     fail "release cancelled"
 fi
 
-git add package.json CHANGELOG.md media/icon.png
+git add package.json package-lock.json CHANGELOG.md media/icon.png
 git commit -m "$commit_title" >/dev/null || fail "release commit failed"
 git tag -a "$chosen_tag" -m "$commit_title"
 
@@ -474,8 +487,8 @@ if [ -n "$git_remote" ]; then
     git push "$git_remote" "$chosen_tag"
 fi
 
-# Local publish goes FIRST when it is armed: the release event below starts the
-# workflow, and whichever publisher finishes second reports a duplicate version.
+# The tag push has already queued CI. If local publishing is armed too, the
+# publishers race and whichever finishes second reports a duplicate version.
 if [ "$publish_local" = true ]; then
     log "publishing ${chosen_tag#v} to the VS Code Marketplace from .env…"
     if VSCE_PAT="$VSCE_PAT" ./node_modules/.bin/vsce publish --packagePath "$vsix"; then
@@ -502,20 +515,20 @@ if have gh; then
     log "published GitHub release $chosen_tag with $vsix"
 else
     warn "gh not found — tag + main pushed; create the release manually with: gh release create $chosen_tag $vsix"
-    warn "creating that release is what publishes ${chosen_tag#v} to the marketplace"
+    warn "the tag push already queued the Marketplace publish workflow"
 fi
 
-# The release event queued publish.yml. Report its real outcome instead of
+# The tag push queued publish.yml. Report its real outcome instead of
 # leaving the operator to guess which of the two signals is authoritative.
 if have gh && [ "$publish_local" = true ]; then
-    log "publish.yml also runs for this release; ${chosen_tag#v} is already published, so that run will fail on the duplicate"
+    log "publish.yml also runs for this tag; check its outcome separately because local and CI publishing can race"
 elif have gh; then
     head_sha="$(git rev-parse HEAD)"
     run_id=""
     tries=0
     log "waiting for the marketplace publish workflow (Ctrl-C is safe — the release is already pushed)…"
     while [ "$tries" -lt 12 ]; do
-        run_id="$(sha="$head_sha" gh run list --workflow=publish.yml --limit=20 --json databaseId,headSha,event -q 'map(select(.headSha == env.sha and .event == "release")) | .[0].databaseId' 2>/dev/null || true)"
+        run_id="$(sha="$head_sha" tag="$chosen_tag" gh run list --workflow=publish.yml --limit=20 --json databaseId,headSha,event,headBranch -q 'map(select(.headSha == env.sha and .event == "push" and .headBranch == env.tag)) | .[0].databaseId' 2>/dev/null || true)"
         case "$run_id" in ""|null) ;; *) break ;; esac
         run_id=""
         tries=$((tries + 1))

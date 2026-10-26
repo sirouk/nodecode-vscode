@@ -308,3 +308,34 @@ test('native indexed replay omits final marker until completion and cannot publi
     assert.equal(rpc.connectionState,'connected');
   }finally{rpc.dispose();}
 });
+
+
+test('stdin failure rejects unknown commands, reconnects, and consumes retired stream errors',async()=>{
+  const {rpc,children}=harness();
+  try{
+    rpc.start();emit(children[0],{type:'session_stream_resumed',session_id:'session',cursor:9,accumulated_frames:[]});
+    const sent=rpc.sendCommand({type:'start_turn',prompt:'uncertain'});
+    assert.doesNotThrow(()=>children[0].stdin.emit('error',Object.assign(new Error('broken pipe'),{code:'EPIPE'})));
+    const result=await sent.done;
+    assert.equal(result.code,'acknowledgement_unknown');assert.match(result.message,/outcome unknown/);
+    assert.equal(rpc.connectionState,'disconnected');
+    await delay(280);assert.equal(children.length,2);
+    emit(children[1],{type:'session_stream_resumed',session_id:'session',cursor:9,accumulated_frames:[]});
+    assert.doesNotThrow(()=>children[0].stdin.emit('error',new Error('late retired pipe failure')));
+    assert.equal(rpc.connectionState,'connected');
+    rpc.stop();assert.doesNotThrow(()=>children[1].stdin.emit('error',new Error('stopped pipe failure')));
+    await delay(280);assert.equal(children.length,2);
+  }finally{rpc.dispose();}
+});
+
+test('failed detach rolls back the failing reader as well as previously detached readers',async()=>{
+  const {deleteSessionTree}=require('../out/manager.js'),calls=[];
+  const failure=new Error('Nodecode session connection did not close; deletion cancelled');
+  const controllers=new Map(['root','child'].map(id=>[id,{
+    rpc:{stopAndWait:async()=>{calls.push('close:'+id);if(id==='child')throw failure;}},
+    connect(){calls.push('reconnect:'+id);},
+  }]));
+  const api={sessions:async()=>[{id:'root'},{id:'child',parent_id:'root'}],deleteSession:async()=>{calls.push('delete');}};
+  await assert.rejects(deleteSessionTree(api,controllers,'root'),error=>error===failure);
+  assert.deepEqual(calls,['close:root','close:child','reconnect:root','reconnect:child']);
+});

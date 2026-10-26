@@ -17,8 +17,8 @@ import {
 } from "./protocol";
 import { RpcProcess, SentCommand } from "./rpc";
 import { SessionStore } from "./store";
-import { withFileReferences } from "./file-context";
-import { TextAttachmentStore, TextAttachmentChunk, MAX_PROMPT_TEXT_CHARS, appendTextFileReferences } from "./text-attachments";
+import { withFileReferences, splitFileReferences } from "./file-context";
+import { TextAttachmentStore, TextAttachmentChunk, MAX_PROMPT_TEXT_CHARS, appendTextFileReferences, splitTextFileReferences } from "./text-attachments";
 import { AttachmentSelection, FileBrowserOptions, FileBrowserListing, SelectedFileInput, browseRuntimeDirectory, readSelectedRuntimeFiles, selectedImage, MAX_SELECTED_TOTAL_BYTES } from "./file-browser";
 
 export class SessionController {
@@ -56,6 +56,10 @@ export class SessionController {
     this.rpc = new RpcProcess(cli, notes, workspaceRoot, sessionId);
     this.rpc.onFrame = (frame: RpcFrame) => {
       if (this.disposed) return;
+      if (frame.type === "session_stream_resumed" && frame.resumed_after == null && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) {
+        // A checkpoint replay can lower usage watermarks; old-branch HTTP must not win.
+        this.headerRevision++;
+      }
       this.store.applyFrame(frame);
       if (frame.type === "organism.activity" && Array.isArray(frame.sessions)) {
         this.onActivity(frame.sessions.flatMap((row: { id?: unknown }) => typeof row.id === "string" ? [row.id] : []));
@@ -155,6 +159,15 @@ export class SessionController {
   }
 
   sendPrompt(text: string, images: ImageAttachment[] = []): SentCommand | undefined {
+    const view = this.store.view();
+    if (view.running) {
+      if (!view.activeTurnSteerable || !view.activeTurnId) throw new Error("The active response cannot be steered right now. Wait or use Queue explicitly.");
+      return this.steer(view.activeTurnId, text, images);
+    }
+    return this.queuePrompt(text, images);
+  }
+
+  queuePrompt(text: string, images: ImageAttachment[] = []): SentCommand | undefined {
     const prompt = text || (images.length ? "Please examine the attached images." : "");
     return this.rpc.sendCommand({ type: "start_turn", prompt, ...this.imageContent(prompt, images) });
   }
@@ -178,26 +191,45 @@ export class SessionController {
     return id;
   }
 
-  stageTextAttachmentChunk(chunk: TextAttachmentChunk, source: object): Promise<{requestId:number; index:number; attachment?:TextFileAttachment}> {
+  async stageTextAttachmentChunk(chunk: TextAttachmentChunk, source: object): Promise<{requestId:number; index:number; attachment?:TextFileAttachment}> {
+    await this.api.assertLocalRuntimeFiles();
     return this.textAttachments.stageChunk(chunk, source);
   }
 
-  releaseTextAttachment(ref: string, source: object): void { this.textAttachments.release(ref, source); }
+  releaseTextAttachment(ref: string, source: object): Promise<void> { return this.textAttachments.release(ref, source); }
+
+  async commitTextAttachments(prompt: string, source: object): Promise<void> {
+    const files = splitTextFileReferences(splitFileReferences(prompt).text).textFiles ?? [];
+    await this.textAttachments.commit(files.map(file => file.ref), source);
+  }
+
+  async releasePreparedTextAttachments(prompt: string, source: object, keepRefs: string[] = []): Promise<void> {
+    const files = splitTextFileReferences(splitFileReferences(prompt).text).textFiles ?? [];
+    for (const file of files) if (!keepRefs.includes(file.ref)) await this.textAttachments.release(file.ref, source);
+  }
   cancelTextAttachment(requestId: number, source: object): void { this.textAttachments.cancel(requestId, source); }
   closeTextAttachments(source: object): void { this.textAttachments.close(source); }
 
   async openTextAttachment(ref: string, source: object): Promise<string> {
-    return (await this.textAttachments.resolve([ref], source, false))[0].path;
+    const historyFiles = this.store.view().parts.flatMap(part => part.kind === "user" ? part.textFiles ?? [] : []);
+    return (await this.textAttachments.resolve([ref], source, false, historyFiles))[0].path;
   }
 
   async withAttachments(text: string, files: unknown, textRefs: unknown, source: object): Promise<string> {
+    if (text.length > MAX_PROMPT_TEXT_CHARS || (Array.isArray(textRefs) && textRefs.length)) await this.api.assertLocalRuntimeFiles();
     const attachments = await this.textAttachments.resolve(textRefs, source);
-    if (text.length > MAX_PROMPT_TEXT_CHARS) {
-      attachments.push(await this.textAttachments.stage(text, "message.txt", source));
-      text = "";
+    let generated: TextFileAttachment | undefined;
+    try {
+      if (text.length > MAX_PROMPT_TEXT_CHARS) {
+        generated = await this.textAttachments.stage(text, "message.txt", source);
+        attachments.push(generated); text = "";
+      }
+      const prompt = appendTextFileReferences(text, attachments);
+      return await withFileReferences(this.workspaceRoot, prompt, files);
+    } catch (error) {
+      if (generated) await this.textAttachments.release(generated.ref, source);
+      throw error;
     }
-    const prompt = appendTextFileReferences(text, attachments);
-    return withFileReferences(this.workspaceRoot, prompt, files);
   }
 
   async browseRuntimeFiles(options: FileBrowserOptions = {}, source: object): Promise<FileBrowserListing> {
@@ -236,7 +268,7 @@ export class SessionController {
     if(texts.length)await this.api.assertLocalRuntimeFiles();
     try {
       for(const {file,text} of texts)result.textFiles.push(await this.textAttachments.stage(text,file.name,source,{origin,originalPath:file.originalPath}));
-    } catch(error) { for(const file of result.textFiles)this.textAttachments.release(file.ref,source); throw error; }
+    } catch(error) { for(const file of result.textFiles)await this.textAttachments.release(file.ref,source); throw error; }
     return result;
   }
 
@@ -330,8 +362,8 @@ export async function deleteSessionTree(
     for (const id of ids) {
       const controller = controllers.get(id);
       if (!controller) continue;
-      await controller.rpc.stopAndWait();
       detached.push(controller);
+      await controller.rpc.stopAndWait();
     }
     const result = await api.deleteSession(sessionId);
     return result.sessions;

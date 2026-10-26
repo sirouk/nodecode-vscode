@@ -6,26 +6,30 @@ export interface RecordedFileChange {
   patch?: string;
   callId: string;
   changeCount: number;
+  truncated?: true;
 }
 
 /** Latest call-scoped diff per path, never a global working-tree attribution. */
-export function recordedFileChanges(parts: Array<{kind:string; call?:{callId:string;sessionId?:string;metadata?:Record<string,unknown>}}>, sessionId?:string): RecordedFileChange[] {
+export function recordedFileChanges(parts: Array<{kind:string;turnNumber?:number;call?:{callId:string;sessionId?:string;turnId?:string;diffOrder?:number;metadata?:Record<string,unknown>}}>, sessionId?:string): RecordedFileChange[] {
   const files = new Map<string, RecordedFileChange>();
   const calls = new Map<string, Set<string>>();
-  for (const part of parts) {
+  // Tool rows stay in start order; a background result may arrive much later.
+  const ordered = [...parts].sort((a,b) => (a.call?.diffOrder ?? 0) - (b.call?.diffOrder ?? 0));
+  for (const part of ordered) {
     if (part.kind !== "tool" || !part.call) continue;
     if (sessionId && part.call.sessionId !== sessionId) continue;
-    const document = part.call.metadata?.workspace_diff as {files?:unknown} | undefined;
+    const document = part.call.metadata?.workspace_diff as {files?:unknown;truncated?:unknown} | undefined;
     if (!Array.isArray(document?.files)) continue;
     for (const value of document.files) {
-      if (!value || typeof value !== "object" || typeof value.path !== "string" || !value.path) continue;
+      if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.path !== "string" || !value.path) continue;
       const seen = calls.get(value.path) ?? new Set<string>();
-      seen.add(part.call.callId); calls.set(value.path, seen);
+      seen.add(JSON.stringify([part.call.sessionId, part.call.turnId ?? part.turnNumber, part.call.callId])); calls.set(value.path, seen);
       files.set(value.path, {
         path:value.path, callId:part.call.callId, changeCount:seen.size,
-        added:Number.isFinite(value.added) ? value.added : undefined,
-        removed:Number.isFinite(value.removed) ? value.removed : undefined,
+        added:Number.isSafeInteger(value.added) && value.added >= 0 ? value.added : undefined,
+        removed:Number.isSafeInteger(value.removed) && value.removed >= 0 ? value.removed : undefined,
         binary:value.binary === true, patch:typeof value.patch === "string" ? value.patch : undefined,
+        ...(document.truncated === true ? {truncated:true as const} : {}),
       });
     }
   }
@@ -74,7 +78,7 @@ export class BackgroundProcesses {
       const incoming = typeof process.offset === "number" && Number.isSafeInteger(process.offset) && process.offset >= 0 ? process.offset : offset + bytes.length;
       const end = offset + bytes.length;
       if (!prior || incoming > end) {
-        bytes=chunk;offset=incoming;truncated=incoming>0;
+        bytes=chunk;offset=incoming;truncated=truncated||incoming>0;
       } else if (incoming + chunk.length > end) bytes=Buffer.concat([bytes,chunk.subarray(end-incoming)]);
       if (bytes.length > MAX_OUTPUT_BYTES) {
         let drop=bytes.length-MAX_OUTPUT_BYTES;

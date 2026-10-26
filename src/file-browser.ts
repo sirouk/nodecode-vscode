@@ -46,16 +46,20 @@ export async function readSelectedRuntimeFiles(paths: string[]): Promise<Selecte
   const files:SelectedFileInput[]=[];
   for (const selected of [...new Set(paths)]) {
     const file=await realpath(selected);
-    if(!(await stat(file)).isFile())throw new Error(`Select a regular file: ${selected}`);
-    const handle=await open(file,constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    const expected=await stat(file,{bigint:true});
+    if(!expected.isFile())throw new Error(`Select a regular file: ${selected}`);
+    const handle=await open(file,constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0));
     try {
-      const info=await handle.stat();
-      if(!info.isFile())throw new Error(`Select a file, not a directory: ${selected}`);
-      if(info.size>MAX_SELECTED_FILE_BYTES)throw new Error(`${path.basename(selected)} exceeds the 12 MiB file limit.`);
-      const bytes=Buffer.alloc(Math.min(info.size+1,MAX_SELECTED_FILE_BYTES+1));
+      const opened=await handle.stat({bigint:true}),current=await realpath(selected);
+      const currentInfo=await stat(current,{bigint:true});
+      // Bind the canonical selection to the descriptor, including directory swaps.
+      if(current!==file||opened.dev!==expected.dev||opened.ino!==expected.ino||opened.dev!==currentInfo.dev||opened.ino!==currentInfo.ino)throw new Error(`${path.basename(selected)} changed while opening; select it again.`);
+      if(!opened.isFile())throw new Error(`Select a file, not a directory: ${selected}`);
+      if(opened.size>BigInt(MAX_SELECTED_FILE_BYTES))throw new Error(`${path.basename(selected)} exceeds the 12 MiB file limit.`);
+      const size=Number(opened.size),bytes=Buffer.alloc(Math.min(size+1,MAX_SELECTED_FILE_BYTES+1));
       let offset=0;
       while(offset<bytes.length){const read=await handle.read(bytes,offset,bytes.length-offset,offset);if(!read.bytesRead)break;offset+=read.bytesRead;}
-      if(offset>info.size)throw new Error(`${path.basename(selected)} changed while reading; select it again.`);
+      if(offset>size)throw new Error(`${path.basename(selected)} changed while reading; select it again.`);
       total+=offset;if(total>MAX_SELECTED_TOTAL_BYTES)throw new Error("Selected files exceed 24 MiB. Attach a smaller group.");
       files.push({name:path.basename(selected),data:bytes.subarray(0,offset),originalPath:file});
     }finally{await handle.close();}

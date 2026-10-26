@@ -37,3 +37,28 @@ test('unusable installed executable is reported instead of mistaken for gateway 
   const cli=new NodecodeCli({current:()=>null,probe:async()=>null,canRestore:false},{log(){}});cli.resolve=()=>binary;
   const status=await cli.ensureReady();assert.equal(status.reason,'unusable-cli');assert.match(status.failure,/could not start/);
 }));
+
+
+test('daemon asynchronous spawn failure is consumed and logged without claiming success',()=>{
+  const childProcess=require('node:child_process'),original=childProcess.spawn;
+  const {EventEmitter}=require('node:events'),child=new EventEmitter(),logs=[];
+  child.unref=()=>{};childProcess.spawn=()=>child;
+  const cli=new NodecodeCli({}, {log:message=>logs.push(message)});cli.resolve=()=>'/actual/nodecode';
+  try{
+    cli.ensureDaemon(true);
+    assert.doesNotThrow(()=>child.emit('error',Object.assign(new Error('not found'),{code:'ENOENT'})));
+    assert.equal(logs.filter(line=>line.startsWith('Respawned gateway')).length,0);
+    assert(logs.some(line=>line.includes('Failed to respawn gateway')&&line.includes('not found')));
+  }finally{childProcess.spawn=original;}
+});
+
+test('daemon success is logged only once the child has spawned',()=>{
+  const childProcess=require('node:child_process'),original=childProcess.spawn;
+  const {EventEmitter}=require('node:events'),child=new EventEmitter(),logs=[];
+  child.unref=()=>{};child.pid=123;childProcess.spawn=()=>child;
+  const cli=new NodecodeCli({}, {log:message=>logs.push(message)});cli.resolve=()=>'/actual/nodecode';
+  try{
+    cli.ensureDaemon(true);assert.deepEqual(logs,[]);
+    child.emit('spawn');assert.equal(logs.length,1);assert.match(logs[0],/Respawned gateway:.*pid 123/);
+  }finally{childProcess.spawn=original;}
+});

@@ -250,6 +250,18 @@ interface ListLine {
 
 export function renderMarkdown(markdown: string, container: HTMLElement, links: LinkHandlers): void {
 	container.classList.add("md");
+	renderBlocks(markdown, container, links, 0);
+}
+
+function renderBlocks(markdown: string, container: HTMLElement, links: LinkHandlers, quoteDepth: number): void {
+	// Agent output is untrusted: keep pathological quote nesting off the call
+	// stack while preserving the remaining source instead of dropping it.
+	if (quoteDepth >= 64) {
+		const p = el("p", undefined, markdown);
+		p.style.whiteSpace = "pre-wrap";
+		container.appendChild(p);
+		return;
+	}
 	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
 	let i = 0;
 	while (i < lines.length) {
@@ -357,13 +369,12 @@ export function renderMarkdown(markdown: string, container: HTMLElement, links: 
 				quoteLines.push(lines[i].replace(/^\s*>\s?/, ""));
 				i++;
 			}
-			renderMarkdown(quoteLines.join("\n"), quote, links);
-			quote.classList.remove("md");
+			renderBlocks(quoteLines.join("\n"), quote, links, quoteDepth + 1);
 			container.appendChild(quote);
 			continue;
 		}
 
-		// list (flat with indent support)
+		// list (indentation and ordered/unordered groups)
 		const listMatch = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
 		if (listMatch) {
 			const items: ListLine[] = [];
@@ -382,7 +393,7 @@ export function renderMarkdown(markdown: string, container: HTMLElement, links: 
 				items.push({ indent: m[1].length, ordered: /^\d/.test(m[2]), ...(/^\d/.test(m[2]) ? { number: parseInt(m[2], 10) } : {}), text: m[3] });
 				i++;
 			}
-			container.appendChild(buildList(items, links));
+			for (const list of buildList(items, links)) container.appendChild(list);
 			continue;
 		}
 
@@ -448,22 +459,26 @@ function tableAlignment(line: string): Array<"left" | "right" | "center" | ""> |
 	return cells.map((cell) => cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : cell.startsWith(":") ? "left" : "");
 }
 
-function buildList(items: ListLine[], links: LinkHandlers): HTMLElement {
-	const rootIsOrdered = items[0]?.ordered ?? false;
-	const root = el(rootIsOrdered ? "ol" : "ul");
-	if (rootIsOrdered && items[0]?.number !== undefined && items[0].number !== 1) (root as HTMLOListElement).start = items[0].number;
-	let currentList = root;
-	const stack: HTMLElement[] = [root];
+function buildList(items: ListLine[], links: LinkHandlers): HTMLElement[] {
+	const roots: HTMLElement[] = [];
+	const stack: Array<{ indent: number; ordered: boolean; list: HTMLElement }> = [];
 	for (const item of items) {
-		const depth = 1 + Math.floor(item.indent / 2);
-		while (stack.length > depth) stack.pop();
-		while (stack.length < depth) {
-			const nested = el(item.ordered ? "ol" : "ul");
-			const lastLi = currentList.lastElementChild ?? currentList.appendChild(el("li"));
-			lastLi.appendChild(nested);
-			stack.push(nested);
+		while (stack.length && stack[stack.length - 1].indent > item.indent) stack.pop();
+		let current = stack[stack.length - 1];
+		if (current?.indent === item.indent && current.ordered !== item.ordered) {
+			stack.pop();
+			current = stack[stack.length - 1];
 		}
-		currentList = stack[stack.length - 1];
+		if (!current || current.indent < item.indent) {
+			const list = el(item.ordered ? "ol" : "ul");
+			if (item.ordered && item.number !== undefined && item.number !== 1) (list as HTMLOListElement).start = item.number;
+			// A larger indent opens one child list, regardless of whether the
+			// source uses two, four, or more spaces. It belongs to the last item.
+			if (current) current.list.lastElementChild!.appendChild(list);
+			else roots.push(list);
+			current = { indent: item.indent, ordered: item.ordered, list };
+			stack.push(current);
+		}
 		const li = el("li");
 		const task = /^\[([ xX])\]\s+(.*)$/.exec(item.text);
 		if (task) {
@@ -472,9 +487,9 @@ function buildList(items: ListLine[], links: LinkHandlers): HTMLElement {
 			li.appendChild(checkbox); li.appendChild(document.createTextNode(" "));
 		}
 		renderInline(task ? task[2] : item.text, li, links);
-		currentList.appendChild(li);
+		current.list.appendChild(li);
 	}
-	return root;
+	return roots;
 }
 
 }

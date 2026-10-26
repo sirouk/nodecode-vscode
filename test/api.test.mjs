@@ -128,3 +128,23 @@ test('native model roles preserve explicit defaults, decider identities and fail
     assert.deepEqual(requests.at(-1),{method:'POST',url:'/api/gateway/failover/test',body:{}});
   }finally{server.close();await once(server,'close');}
 });
+
+
+test('truncated gateway response rejects instead of leaving the request pending',async()=>{
+  const server=http.createServer((req,res)=>{
+    res.writeHead(200,{'Content-Type':'application/json','Content-Length':'1000'});
+    res.write('{"partial":');
+    setTimeout(()=>res.destroy(),10);
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  let timer;
+  try{
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:''})},{log(){}});
+    const result=await Promise.race([
+      api.request('GET','/truncated',undefined,50).then(()=>({resolved:true}),error=>({error})),
+      new Promise(resolve=>{timer=setTimeout(()=>resolve({pending:true}),250);}),
+    ]);
+    assert.equal(result.pending,undefined,'request still pending after response socket was destroyed');
+    assert.match(String(result.error),/aborted|reset|closed|terminated/i);
+  }finally{clearTimeout(timer);server.close();await once(server,'close');}
+});

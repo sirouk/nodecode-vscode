@@ -12,10 +12,11 @@ import { HISTORY_MODES, HISTORY_CSS, HISTORY_TREE_JS } from "./history-controls"
 import { RUNTIME_MARKUP, RUNTIME_CLIENT_JS } from "./runtime-controls";
 import { SLASH_MARKUP, SLASH_CLIENT_JS } from "./slash-controls";
 import { ACTIVITY_CSS, ACTIVITY_CLIENT_JS } from "./activity-controls";
+import { DIFF_CSS, DIFF_CLIENT_JS } from "./diff-view";
 import { Notifications } from "./discovery";
 import { SessionController } from "./manager";
 import { StoreView } from "./store";
-import { ConnectionState, ImageAttachment } from "./protocol";
+import { ConnectionState, GatewayTurnCommandResult, ImageAttachment } from "./protocol";
 
 export interface ModelFavorite { provider: string; model: string }
 export interface ModelOptions {
@@ -48,23 +49,34 @@ export interface PanelCallbacks {
   searchFiles(query: string): Promise<Array<{ path: string; isDir: false }>>;
   openInEditor(sessionId: string): void;
   openSession(sessionId: string): void;
-  forkSession(sessionId: string): void;
+  forkSession(sessionId: string): void | Promise<void>;
   forkAtMessage(sessionId:string,turnId:string):Promise<void>;
   toggleCheckpointBookmark(sessionId:string,turnId:string):Promise<string[]>;
   renameSession(sessionId: string, name?: string): void | Promise<void | string>;
-  exportSession(sessionId: string): void;
-  revealTerminal(sessionId: string): void;
+  exportSession(sessionId: string): void | Promise<void>;
+  revealTerminal(sessionId: string): void | Promise<void>;
   deleteSession(sessionId: string): void | Promise<void>;
-  showCheckpointHistory(sessionId: string, controller: SessionController): void;
-  pickModel(sessionId: string, controller: SessionController): void;
-  pickEffort(sessionId: string, controller: SessionController): void;
+  showCheckpointHistory(sessionId: string, controller: SessionController): void | Promise<void>;
+  pickModel(sessionId: string, controller: SessionController): void | Promise<void>;
+  pickEffort(sessionId: string, controller: SessionController): void | Promise<void>;
   revealSessionsView(): void;
+}
+
+interface SendReceipt {
+  type: "sendAccepted" | "sendRejected";
+  requestId: string;
+  text?: string;
+  textFiles?: unknown;
+  message?: string;
+  outcomeUnknown?: boolean;
 }
 
 export class SessionPanel {
   static readonly viewType = "nodecode.session";
   private static readonly panels = new Map<string, SessionPanel>();
   private static readonly instances = new Set<SessionPanel>();
+  // Receipts belong to the session controller, not a replaceable webview document.
+  private static readonly sends = new WeakMap<SessionController, Map<string, { receipt: Promise<SendReceipt>; settled: boolean }>>();
 
   static createOrShow(
     extensionUri: vscode.Uri,
@@ -222,6 +234,25 @@ export class SessionPanel {
     });
   }
 
+  private async requireAccepted(done: Promise<GatewayTurnCommandResult> | undefined): Promise<GatewayTurnCommandResult> {
+    const result = await done;
+    if (!result) throw new Error("Session is not connected");
+    if (result.status === "rejected") throw new Error(result.message || "Command rejected");
+    return result;
+  }
+
+  private sendReceipt(requestId: string): Promise<SendReceipt> | undefined {
+    return SessionPanel.sends.get(this.controller)?.get(requestId)?.receipt;
+  }
+
+  private async resumeSend(requestId: string): Promise<void> {
+    const receipt = this.sendReceipt(requestId);
+    this.postMessage(receipt ? await receipt : {
+      type: "sendRejected", requestId, outcomeUnknown: true,
+      message: "Send acknowledgement is unavailable; outcome unknown. Check the conversation before retrying.",
+    });
+  }
+
   private async onMessage(message: { type?: string; [key: string]: unknown }): Promise<void> {
     if (this.disposed) return;
     const id = this.controller.sessionId;
@@ -264,7 +295,7 @@ export class SessionPanel {
           if(typeof message.requestId === "number") this.controller.cancelTextAttachment(message.requestId,this.attachmentSource);
           return;
         case "releaseTextAttachment":
-          if(typeof message.ref === "string") this.controller.releaseTextAttachment(message.ref,this.attachmentSource);
+          if(typeof message.ref === "string") await this.controller.releaseTextAttachment(message.ref,this.attachmentSource);
           return;
         case "openTextAttachment":
           if(typeof message.ref === "string") {
@@ -374,51 +405,104 @@ export class SessionPanel {
           if (this.pendingHistory) { this.pendingHistory = false; this.postMessage({type:"showSessions"}); }
           for (const text of this.pendingContext.splice(0)) this.postMessage({ type: "addContext", text });
           this.postState();
+          if (typeof message.pendingSendId === "string") await this.resumeSend(message.pendingSendId);
           return;
         case "openThread":
           if (typeof message.sessionId === "string") this.callbacks.openSession(message.sessionId);
           return;
         case "send": {
-          const text = typeof message.text === "string" ? message.text.trim() : "";
-          const images: ImageAttachment[] = Array.isArray(message.images) ? message.images.map((image: unknown) => {
-            if (!image || typeof image !== "object" || typeof (image as ImageAttachment).mediaType !== "string" || typeof (image as ImageAttachment).data !== "string") throw new Error("Invalid image attachment");
-            return image as ImageAttachment;
-          }) : [];
-          if (!text && !images.length && !(Array.isArray(message.files) && message.files.length) && !(Array.isArray(message.textFiles) && message.textFiles.length)) return;
-          const prompt = await this.controller.withAttachments(text, message.files, message.textFiles, this.attachmentSource);
-          if (message.mode === "steer" && typeof message.turnId === "string") {
-            const sent = this.controller.steer(message.turnId, prompt, images);
-            if (!sent) throw new Error("Session is not connected");
-            const result = await sent.done;
-            if (result.status === "rejected") throw new Error(result.message || "Message rejected");
-          } else {
-            const sent = this.controller.sendPrompt(prompt, images);
-            if (!sent) throw new Error("Session is not connected");
-            const result = await sent.done;
-            if (result.status === "rejected") throw new Error(result.message || "Message rejected");
+          if (typeof message.requestId !== "string" || !message.requestId) throw new Error("Missing send request identity");
+          const requestId = message.requestId;
+          let receipt = this.sendReceipt(requestId);
+          if (!receipt) {
+            const sends = SessionPanel.sends.get(this.controller) ?? new Map<string, { receipt: Promise<SendReceipt>; settled: boolean }>();
+            SessionPanel.sends.set(this.controller, sends);
+            receipt = (async (): Promise<SendReceipt> => {
+              const text = typeof message.text === "string" ? message.text.trim() : "";
+              const images: ImageAttachment[] = Array.isArray(message.images) ? message.images.map((image: unknown) => {
+                if (!image || typeof image !== "object" || typeof (image as ImageAttachment).mediaType !== "string" || typeof (image as ImageAttachment).data !== "string") throw new Error("Invalid image attachment");
+                return image as ImageAttachment;
+              }) : [];
+              if (!text && !images.length && !(Array.isArray(message.files) && message.files.length) && !(Array.isArray(message.textFiles) && message.textFiles.length)) throw new Error("Message is empty");
+              if (message.mode !== undefined && message.mode !== "steer" && message.mode !== "queue") throw new Error("Invalid send mode");
+              const view = this.controller.store.view();
+              // Capture intent before attachment reads yield; a stale steer must be rejected, never queued or retargeted.
+              let steerTurnId: string | undefined;
+              if (message.mode === "steer") {
+                if (typeof message.turnId !== "string" || !message.turnId) throw new Error("Choose an active turn to steer.");
+                steerTurnId = message.turnId;
+              } else if (message.mode !== "queue" && view.running) {
+                if (!view.activeTurnSteerable || !view.activeTurnId) throw new Error("The active response cannot be steered right now. Wait or use Queue explicitly.");
+                steerTurnId = view.activeTurnId;
+              }
+              const sendSource = {}, submittedRefs = Array.isArray(message.textFiles) ? message.textFiles.filter((ref): ref is string => typeof ref === "string") : [];
+              let prompt: string | undefined, admitted = false;
+              try {
+                prompt = await this.controller.withAttachments(text, message.files, message.textFiles, sendSource);
+                const sent = steerTurnId
+                  ? this.controller.steer(steerTurnId, prompt, images)
+                  : this.controller.queuePrompt(prompt, images);
+                const result = await sent?.done;
+                if (!result) throw new Error("Session is not connected");
+                const outcomeUnknown = result.code === "acknowledgement_unknown";
+                let warning: string | undefined;
+                if (result.status !== "rejected" || outcomeUnknown) {
+                  // Never reclaim input that Nodecode accepted or may already be reading.
+                  admitted = true;
+                  try { await this.controller.commitTextAttachments(prompt, sendSource); }
+                  catch (error) { warning = `Attachment history could not be finalized: ${String(error)}`; }
+                }
+                if (result.status === "rejected") {
+                  return { type: "sendRejected", requestId, message: [result.message || "Message rejected", warning].filter(Boolean).join(" "), outcomeUnknown };
+                }
+                for (const ref of submittedRefs) {
+                  try { await this.controller.releaseTextAttachment(ref, this.attachmentSource); }
+                  catch (error) { warning = [warning, `Attachment cleanup failed: ${String(error)}`].filter(Boolean).join(" "); }
+                }
+                return { type: "sendAccepted", requestId, text, textFiles: message.textFiles, message: warning };
+              } finally {
+                try { if (prompt !== undefined && !admitted) await this.controller.releasePreparedTextAttachments(prompt, sendSource, submittedRefs); }
+                finally { this.controller.closeTextAttachments(sendSource); }
+              }
+            })().catch((error): SendReceipt => ({type:"sendRejected",requestId,message:String(error)}));
+            const entry = { receipt, settled: false };
+            sends.set(requestId, entry);
+            // Bound completed receipts only; evicting a pending identity could submit it twice.
+            void receipt.then(() => {
+              entry.settled = true;
+              let excess = [...sends.values()].filter(value => value.settled).length - 32;
+              for (const [key, value] of sends) {
+                if (excess <= 0) break;
+                if (value.settled) { sends.delete(key); excess--; }
+              }
+            });
           }
-          for(const ref of Array.isArray(message.textFiles)?message.textFiles:[]) if(typeof ref === "string") this.controller.releaseTextAttachment(ref,this.attachmentSource);
-          this.postMessage({ type: "sendAccepted", text, textFiles:message.textFiles });
+          const result = await receipt;
+          this.postMessage(result);
+          if (result.type === "sendRejected" && result.message) {
+            this.notes.log(`panel send failed: ${result.message}`);
+          }
           return;
         }
         case "withdraw":
-          if (typeof message.promptId === "string") this.controller.withdraw(message.promptId);
+          if (typeof message.promptId === "string") await this.requireAccepted(this.controller.withdraw(message.promptId)?.done);
           return;
         case "cancel":
-          this.controller.cancelActive(typeof message.turnId === "string" ? message.turnId : undefined);
+          await this.requireAccepted(this.controller.cancelActive(typeof message.turnId === "string" ? message.turnId : undefined)?.done);
           return;
-        case "interrupt":
-          const execId=Number(message.execId);
-          if (Number.isSafeInteger(execId)) this.controller.interruptExec(execId);
+        case "interrupt": {
+          const execId = Number(message.execId);
+          if (Number.isSafeInteger(execId)) await this.requireAccepted(this.controller.interruptExec(execId)?.done);
           return;
+        }
         case "navigateUndo":
-          await this.controller.navigateCheckpoint({ direction: "undo", restoreFiles: true });
+          await this.requireAccepted(this.controller.navigateCheckpoint({ direction: "undo", restoreFiles: true }));
           return;
         case "navigateRedo":
-          await this.controller.navigateCheckpoint({ direction: "redo", restoreFiles: true });
+          await this.requireAccepted(this.controller.navigateCheckpoint({ direction: "redo", restoreFiles: true }));
           return;
         case "checkpointHistory":
-          this.callbacks.showCheckpointHistory(id, this.controller);
+          await this.callbacks.showCheckpointHistory(id, this.controller);
           return;
         case "toggleCheckpointBookmark":
           if(typeof message.turnId==="string") {
@@ -433,7 +517,7 @@ export class SessionPanel {
           }
           return;
         case "fork":
-          this.callbacks.forkSession(id);
+          await this.callbacks.forkSession(id);
           return;
         case "renameSession":
           if (typeof message.sessionId === "string" && typeof message.name === "string" && message.name.trim()) {
@@ -443,13 +527,13 @@ export class SessionPanel {
           }
           return;
         case "rename":
-          this.callbacks.renameSession(id);
+          await this.callbacks.renameSession(id);
           return;
         case "export":
-          this.callbacks.exportSession(id);
+          await this.callbacks.exportSession(id);
           return;
         case "revealTerminal":
-          this.callbacks.revealTerminal(id);
+          await this.callbacks.revealTerminal(id);
           return;
         case "deleteSession":
           if (typeof message.sessionId === "string") {
@@ -458,13 +542,13 @@ export class SessionPanel {
           }
           return;
         case "delete":
-          this.callbacks.deleteSession(id);
+          await this.callbacks.deleteSession(id);
           return;
         case "pickModel":
-          this.callbacks.pickModel(id, this.controller);
+          await this.callbacks.pickModel(id, this.controller);
           return;
         case "pickEffort":
-          this.callbacks.pickEffort(id, this.controller);
+          await this.callbacks.pickEffort(id, this.controller);
           return;
         case "requestSessions": {
           const query = typeof message.query === "string" ? message.query : "";
@@ -493,9 +577,10 @@ export class SessionPanel {
       if(["slashCatalog","slashCompletions"].includes(message.type??"")){this.postMessage({type:"slashError",requestId:message.requestId,message:String(error)});return;}
       if(message.type === "runSlash"||message.type==="slashCheckpoint"){this.postMessage({type:"slashResult",line:message.line,error:String(error)});return;}
       if(message.type === "stageTextChunk") { this.postMessage({type:"textAttachmentChunk",requestId:message.requestId,index:message.index,error:String(error)}); return; }
-      if (["modelOptions","selectModel","selectEffort","favoriteModel","selectAuxiliary","selectDecider","updateBackups","testBackups"].includes(message.type ?? "")) this.postMessage({type:"optionError",message:String(error),requestId:message.requestId});
+      if (["modelOptions","selectModel","selectEffort","selectAuxiliary","selectDecider","updateBackups","testBackups"].includes(message.type ?? "")) this.postMessage({type:"optionError",message:String(error),requestId:message.requestId});
+      if (message.type === "favoriteModel") this.postMessage({type:"modelFavoriteError",message:String(error),requestId:message.requestId});
       if (message.type === "requestSessions") this.postMessage({ type: "sessions", error: String(error), requestId: message.requestId });
-      if (message.type === "send") this.postMessage({ type: "sendRejected" });
+      if (message.type === "send") this.postMessage({ type: "sendRejected", requestId: message.requestId, message: String(error) });
       this.notes.log(`panel message ${String(message.type)} failed: ${String(error)}`);
       void vscode.window.showWarningMessage(`Nodecode: ${String(error)}`);
     }
@@ -651,7 +736,7 @@ export class SessionSidebar implements vscode.WebviewViewProvider, vscode.Dispos
 const PANEL_CSS = `
 ${ACTIVITY_CSS}
 :root{color-scheme:light dark;--bg:var(--vscode-editor-background,#171716);--fg:var(--vscode-editor-foreground,#e8e5df);--dim:var(--vscode-descriptionForeground,#99958c);--border:var(--vscode-panel-border,#373630);--surface:var(--vscode-sideBar-background,#20201d);--accent:#fa8b3e;--accentfg:#20140a;--err:var(--vscode-errorForeground,#f48771);--warn:var(--vscode-editorWarning-foreground,#cca700);--ok:var(--vscode-testing-iconPassed,#73c991)}
-*{box-sizing:border-box}html,body{height:100%;margin:0}body{background:var(--bg);color:var(--fg);font:var(--vscode-font-size,13px)/1.6 var(--vscode-font-family,system-ui,sans-serif)}button,textarea{font:inherit}button{color:inherit;cursor:pointer;background:transparent;border:1px solid transparent;border-radius:6px;padding:5px 9px;line-height:1.4}button:hover{background:var(--vscode-toolbar-hoverBackground,#ffffff10)}button:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--vscode-focusBorder,var(--accent));outline-offset:2px}button:disabled{opacity:.4;cursor:default}button.danger{color:var(--err)}button.primary{background:var(--accent);color:var(--accentfg);font-weight:650}button.primary:hover{filter:brightness(1.1)}.hidden{display:none!important}.grow{flex:1;min-width:0}.sub{font-size:11px;color:var(--dim)}#app{height:100vh;display:flex;flex-direction:column}#topbar{display:flex;align-items:center;gap:12px;min-height:54px;padding:8px 16px;border-bottom:1px solid var(--border)}.brand{display:flex;align-items:center;gap:8px;font-weight:650;letter-spacing:-.3px}.brand img{width:30px;height:30px;border-radius:6px}.title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dim)}.btns{display:flex;gap:2px}.icon{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}.icon-btn{width:30px;height:30px;padding:6px;display:inline-flex;align-items:center;justify-content:center}#menuWrap{position:relative}#menuWrap summary{list-style:none;cursor:pointer}#menuWrap summary::-webkit-details-marker{display:none}.menu{position:absolute;right:0;top:36px;z-index:4;width:205px;border:1px solid var(--border);padding:5px;border-radius:8px;background:var(--vscode-menu-background,var(--surface));box-shadow:0 8px 28px #0004}.menu button{display:block;width:100%;text-align:left;font-size:12px;padding:7px 10px}.menu hr{border:0;border-top:1px solid var(--border);margin:4px}.menu button .icon{margin-right:8px}#scroll{flex:1;min-height:0;overflow:auto;overflow-anchor:none;padding:22px 24px;scrollbar-gutter:stable}#transcript{max-width:820px;margin:0 auto}.msg{margin:0 0 22px}.msg.user{display:flex;justify-content:flex-end}.bubble{overflow-wrap:anywhere;min-width:0}.msg.user .bubble{max-width:85%;background:var(--surface);border:1px solid var(--border);border-radius:12px 12px 3px 12px;padding:10px 15px}.msg.assistant .bubble{width:100%}.speaker{display:flex;gap:7px;align-items:center;color:var(--dim);font-size:11px;font-weight:600;margin-bottom:7px}#attachments{display:flex;gap:8px;flex-wrap:wrap}.attachment{position:relative;margin:6px 0}.attachment img{width:64px;height:64px;object-fit:cover;border:1px solid var(--border);border-radius:7px}.attachment button{position:absolute;right:-6px;top:-6px;border:1px solid var(--border);border-radius:50%;background:var(--surface);font-size:12px;line-height:1;padding:3px 5px}.message-image{display:block;max-width:min(100%,480px);max-height:360px;object-fit:contain;border:1px solid var(--border);border-radius:8px;margin:8px 0}.fork-turn{font-size:10px;padding:1px 5px;color:var(--dim)}.copy-text{margin-left:auto;font-size:10px;color:var(--dim);padding:1px 5px}.reasoning summary .copy-text{float:right}.speaker img{width:20px;height:20px;border-radius:4px}.msg p{margin:8px 0}.msg p:first-child{margin-top:0}.msg p:last-child{margin-bottom:0}pre.code,pre.tool-io{background:var(--vscode-textCodeBlock-background,var(--surface));border:1px solid var(--border);border-radius:7px;padding:10px 12px;overflow:auto;font:12px/1.6 var(--vscode-editor-font-family,monospace);tab-size:2}code.inline{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 4px;font:12px var(--vscode-editor-font-family,monospace)}strong.h{font-size:15px}.li{margin-left:10px}.reasoning{border-left:2px solid var(--accent);margin:4px 0 12px;padding-left:12px;color:var(--dim)}.reasoning summary{cursor:pointer;font-size:12px;padding:3px 0}.reasoning .rbody{white-space:pre-wrap;max-height:min(calc(8 * 1.6em + 8px),var(--thought-cap,162px));overflow:auto;overflow-anchor:none;overscroll-behavior:contain;font-size:12px;padding:4px 0}.caret{display:inline-block;width:6px;height:14px;border-radius:2px;background:var(--accent);animation:blink 1s steps(1) infinite;vertical-align:middle}@keyframes blink{50%{opacity:0}}.tool{border:1px solid var(--border);border-radius:8px;margin:8px 0 16px;overflow:hidden}.tool-head{cursor:pointer;font:12px/1.6 var(--vscode-editor-font-family,monospace);padding:8px 12px;background:var(--surface)}.tool-head.running{color:var(--warn)}.tool-head.done{color:var(--dim)}.tool-diff,.tool-metadata{margin:8px 12px}.tool-diff summary,.tool-metadata summary{cursor:pointer;font-size:12px}.tool-head.failed{color:var(--err)}.tool-head.stopped,.tool-head.background{color:var(--warn)}.msg.voided{opacity:.7}.tool-sec{padding:8px 12px}.tool-label{text-transform:uppercase;font-size:10px;letter-spacing:.07em;color:var(--dim)}.tool-sec pre{max-height:320px;margin:4px 0}.sys{color:var(--dim);font-size:12px;text-align:center;margin:12px 0}.sys.warn{color:var(--warn)}.sys.error{color:var(--err)}.welcome{min-height:45vh;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;gap:9px;color:var(--dim)}.welcome img{width:92px;height:92px;border-radius:18px}.welcome h1{font-size:23px;letter-spacing:-.7px;color:var(--fg);margin:4px 0}.welcome p{max-width:330px;margin:0}.welcome small{font-size:11px;margin-top:8px}#procBar,#queueBar,#threadBar{display:flex;gap:6px;flex-wrap:wrap;padding:7px 16px;border-top:1px solid var(--border)}#procBar:empty,#queueBar:empty,#threadBar:empty{display:none}.strip-label{font-size:11px;color:var(--dim);padding:4px 3px;align-self:center}.chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:11px;max-width:100%;background:var(--surface)}.chip .cmd{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:350px}.chip button{padding:1px 4px;font-size:11px}.thread{max-width:240px;text-align:left}.thread .state{width:6px;height:6px;border-radius:50%;background:var(--dim)}.thread.running .state{background:var(--accent)}#statusLine{font-size:11px;color:var(--dim);max-width:820px;margin:auto;width:100%;display:flex;justify-content:space-between;padding:0 4px 6px;min-height:23px}.connection{display:inline-flex;align-items:center;gap:5px}.connection:before{content:'';width:6px;height:6px;border-radius:50%;background:var(--ok)}.connection.offline:before{background:var(--warn)}#composerArea{padding:10px 20px 12px}#composerBar{max-width:820px;margin:auto;border:1px solid var(--border);border-radius:12px;background:var(--vscode-input-background,var(--surface));padding:10px 12px 8px}#composerBar:focus-within{border-color:var(--accent)}#composer{display:block;width:100%;resize:none;min-height:42px;max-height:180px;overflow:auto;background:transparent;color:var(--vscode-input-foreground,var(--fg));border:0;outline:0;padding:1px 2px;font:inherit}#composer::placeholder{color:var(--vscode-input-placeholderForeground,var(--dim))}.composer-actions{display:flex;align-items:center;gap:6px;margin-top:7px}.selector{font-size:11px;color:var(--dim);padding:4px 6px;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.selector .icon{width:13px;height:13px;margin-right:4px}.composer-hint{text-align:center;color:var(--dim);font-size:10px;padding-top:6px}.mode.steering{background:var(--accent);color:var(--accentfg)}#jumpBtn{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);border:1px solid var(--border);background:var(--surface);box-shadow:0 3px 12px #0003;font-size:11px;border-radius:20px;padding:5px 12px}#conversation{flex:1;min-height:0;display:flex;position:relative;flex-direction:column}a{color:var(--vscode-textLink-foreground,#fa8b3e)}@media(max-width:480px){#topbar{padding:8px 10px;gap:9px}.brand-name{display:none}#scroll{padding:16px 12px}#composerArea{padding:8px 10px}.composer-hint{display:none}}@media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}body{background:var(--bg);color:var(--fg);font:var(--vscode-font-size,13px)/1.6 var(--vscode-font-family,system-ui,sans-serif)}button,textarea{font:inherit}button{color:inherit;cursor:pointer;background:transparent;border:1px solid transparent;border-radius:6px;padding:5px 9px;line-height:1.4}button:hover{background:var(--vscode-toolbar-hoverBackground,#ffffff10)}button:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--vscode-focusBorder,var(--accent));outline-offset:2px}button:disabled{opacity:.4;cursor:default}button.danger{color:var(--err)}button.primary{background:var(--accent);color:var(--accentfg);font-weight:650}button.primary:hover{filter:brightness(1.1)}.hidden{display:none!important}.grow{flex:1;min-width:0}.sub{font-size:11px;color:var(--dim)}#app{height:100vh;display:flex;flex-direction:column}#topbar{display:flex;align-items:center;gap:12px;min-height:54px;padding:8px 16px;border-bottom:1px solid var(--border)}.brand{display:flex;align-items:center;gap:8px;font-weight:650;letter-spacing:-.3px}.brand img{width:30px;height:30px;border-radius:6px}.title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dim)}.btns{display:flex;gap:2px}.icon{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}.icon-btn{width:30px;height:30px;padding:6px;display:inline-flex;align-items:center;justify-content:center}#menuWrap{position:relative}#menuWrap summary{list-style:none;cursor:pointer}#menuWrap summary::-webkit-details-marker{display:none}.menu{position:absolute;right:0;top:36px;z-index:4;width:205px;border:1px solid var(--border);padding:5px;border-radius:8px;background:var(--vscode-menu-background,var(--surface));box-shadow:0 8px 28px #0004}.menu button{display:block;width:100%;text-align:left;font-size:12px;padding:7px 10px}.menu hr{border:0;border-top:1px solid var(--border);margin:4px}.menu button .icon{margin-right:8px}#scroll{flex:1;min-height:0;overflow:auto;overflow-anchor:none;padding:22px 24px;scrollbar-gutter:stable}#transcript{max-width:820px;margin:0 auto}.msg{margin:0 0 22px}.msg.user{display:flex;justify-content:flex-end}.bubble{overflow-wrap:anywhere;min-width:0}.msg.user .bubble{max-width:85%;background:var(--surface);border:1px solid var(--border);border-radius:12px 12px 3px 12px;padding:10px 15px}.msg.assistant .bubble{width:100%}.speaker{display:flex;gap:7px;align-items:center;color:var(--dim);font-size:11px;font-weight:600;margin-bottom:7px}#attachments{display:flex;gap:8px;flex-wrap:wrap}.attachment{position:relative;margin:6px 0}.attachment img{width:64px;height:64px;object-fit:cover;border:1px solid var(--border);border-radius:7px}.attachment button{position:absolute;right:-6px;top:-6px;border:1px solid var(--border);border-radius:50%;background:var(--surface);font-size:12px;line-height:1;padding:3px 5px}.message-image{display:block;max-width:min(100%,480px);max-height:360px;object-fit:contain;border:1px solid var(--border);border-radius:8px;margin:8px 0}.fork-turn{font-size:10px;padding:1px 5px;color:var(--dim)}.copy-text{margin-left:auto;font-size:10px;color:var(--dim);padding:1px 5px}.reasoning summary .copy-text{float:right}.speaker img{width:20px;height:20px;border-radius:4px}.msg p{margin:8px 0}.msg p:first-child{margin-top:0}.msg p:last-child{margin-bottom:0}pre.code,pre.tool-io{background:var(--vscode-textCodeBlock-background,var(--surface));border:1px solid var(--border);border-radius:7px;padding:10px 12px;overflow:auto;font:12px/1.6 var(--vscode-editor-font-family,monospace);tab-size:2}code.inline{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 4px;font:12px var(--vscode-editor-font-family,monospace)}strong.h{font-size:15px}.li{margin-left:10px}.reasoning{border-left:2px solid var(--accent);margin:4px 0 12px;padding-left:12px;color:var(--dim)}.reasoning summary{cursor:pointer;font-size:12px;padding:3px 0}.reasoning .rbody{white-space:pre-wrap;max-height:min(calc(8 * 1.6em + 8px),var(--thought-cap,162px));overflow:auto;overflow-anchor:none;overscroll-behavior:contain;font-size:12px;padding:4px 0}.caret{display:inline-block;width:6px;height:14px;border-radius:2px;background:var(--accent);animation:blink 1s steps(1) infinite;vertical-align:middle}@keyframes blink{50%{opacity:0}}.tool{border:1px solid var(--border);border-radius:8px;margin:8px 0 16px;overflow:hidden}.tool-head{cursor:pointer;font:12px/1.6 var(--vscode-editor-font-family,monospace);padding:8px 12px;background:var(--surface)}.tool-head.running{color:var(--warn)}.tool-head.done{color:var(--dim)}.tool-diff,.tool-metadata{margin:8px 12px}.tool-diff summary,.tool-metadata summary{cursor:pointer;font-size:12px}.tool-head.failed{color:var(--err)}.tool-head.stopped,.tool-head.background{color:var(--warn)}.msg.voided{opacity:.7}.tool-sec{padding:8px 12px}.tool-label{text-transform:uppercase;font-size:10px;letter-spacing:.07em;color:var(--dim)}.tool-sec pre{max-height:320px;margin:4px 0}.sys{color:var(--dim);font-size:12px;text-align:center;margin:12px 0}.sys.warn{color:var(--warn)}.sys.error{color:var(--err)}.welcome{min-height:45vh;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;gap:9px;color:var(--dim)}.welcome img{width:92px;height:92px;border-radius:18px}.welcome h1{font-size:23px;letter-spacing:-.7px;color:var(--fg);margin:4px 0}.welcome p{max-width:330px;margin:0}.welcome small{font-size:11px;margin-top:8px}#procBar,#queueBar,#threadBar{display:flex;gap:6px;flex-wrap:wrap;padding:7px 16px;border-top:1px solid var(--border)}#procBar:empty,#queueBar:empty,#threadBar:empty{display:none}.strip-label{font-size:11px;color:var(--dim);padding:4px 3px;align-self:center}.chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:11px;max-width:100%;background:var(--surface)}.chip .cmd{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:350px}.chip button{padding:1px 4px;font-size:11px}.thread{max-width:240px;text-align:left}.thread .state{width:6px;height:6px;border-radius:50%;background:var(--dim)}.thread.running .state{background:var(--accent)}#statusLine{font-size:11px;color:var(--dim);max-width:820px;margin:auto;width:100%;display:flex;justify-content:space-between;padding:0 4px 6px;min-height:23px}.connection{display:inline-flex;align-items:center;gap:5px}.connection:before{content:'';width:6px;height:6px;border-radius:50%;background:var(--ok)}.connection.offline:before{background:var(--warn)}#composerArea{padding:10px 20px 12px}#composerBar{max-width:820px;margin:auto;border:1px solid var(--border);border-radius:12px;background:var(--vscode-input-background,var(--surface));padding:10px 12px 8px}#composerBar:focus-within{border-color:var(--accent)}#composer{display:block;width:100%;resize:none;min-height:42px;max-height:180px;overflow:auto;background:transparent;color:var(--vscode-input-foreground,var(--fg));border:0;outline:0;padding:1px 2px;font:inherit}#composer::placeholder{color:var(--vscode-input-placeholderForeground,var(--dim))}.composer-actions{display:flex;align-items:center;gap:6px;margin-top:7px}.selector{font-size:11px;color:var(--dim);padding:4px 6px;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.selector .icon{width:13px;height:13px;margin-right:4px}.composer-hint{text-align:center;color:var(--dim);font-size:10px;padding-top:6px}#jumpBtn{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);border:1px solid var(--border);background:var(--surface);box-shadow:0 3px 12px #0003;font-size:11px;border-radius:20px;padding:5px 12px}#conversation{flex:1;min-height:0;display:flex;position:relative;flex-direction:column}a{color:var(--vscode-textLink-foreground,#fa8b3e)}@media(max-width:480px){#topbar{padding:8px 10px;gap:9px}.brand-name{display:none}#scroll{padding:16px 12px}#composerArea{padding:8px 10px}.composer-hint{display:none}}@media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
 #commandResult{max-height:230px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:auto}#commandBody{padding:6px 10px}.command-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px}.command-tabs [aria-pressed="true"]{background:var(--surface);border-color:var(--border)}.command-row{display:flex;gap:4px}.command-row>button:first-child{flex:1;text-align:left}.command-row .sub,.file-option .sub{display:block;font-size:11px}#runtimeBanner{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--warn);font-size:12px}#runtimeBanner>div{display:flex;gap:6px;margin-top:5px}#historyEarlier{display:block;margin:0 auto 16px;font-size:12px;color:var(--dim)}#topbar{position:relative}.title-button{display:block;max-width:100%;padding:2px 0;border:0;text-align:left;color:var(--fg);font-weight:600;font-size:13px}.title-input,.session-rename-input{width:100%;min-width:0;background:var(--vscode-input-background,var(--surface));color:var(--fg);border:1px solid var(--vscode-focusBorder,var(--accent));border-radius:4px;padding:4px 6px;font:inherit}.session-rename-input{flex:1}.session-rename{flex-shrink:0;width:28px;height:28px;padding:5px;color:var(--dim)}.session-rename .icon{width:14px;height:14px}#sessionPickerWrap{position:static}#sessionPicker{position:absolute;z-index:5;top:calc(100% - 4px);right:10px;width:min(320px,calc(100vw - 24px));border:1px solid var(--border);border-radius:8px;background:var(--vscode-menu-background,var(--surface));box-shadow:0 8px 28px #0004;padding:5px}.history-search{display:block;width:calc(100% - 12px);margin:3px 6px 5px;padding:6px 8px;background:var(--vscode-input-background,var(--bg));color:var(--fg);border:1px solid var(--border);border-radius:5px;font:inherit;font-size:12px}.history-search:focus{outline:1px solid var(--vscode-focusBorder,var(--accent))}.history-status{font-size:11px;color:var(--dim);padding:0 8px 4px}.session-match{white-space:normal!important;display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:3px;font-size:11px;color:var(--dim)}.picker-heading{display:flex;align-items:center;justify-content:space-between;padding:3px 7px;font-size:12px;color:var(--dim)}#sessionChoices{max-height:min(360px,50vh);overflow:auto;overscroll-behavior:contain}.session-row{display:flex;align-items:center;gap:3px}.session-choice{display:block;flex:1;min-width:0;width:100%;text-align:left;padding:8px;border-radius:5px}.session-delete{flex-shrink:0;width:28px;height:28px;padding:5px;color:var(--dim)}.session-delete:hover{color:var(--err)}.session-choice[aria-current="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.session-choice span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.session-choice .sub{margin-top:2px}.welcome #sessionPickerWrap{position:relative}.welcome #sessionPicker{top:auto;bottom:36px;right:50%;transform:translateX(50%);text-align:left}#composerBar{position:relative}#filePicker{position:fixed;top:0;left:0;width:320px;max-height:180px;overflow:auto;z-index:5;background:var(--vscode-menu-background,var(--surface));border:1px solid var(--border);border-radius:8px;padding:4px;box-shadow:0 8px 28px #0004}#optionPicker{display:flex;flex-direction:column;max-height:calc(100vh - 16px);position:fixed;width:340px;max-width:calc(100vw - 16px);z-index:6;background:var(--vscode-menu-background,var(--surface));border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 28px #0004;padding:5px}.model-role-tabs{display:flex;flex-shrink:0;border-top:1px solid var(--border);padding-top:5px;gap:3px}.model-role-tabs button{flex:1;font-size:12px}.model-role-tabs [aria-selected="true"]{background:var(--surface);color:var(--accent)}.backup-row{display:flex;gap:3px;align-items:center;padding:5px}.backup-row>span{flex:1;min-width:0;overflow-wrap:anywhere}.backup-row .sub{display:block}.backup-row button{flex-shrink:0}.backup-trigger{display:flex;gap:7px;align-items:center;padding:5px 8px}.role-default{width:100%;text-align:left;padding:7px}.role-efforts{display:flex;gap:3px;flex-wrap:wrap;padding:5px}.aux-effort-list{flex-direction:column}.aux-effort-list button{width:100%;text-align:left}.role-efforts [aria-pressed="true"]{color:var(--accent);border:1px solid var(--border)}#optionChoices{min-height:0;max-height:280px;overflow:auto;overscroll-behavior:contain}.option-note{font-size:10px;color:var(--dim);padding:7px}.option-row{display:flex;align-items:center;gap:4px}.decider-choice,.reasoning-choice{display:block;width:100%;text-align:left}.option-select{min-width:0;flex:1;text-align:left;padding:7px}.option-select span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.option-select[aria-current="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.option-star{flex-shrink:0;padding:6px}.option-star[aria-pressed="true"]{color:var(--accent)}.option-group{font-size:11px;color:var(--dim);padding:6px 8px 2px}#imagePreview{position:fixed;inset:0;z-index:20;background:#000b;display:flex;align-items:center;justify-content:center;padding:36px}#imagePreview img{max-width:100%;max-height:100%;object-fit:contain}#closeImagePreview{position:absolute;right:10px;top:10px;font-size:24px;color:white}.attachment img,.message-image{cursor:zoom-in}#textAttachments{display:flex;flex-wrap:wrap;gap:6px}.text-attachment{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);border-radius:5px;padding:3px 6px;font-size:11px;max-width:100%}.text-attachment button{padding:1px 3px}.text-attachment .text-file-open{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-attachment.failed{border-color:var(--err)}.file-option{width:100%;text-align:left;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-option[aria-selected="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.message-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}.message-file{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:11px;color:var(--dim)}#fileReferences{display:flex;flex-wrap:wrap;gap:5px}.file-reference{display:inline-flex;align-items:center;max-width:100%;gap:4px;margin:4px 0;border:1px solid var(--border);border-radius:5px;padding:2px 5px;font-size:11px}.file-reference span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-reference button{padding:0 3px}.picker-message{padding:14px 8px;color:var(--dim);font-size:12px}
 .md p {
 	margin: 0.35em 0;
@@ -807,6 +892,7 @@ function actionButton(id: string, label: string, symbol: string, extra = ""): st
   return '<button id="' + id + '" title="' + label + '" aria-label="' + label + '" class="icon-btn ' + extra + '">' + icon(symbol) + '</button>';
 }
 const MESSAGE_CSS = `
+${DIFF_CSS}
 #transcript{width:100%;max-width:none}.msg.assistant .bubble{display:block;position:relative}.message-avatar{position:absolute;left:-19px;top:2px;width:15px;height:15px;border-radius:3px}.assistant-content{position:relative;min-width:0;width:100%;padding:0}.msg.user .bubble{max-width:90%}.msg.user .bubble{position:relative;padding-right:36px}.message-actions{position:absolute;z-index:1;right:0;top:0;background:var(--bg);border-radius:4px;display:flex;align-items:center;gap:2px;opacity:0;pointer-events:none}.msg.assistant .message-actions{top:-21px}.msg.user .message-actions{right:6px;top:7px}.bookmark-turn.saved .icon{fill:var(--accent);stroke:var(--accent)}.copy-text,.fork-turn,.bookmark-turn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:2px;margin:0}.copy-text .icon,.fork-turn .icon,.bookmark-turn .icon{width:14px;height:14px}.reasoning summary{position:relative;padding-right:23px}.reasoning summary>.copy-text{position:absolute;right:0;top:3px;opacity:0;pointer-events:none}.msg:hover:not(:has(.reasoning:hover,.codeblock:hover)) .message-actions,.msg:focus-within:not(:has(.reasoning:focus-within,.codeblock:focus-within)) .message-actions,.message-actions:focus-within{opacity:1;pointer-events:auto}.reasoning:hover>summary>.copy-text,.reasoning:focus-within>summary>.copy-text{opacity:1;pointer-events:auto}.codeblock-copy{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;opacity:0;pointer-events:none;padding:2px}.codeblock-copy svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7}.codeblock:hover .codeblock-copy,.codeblock:focus-within .codeblock-copy{opacity:1;pointer-events:auto}@media(max-width:480px){#scroll{padding-left:24px}}@media(hover:none){.message-actions,.reasoning summary>.copy-text,.codeblock-copy{opacity:1;pointer-events:auto}}
 `;
 const PANEL_BODY = `
@@ -844,7 +930,7 @@ const PANEL_BODY = `
   <div id="conversation"><div id="scroll"><button id="historyEarlier" class="hidden">Load earlier messages</button><div id="transcript"></div></div><button id="jumpBtn" class="hidden">↓ Latest message</button></div>
   <div id="threadBar" aria-label="Related threads"></div>
   <div id="fileBar" aria-label="Session file changes"></div>
-  <div id="queueBar" aria-label="Queued prompts"></div>
+  <div id="queueBar" aria-label="Pending messages"></div>
   <div id="composerArea">
     ${SLASH_MARKUP}
     <div id="statusLine" role="status" aria-live="polite"></div>
@@ -860,12 +946,12 @@ const PANEL_BODY = `
         <button id="modelBtn" class="selector" title="Choose model">${icon("model")}<span id="modelLabel">Choose model</span></button>
         <button id="effortBtn" class="selector" title="Choose effort">${icon("effort")}<span id="effortLabel">Effort</span></button>
         <span class="grow"></span>
-        <button id="steerBtn" class="mode hidden" title="Steer the active turn" aria-pressed="false">Steer</button>
+        <button id="queueBtn" class="mode hidden" title="Queue for after the current response finishes">Queue</button>
         ${actionButton("cancelBtn", "Stop active turn", "stop", "hidden")}
         ${actionButton("sendBtn", "Send message", "send", "primary")}
       </div>
     </footer>
-    <div class="composer-hint">Enter to send · Shift+Enter for a new line · @ for files</div>
+    <div id="composerHint" class="composer-hint">Enter to send · Shift+Enter for a new line · @ for files</div>
   </div>
 </div>
 <div id="imagePreview" class="hidden" role="dialog" aria-label="Image preview"><button id="closeImagePreview" aria-label="Close image preview">×</button><img id="imagePreviewContent" alt="Attachment preview"></div>
@@ -877,11 +963,12 @@ const CLIENT_JS = String.raw`
   var state = { view: null, connection: 'connecting', attempts: 0, history: [] };
   var attachments = [],pendingReads=0;
   var forkingTurns={},bookmarkingTurns={};
-  var steerMode = false;
   var sending = false;
   var sessionId = __SESSION_ID__;
   var persisted = vscode.getState() || {};
   var saved = (persisted.sessions || {})[sessionId] || {};
+  var pendingSend = saved.pendingSend || null;
+  sending = !!pendingSend;
   attachments=Array.isArray(saved.images)?saved.images:[];
   var textFiles=Array.isArray(saved.textFiles)?saved.textFiles:[],textRequest=Date.now(),textFileCount=textFiles.length,restoredTextStarted=false;
   var files=[],inlineRefs=Array.isArray(saved.inlineRefs)?saved.inlineRefs.filter(function(ref){return ref&&typeof ref.path==='string'&&Number.isInteger(ref.start)&&Number.isInteger(ref.end);}):[],referenceText=saved.draft||'',referenceEdit=null;
@@ -889,9 +976,10 @@ const CLIENT_JS = String.raw`
   var fileQuery = null, fileResults = [], fileIndex = 0, fileRequest = 0, fileTimer;
   var historyRequest=0,historyTimer,historyRows=[],historyMode='lineage',historyLast=[],historyRestoreScroll=0;
   ${HISTORY_TREE_JS}
-  var optionKind=null,optionRequest=0,optionApplying=false,modelRows=[],modelFavorites=[],modelTarget={},modelContext={},favoriteRequest=0;
+  var optionKind=null,optionRequest=0,optionApplying=false,modelRows=[],modelFavorites=[],modelTarget={},modelContext={},favoriteRequest=0,favoritePending=false;
   var expanded = saved.expanded || {};
   var paneScroll = {};
+  var diffScroll = saved.diffScroll || {};
   var followLatest = true;
   var firstRender = true;
   var visibleStart = null, loadingEarlier = false, historyExpanded = saved.historyExpanded === true;
@@ -899,7 +987,7 @@ const CLIENT_JS = String.raw`
   var histIdx = -1;
   function E(id){ return document.getElementById(id); }
   var transcript = E('transcript'), scrollBox = E('scroll'), composer = E('composer'),
-      sendBtn = E('sendBtn'), cancelBtn = E('cancelBtn'), steerBtn = E('steerBtn'),
+      sendBtn = E('sendBtn'), cancelBtn = E('cancelBtn'), queueBtn = E('queueBtn'),
       statusLine = E('statusLine'), titleEl = E('title'), modelEl = E('modelLine'),
       queueBar = E('queueBar'), procBar = E('procBar');
   window.addEventListener('message', function(ev){
@@ -909,7 +997,8 @@ const CLIENT_JS = String.raw`
     if(m.type==='forkFinished'){delete forkingTurns[m.turnId];renderAll(followLatest);return;}
     if(m.type==='textAttachmentChunk'){receiveTextChunk(m);return;}
     if(m.type==='modelOptions'){if(m.requestId===optionRequest&&optionKind){modelRows=m.models||[];modelFavorites=m.favorites||[];modelTarget=m.target||{};modelContext=m.context||{};receiveRoleOptions(m);renderOptions();}return;}
-    if(m.type==='modelFavorites'){if(m.requestId!==undefined&&m.requestId!==favoriteRequest)return;modelFavorites=m.favorites||[];if(optionKind==='model'&&!optionApplying)renderOptions();return;}
+    if(m.type==='modelFavorites'){if(m.requestId!==undefined&&m.requestId!==favoriteRequest)return;favoritePending=false;modelFavorites=m.favorites||[];if(optionKind==='model'&&!optionApplying)renderOptions();return;}
+    if(m.type==='modelFavoriteError'){if(m.requestId!==favoriteRequest)return;favoritePending=false;if(optionKind==='model'&&!optionApplying){renderOptions();E('optionStatus').textContent=m.message;}return;}
     if(m.type==='optionApplied'){if(m.requestId!==undefined&&m.requestId!==optionRequest)return;setOptionBusy(false);if(m.warning){E('optionStatus').textContent=m.warning;E('optionChoices').querySelectorAll('button').forEach(function(b){b.disabled=false;});}else closeOptions(true);return;}
     if(m.type==='optionError'){if(m.requestId!==undefined&&m.requestId!==optionRequest)return;setOptionBusy(false);renderOptions();E('optionStatus').textContent=m.message;return;}
     if (m.type === 'fileSearchResults') { if(m.requestId===fileRequest && fileQuery) renderFileResults(m); return; }
@@ -920,8 +1009,24 @@ const CLIENT_JS = String.raw`
     if (m.type === 'sessions') { renderSessionChoices(m); return; }
     if (m.type === 'addContext') { composer.value += (composer.value ? '\n\n' : '') + m.text; grow(); saveDraft(); composer.focus(); renderAll(nearBottom()); return; }
     if (m.type === 'sendAccepted' || m.type === 'sendRejected') {
+      if (!pendingSend || m.requestId !== pendingSend.id) return;
+      var sent = pendingSend;
+      pendingSend = null;
       sending = false;
-      if (m.type === 'sendAccepted') { E('attachmentError').classList.add('hidden');attachments = []; textFiles=textFiles.filter(function(f){return !(m.textFiles||[]).includes(f.attachment&&f.attachment.ref);}); renderAttachments(); renderTextFiles(); renderFileReferences(); if (composer.value.trim() === m.text) { composer.value = '';files=[];inlineRefs=[];referenceText='';grow(); } saveDraft(); }
+      if (m.type === 'sendAccepted') {
+        E('attachmentError').classList.add('hidden');
+        // Remove only the submitted snapshot; edits made while awaiting the receipt survive.
+        (sent.images||[]).forEach(function(image){var i=attachments.findIndex(function(a){return a.data===image.data&&a.mediaType===image.mediaType;});if(i>=0)attachments.splice(i,1);});
+        textFiles=textFiles.filter(function(f){return !(sent.textFiles||[]).includes(f.attachment&&f.attachment.ref);});
+        renderAttachments(); renderTextFiles();
+        if (composer.value.trim() === sent.text) { composer.value='';files=[];inlineRefs=[];referenceText='';grow(); }
+        renderFileReferences();
+      }
+      if(m.message) {
+        E('attachmentError').textContent=m.message;
+        E('attachmentError').classList.remove('hidden');
+      }
+      saveDraft();
       renderAll(nearBottom());
       return;
     }
@@ -951,7 +1056,9 @@ const CLIENT_JS = String.raw`
       el.removeAttribute('data-markdown');
     });
   }
-  function toolHtml(call){
+  ${DIFF_CLIENT_JS}
+  function toolHtml(call,turnNumber){
+    var callKey=JSON.stringify([call.sessionId||sessionId,call.turnId===undefined?turnNumber:call.turnId,call.callId]);
     var status = call.status || (call.done ? (call.failed ? 'failed' : 'done') : 'running');
     var body = '';
     if (call.arguments) body += '<div class="tool-sec"><div class="tool-label">Input</div><pre class="tool-io">' + esc(call.arguments) + '</pre></div>';
@@ -960,10 +1067,12 @@ const CLIENT_JS = String.raw`
     if(metadata.snippet&&metadata.snippet.note)body+='<div class="tool-sec sub">'+esc(metadata.snippet.note)+'</div>';
     if(shell)body+='<div class="tool-sec sub">'+esc(['Background process',shell.status,typeof shell.exit_code==='number'?'exit '+shell.exit_code:''].filter(Boolean).join(' · '))+'</div>';
     var diff=metadata.workspace_diff;
-    if(diff&&Array.isArray(diff.files))body+=diff.files.map(function(file,i){return '<details class="tool-diff" data-detail="diff-'+esc(call.callId)+'-'+i+'"><summary>'+esc(file.path)+' <span class="sub">+'+esc(file.added)+' / −'+esc(file.removed)+(file.binary?' · binary':'')+'</span></summary>'+(file.patch?'<pre class="tool-io">'+esc(file.patch)+'</pre>':'<div class="sub">'+(file.binary?'Binary file changed':'No textual patch supplied')+'</div>')+'</details>';}).join('');
-    if(Object.keys(metadata).length)body+='<details class="tool-metadata" data-detail="metadata-'+esc(call.callId)+'"><summary>Result details</summary><pre class="tool-io">'+esc(JSON.stringify(metadata,null,2))+'</pre></details>';
+    var changed=diffFiles(diff);
+    var pathOccurrences=new Map();
+    if(changed.length)body+='<div class="diff-caption">Recorded changes · '+changed.length+' file'+(changed.length===1?'':'s')+'</div>'+changed.map(function(file){var occurrence=pathOccurrences.get(file.path)||0;pathOccurrences.set(file.path,occurrence+1);return diffFileHtml(file,'diff:'+callKey+':'+JSON.stringify([file.path,occurrence]),'tool-diff','');}).join('');
+    if(Object.keys(metadata).length)body+='<details class="tool-metadata" data-detail="metadata-'+esc(callKey)+'"><summary>Result details</summary><pre class="tool-io">'+esc(JSON.stringify(metadata,null,2))+'</pre></details>';
     if (call.result && !(image && call.imageUrl && call.imageUrl.startsWith('data:image/png'))) body += '<div class="tool-sec"><div class="tool-label">' + (call.failed ? 'Error' : 'Output') + '</div><pre class="tool-io">' + esc(call.result) + '</pre></div>';
-    return '<details class="tool" data-detail="tool-' + esc(call.callId) + '"><summary class="tool-head ' + status + '">' + esc(call.name) + ' <span class="sub">' + status + (call.durationMs != null ? ' · ' + call.durationMs + ' ms' : '') + '</span></summary>' + body + '</details>';
+    return '<details class="tool" data-detail="tool-' + esc(callKey) + '"><summary class="tool-head ' + status + '">' + esc(call.name) + ' <span class="sub">' + status + (call.durationMs != null ? ' · ' + call.durationMs + ' ms' : '') + '</span></summary>' + body + '</details>';
   }
   function imageHtml(part){ return (part.images || []).map(function(image){return '<img class="message-image" src="' + esc(image.url) + '" alt="Conversation image" loading="lazy">';}).join(''); }
   function textFileHtml(part){return (part.textFiles||[]).map(function(file){return '<button class="message-file" data-a="openTextAttachment" data-p="'+esc(file.ref)+'" title="'+esc(file.name)+' · '+file.byteLength+' bytes">'+esc(file.name)+'</button>';}).join('');}
@@ -977,11 +1086,11 @@ const CLIENT_JS = String.raw`
       var caret = part.streaming ? '<span class="caret"></span>' : '';
       return '<div class="msg assistant' + (part.voided ? ' voided' : '') + '"><div class="bubble"><img class="message-avatar" src="__MARK_URI__" alt="Nodecode"><div class="assistant-content"><div class="message-actions"><button class="copy-text" data-a="copyReply" data-p="' + index + '" aria-label="Copy reply and thought process" title="Copy reply and thought process">${icon('copy')}</button><span class="message-fork">'+forkHtml(part)+'</span></div>' + r + '<div class="reply-text">' + (part.text ? md(part.text) : '') + '</div><div class="reply-images">' + imageHtml(part) + '</div><span class="reply-caret">' + caret + '</span>' + '</div></div></div>';
     }
-    if (part.kind === 'tool') return toolHtml(part.call);
+    if (part.kind === 'tool') return toolHtml(part.call,part.turnNumber);
     if (part.kind === 'system') return '<div class="sys ' + esc(part.level || 'info') + '">' + (part.childSessionId?'<button data-a="openThread" data-p="'+esc(part.childSessionId)+'">'+esc(part.text)+'</button>':esc(part.text)) + '</div>';
     return '';
   }
-  function saveDraft(){ reconcileInlineReferences();persisted.sessions = persisted.sessions || {}; persisted.sessions[sessionId] = { draft: composer.value, inlineRefs:inlineRefs.map(function(ref){return {path:ref.path,start:ref.start,end:ref.end};}),files:files.slice(), images:attachments, textFiles:textFiles.map(function(f){return {requestId:f.requestId,name:f.name,text:f.text,byteLength:f.byteLength,attachment:f.attachment,error:f.error};}), expanded: expanded, visibleStart:visibleStart, historyExpanded:historyExpanded, scrollTop: scrollBox.scrollTop }; vscode.setState(persisted); }
+  function saveDraft(){ reconcileInlineReferences();persisted.sessions = persisted.sessions || {}; persisted.sessions[sessionId] = { pendingSend: pendingSend, draft: composer.value, inlineRefs:inlineRefs.map(function(ref){return {path:ref.path,start:ref.start,end:ref.end};}),files:files.slice(), images:attachments, textFiles:textFiles.map(function(f){return {requestId:f.requestId,name:f.name,text:f.text,byteLength:f.byteLength,attachment:f.attachment,error:f.error};}), expanded: expanded, diffScroll:diffScroll, visibleStart:visibleStart, historyExpanded:historyExpanded, scrollTop: scrollBox.scrollTop }; vscode.setState(persisted); }
   function hasSelection(pane){
     var selection = window.getSelection();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
@@ -1097,6 +1206,7 @@ const CLIENT_JS = String.raw`
     scrollBox._lastTop=scrollBox.scrollTop;
   }
   function renderTranscript(parts){
+    var diffFocus = rememberDiffFocus(transcript);
     var oldTop = scrollBox.scrollTop;
     var anchor = Array.from(transcript.children).find(function(node){return node.getBoundingClientRect().bottom>scrollBox.getBoundingClientRect().top;});
     var anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
@@ -1139,6 +1249,7 @@ const CLIENT_JS = String.raw`
           }
           node._text = part.text; node._images = JSON.stringify(part.images || []);
         }
+        restoreDiffState(node);
         node._html = html; node._kind = part.kind;
       }
     });
@@ -1147,6 +1258,7 @@ const CLIENT_JS = String.raw`
       el.open = !!expanded[el.dataset.detail];
       el.querySelectorAll('pre').forEach(function(pane, i){ var pos = paneScroll[el.dataset.detail + '-' + i]; if (pos) { pane.scrollTop = pos[0]; pane.scrollLeft = pos[1]; } });
     });
+    restoreDiffState(transcript);restoreDiffFocus(transcript,diffFocus);
     scrollBox.scrollTop = anchor && anchor.isConnected && !followLatest ? oldTop+anchor.getBoundingClientRect().top-anchorTop : oldTop;
     scrollBox._lastTop = scrollBox.scrollTop;
   }
@@ -1222,8 +1334,21 @@ const CLIENT_JS = String.raw`
   E('sessionSearch').addEventListener('keydown',function(ev){if(ev.key==='ArrowDown'){var first=E('sessionChoices').querySelector('button');if(first){ev.preventDefault();first.focus();}}});
   E('closeSessions').addEventListener('click',function(){closeSessions(true);});
   document.addEventListener('click',function(ev){if(!ev.composedPath().includes(E('sessionPickerWrap')))closeSessions(false);});
-  function chip(label, action, payload, actionLabel){
-    return '<span class="chip"><span class="cmd">' + esc(label) + '</span><button data-a="' + action + '" data-p="' + esc(payload) + '">' + actionLabel + '</button></span>';
+  function chip(label, action, payload, actionLabel, title){
+    return '<span class="chip" title="' + esc(title) + '"><span class="cmd">' + esc(label) + '</span><button data-a="' + action + '" data-p="' + esc(payload) + '">' + actionLabel + '</button></span>';
+  }
+  function updateSendControls(){
+    var view=state.view||{},active=!!(view.running||view.activeTurnId),steerable=!!(view.activeTurnSteerable&&view.activeTurnId),slash=composer.value.trim().startsWith('/');
+    var blocked=sending||pendingReads>0||textFiles.some(function(f){return !f.attachment||f.error;})||(!composer.value.trim()&&!attachments.length&&!files.length&&!textFiles.length)||state.connection!=='connected'||!state.view||view.replayComplete===false;
+    sendBtn.disabled=blocked||(active&&!steerable&&!slash);
+    queueBtn.disabled=blocked||slash;
+    queueBtn.className=active?'mode':'mode hidden';
+    var label=sending?'Sending…':slash?'Run command':active?(steerable?'Steer active response':'Steering unavailable; wait or use Queue'):'Send message';
+    sendBtn.title=label;
+    sendBtn.setAttribute('aria-label',label);
+    E('attachBtn').disabled=sending;
+    E('composerHint').textContent=active?(steerable?'Enter to steer · Queue for later · Shift+Enter for a new line':'Steering unavailable · Queue waits until work finishes'):'Enter to send · Shift+Enter for a new line · @ for files';
+    E('composerHint').title=active?'Steering takes effect after the current response and its tool batch finish. Queue waits for the whole turn to finish.':'';
   }
   function renderAll(stick){
     if(firstRender&&saved.scrollTop!==undefined)setFollow(scrollBox,false);
@@ -1252,23 +1377,19 @@ const CLIENT_JS = String.raw`
     var q = view.queue || [];
     queueBar.innerHTML = q.map(function(p){
       var label = (p.content || p.prompt_id || '').slice(0, 120);
-      return chip(label, 'withdraw', p.prompt_id, '&#10005; withdraw');
+      var steer=p.disposition==='steer';
+      return chip((steer?'Steer pending: ':'Queued: ')+label, 'withdraw', p.prompt_id, '&#10005; withdraw', steer?'Steers at the next response/tool-batch boundary; not yet delivered.':'Runs after the current turn finishes.');
     }).join('');
     var sline = [];
-    var t = view.totals || {};
+    var t = view.totals || {}, context = view.contextUsage || {};
+    var contextTokens = (context.input||0)+(context.cached||0)+(context.cacheWrite||0);
     if (t.costKnown) sline.push('$' + (t.costUsd || 0).toFixed(4));
-    if (t.output) sline.push((t.output || 0) + ' out / ctx ' + formatContextCount(t.input || 0));
+    if (t.output) sline.push((t.output || 0) + ' out / ctx ' + formatContextCount(contextTokens));
     var savedState=view.standby===true?(view.parentId?'Draft fork':'Draft'):view.standby===false?'Saved':'';
-    var status = state.connection === 'connected' ? (sending ? 'Sending…' : view.running ? 'Working' : 'Ready') : state.connection;
-    statusLine.innerHTML = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+(t.output?'Context: '+esc(new Intl.NumberFormat().format(t.input||0))+' tokens':'')+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
-    var steerable = view.activeTurnSteerable && view.activeTurnId;
-    steerBtn.className = steerable ? ('mode' + (steerMode ? ' steering' : '')) : 'mode hidden';
-    steerBtn.setAttribute('aria-pressed', String(steerMode));
+    var status = state.connection === 'connected' ? (sending ? (pendingSend&&pendingSend.mode==='steer'?'Steering…':pendingSend&&pendingSend.mode==='queue'?'Queueing…':'Sending…') : view.running ? 'Working' : 'Ready') : state.connection;
+    statusLine.innerHTML = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+(t.output?'Context: '+esc(new Intl.NumberFormat().format(contextTokens))+' tokens':'')+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
     cancelBtn.className = view.running ? 'icon-btn' : 'icon-btn hidden';
-    if (!steerable) steerMode = false;
-    sendBtn.disabled = sending || pendingReads>0 || textFiles.some(function(f){return !f.attachment||f.error;}) || (!composer.value.trim() && !attachments.length && !files.length && !textFiles.length) || state.connection !== 'connected';
-    E('attachBtn').disabled = sending;
-    sendBtn.title = sending ? 'Sending…' : 'Send message';
+    updateSendControls();
     if (replayReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120)); }
     else if (replayReady && stick) followPane(scrollBox);
     if(replayReady)firstRender = false;
@@ -1276,21 +1397,23 @@ const CLIENT_JS = String.raw`
     E('jumpBtn').classList.toggle('hidden', nearBottom());
   }
 
-  function send(){
+  function send(mode){
     reconcileInlineReferences();var text = composer.value.trim();
-    if ((!text && !attachments.length && !files.length && !textFiles.length) || pendingReads>0 || textFiles.some(function(f){return !f.attachment||f.error;}) || sending || state.connection !== 'connected') return;
+    if ((!text && !attachments.length && !files.length && !textFiles.length) || pendingReads>0 || textFiles.some(function(f){return !f.attachment||f.error;}) || sending || state.connection !== 'connected' || !state.view || state.view.replayComplete===false) return;
     if(text.startsWith('/')){runSlashLine(text);return;}
     var view = state.view || {};
-    var msg = { type: 'send', text: text, files:files.slice(), textFiles:textFiles.map(function(f){return f.attachment.ref;}), images: attachments.map(function(a){return {mediaType:a.mediaType,data:a.data};}) };
-    if (steerMode && view.activeTurnSteerable && view.activeTurnId) {
-      msg.mode = 'steer';
-      msg.turnId = view.activeTurnId;
+    var msg = { type: 'send', requestId: Date.now().toString(36)+'-'+Math.random().toString(36).slice(2), text: text, files:files.slice(), textFiles:textFiles.map(function(f){return f.attachment.ref;}), images: attachments.map(function(a){return {mediaType:a.mediaType,data:a.data};}) };
+    if(mode==='queue')msg.mode='queue';
+    else if(view.running||view.activeTurnId){
+      if(!view.activeTurnSteerable||!view.activeTurnId){E('attachmentError').textContent='The active response cannot be steered right now. Wait or use Queue explicitly.';E('attachmentError').classList.remove('hidden');return;}
+      msg.mode='steer';msg.turnId=view.activeTurnId;
     }
+    pendingSend = {id:msg.requestId,text:text,images:msg.images,textFiles:msg.textFiles,mode:msg.mode,turnId:msg.turnId};
     sending = true;
+    saveDraft();
     closeFilePicker();
     renderAll(nearBottom());
     histIdx = -1;
-    steerMode = false;
     vscode.postMessage(msg);
   }
   function grow(){
@@ -1299,7 +1422,7 @@ const CLIENT_JS = String.raw`
   }
   sendBtn.addEventListener('click', function(ev){ev.stopPropagation();closeSessions(false);send();});
   cancelBtn.addEventListener('click', function(){ vscode.postMessage({ type: 'cancel' }); });
-  steerBtn.addEventListener('click', function(){ steerMode = !steerMode; renderAll(nearBottom()); composer.focus(); });
+  queueBtn.addEventListener('click', function(ev){ev.stopPropagation();closeSessions(false);send('queue');});
   ${MODEL_CLIENT_JS}
   var caretMirror=document.createElement('div');caretMirror.id='composerCaretMirror';caretMirror.setAttribute('aria-hidden','true');document.body.appendChild(caretMirror);
   function positionFilePicker(){
@@ -1403,7 +1526,7 @@ const CLIENT_JS = String.raw`
       }
     } catch(error) { E('attachmentError').textContent=error.message;E('attachmentError').classList.remove('hidden'); }
     finally {pendingReads--;}
-    renderAttachments();renderAll(nearBottom());
+    renderAttachments();saveDraft();renderAll(nearBottom());
   }
   ${ATTACHMENT_CLIENT_JS}
   E('imageInput').addEventListener('change',function(){void attachFiles(this.files);this.value='';});
@@ -1417,14 +1540,13 @@ const CLIENT_JS = String.raw`
   }
   renderFileReferences();
   composer.addEventListener('beforeinput',function(ev){referenceEdit={text:composer.value,start:composer.selectionStart,end:composer.selectionEnd,type:ev.inputType||''};});
-  composer.addEventListener('input', function(){ attachLongDraft();grow(); saveDraft(); updateFileQuery(); sendBtn.disabled = sending || pendingReads>0 || textFiles.some(function(f){return !f.attachment||f.error;}) || (!composer.value.trim() && !attachments.length && !files.length && !textFiles.length) || state.connection !== 'connected';
-    E('attachBtn').disabled = sending; });
+  composer.addEventListener('input', function(){ histIdx=-1;attachLongDraft();grow(); saveDraft(); updateFileQuery(); updateSendControls(); });
   trackFollow(scrollBox, 120);
   function releasePointer(){ scrollBox._interacting = false; document.querySelectorAll('.rbody,.process-output').forEach(function(pane){pane._interacting = false;}); }
   document.addEventListener('pointerup', releasePointer);
   document.addEventListener('pointercancel', releasePointer);
   window.addEventListener('blur', releasePointer);
-  document.addEventListener('selectionchange', function(){ if (state.view && !hasSelection(transcript)) renderAll(followLatest); });
+  document.addEventListener('selectionchange', function(){ if (state.view && !hasSelection(transcript)&&!hasSelection(E('fileList'))) renderAll(followLatest); });
   function loadEarlier(){
     if(visibleStart===null||visibleStart===0)return;
     historyExpanded=true;setFollow(scrollBox,false);visibleStart=Math.max(0,visibleStart-100);renderAll(false);saveDraft();
@@ -1436,6 +1558,8 @@ const CLIENT_JS = String.raw`
   });
   E('jumpBtn').addEventListener('click', function(){ setFollow(scrollBox, true);renderAll(true);followPane(scrollBox); });
   transcript.addEventListener('toggle', function(ev){ if (ev.target.dataset.detail) { expanded[ev.target.dataset.detail] = ev.target.open; if (ev.target.open && ev.target.classList.contains('reasoning')) followPane(ev.target.querySelector('.rbody')); saveDraft(); } }, true);
+  document.addEventListener('toggle',function(ev){if(ev.target.open)restoreDiffState(ev.target);var key=ev.target.dataset.diffKey;if(key){expanded[key]=ev.target.open;ev.target.querySelector('summary').setAttribute('aria-expanded',String(ev.target.open));restoreDiffState(ev.target.parentElement);saveDraft();}},true);
+  document.addEventListener('scroll',function(ev){var key=ev.target.dataset&&ev.target.dataset.diffScroll;if(key){diffScroll[key]=[ev.target.scrollTop,ev.target.scrollLeft];saveDraft();}},true);
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(function(){ updateThoughtSize();restoreReadingAnchor(); }).observe(scrollBox);
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(function(){ restoreReadingAnchor(); }).observe(transcript);
   composer.addEventListener('keydown', function(ev){
@@ -1448,20 +1572,20 @@ const CLIENT_JS = String.raw`
       if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();if(fileResults.length)chooseFile(fileIndex);return;}
     }
     if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); return; }
-    if (ev.key === 'ArrowUp' && composer.value === '') {
+    if (ev.key === 'ArrowUp' && (composer.value === '' || histIdx >= 0)) {
       var h = state.history || [];
       if (!h.length) return;
       ev.preventDefault();
       histIdx = histIdx < 0 ? h.length - 1 : Math.max(0, histIdx - 1);
       composer.value = h[histIdx];
-      grow();
+      grow();saveDraft();renderAll(followLatest);
     } else if (ev.key === 'ArrowDown' && histIdx >= 0) {
       ev.preventDefault();
       histIdx += 1;
       var hh = state.history || [];
       if (histIdx >= hh.length) { histIdx = -1; composer.value = ''; }
       else composer.value = hh[histIdx];
-      grow();
+      grow();saveDraft();renderAll(followLatest);
     }
   });
   document.body.addEventListener('mousedown',function(ev){if(ev.target.closest('.copy-text,.codeblock-copy'))ev.preventDefault();});
@@ -1474,14 +1598,14 @@ const CLIENT_JS = String.raw`
     if(action==='openTextAttachment'){if(payload)vscode.postMessage({type:'openTextAttachment',ref:payload});}
     else if(action==='removeTextAttachment'){if(!sending){var file=textFiles.find(function(f){return f.requestId===Number(payload);});if(file){if(file.attachment)vscode.postMessage({type:'releaseTextAttachment',ref:file.attachment.ref});else vscode.postMessage({type:'cancelTextAttachment',requestId:file.requestId});textFiles=textFiles.filter(function(f){return f!==file;});renderTextFiles();saveDraft();renderAll(followLatest);}}}
     else if(action==='retryTextAttachment'){var file=textFiles.find(function(f){return f.requestId===Number(payload);});if(file)stageTextFile(file);}
-    else if (action === 'removeImage') { if (!sending) { attachments.splice(Number(payload),1);renderAttachments();renderAll(nearBottom()); } } else if (action === 'copyReply' || action === 'copyThinking' || action === 'copyUser') {
+    else if (action === 'removeImage') { if (!sending) { attachments.splice(Number(payload),1);renderAttachments();saveDraft();renderAll(nearBottom()); } } else if (action === 'copyReply' || action === 'copyThinking' || action === 'copyUser') {
       ev.preventDefault(); ev.stopPropagation();
       var part = (state.view.parts || [])[Number(payload)];
       if (part) {
         var text = action==='copyUser'?part.text: action === 'copyThinking' ? part.reasoning : (part.reasoning ? 'Thought process\n' + part.reasoning + '\n\n' : '') + part.text;
         NodecodeMarkdown.copyToClipboard(text, function(){var label=action==='copyUser'?'Copy message':action==='copyThinking'?'Copy thought process':'Copy reply and thought process';el.innerHTML='${icon('check')}';el.setAttribute('aria-label','Copied');setTimeout(function(){el.innerHTML='${icon('copy')}';el.setAttribute('aria-label',label);},1200);});
       }
-    } else if(action==='toggleCheckpointBookmark'){if(!bookmarkingTurns[payload]){bookmarkingTurns[payload]=true;el.disabled=true;vscode.postMessage({type:'toggleCheckpointBookmark',turnId:payload});}} else if(action==='forkAtMessage'){if(!forkingTurns[payload]){forkingTurns[payload]=true;el.disabled=true;vscode.postMessage({type:'forkAtMessage',turnId:payload});}} else if (action === 'chooseSession') { saveHistoryBrowser(); vscode.postMessage({type:'openThread',sessionId:payload}); }
+    } else if(action==='toggleCheckpointBookmark'){if(!bookmarkingTurns[payload]){bookmarkingTurns[payload]=true;renderAll(followLatest);vscode.postMessage({type:'toggleCheckpointBookmark',turnId:payload});}} else if(action==='forkAtMessage'){if(!forkingTurns[payload]){forkingTurns[payload]=true;renderAll(followLatest);vscode.postMessage({type:'forkAtMessage',turnId:payload});}} else if (action === 'chooseSession') { saveHistoryBrowser(); vscode.postMessage({type:'openThread',sessionId:payload}); }
     else if (action === 'renameSession') { editSessionName(el.parentElement.querySelector('.session-choice'),payload); }
     else if (action === 'deleteSession') { vscode.postMessage({type:'deleteSession',sessionId:payload}); }
     else if (action === 'withdraw') vscode.postMessage({ type: 'withdraw', promptId: payload });
@@ -1519,7 +1643,7 @@ const CLIENT_JS = String.raw`
   updateThoughtSize();
   grow();
   sendBtn.disabled = true;
-  vscode.postMessage({ type: 'ready' });
+  vscode.postMessage({ type: 'ready', pendingSendId: pendingSend && pendingSend.id });
   restoreHistory(persisted.historyBrowser);
   composer.focus();
   ${ACTIVITY_CLIENT_JS}

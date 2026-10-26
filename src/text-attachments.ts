@@ -1,6 +1,6 @@
 import * as path from "path";
 import { randomUUID } from "crypto";
-import { chmod, mkdir, lstat, readdir, readFile, unlink, writeFile } from "fs/promises";
+import { chmod, mkdir, lstat, open, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import type { TextFileAttachment } from "./protocol";
 
 export const PASTE_FILE_THRESHOLD_CHARS = 32_000;
@@ -53,6 +53,33 @@ export class TextAttachmentStore {
   private readonly cancelled = new WeakSet<object>();
   private nextRequestId = 0;
   private static writeTail: Promise<unknown> = Promise.resolve();
+  private static readonly holders = new Map<string, Set<object>>();
+  private static readonly admitted = new Set<string>();
+
+  private static enqueue<T>(write: () => Promise<T>): Promise<T> {
+    const result = this.writeTail.then(write, write);
+    this.writeTail = result.catch(() => {});
+    return result;
+  }
+
+  private hold(files: TextFileAttachment[], source: object): void {
+    const held = this.held.get(source) ?? new Map<string, TextFileAttachment>();
+    for (const file of files) {
+      held.set(file.ref, file);
+      const holders = TextAttachmentStore.holders.get(file.path) ?? new Set<object>();
+      holders.add(source); TextAttachmentStore.holders.set(file.path, holders);
+    }
+    this.held.set(source, held);
+  }
+
+  private unhold(ref: string, source: object): void {
+    const file = this.held.get(source)?.get(ref);
+    this.held.get(source)?.delete(ref);
+    if (!file) return;
+    const holders = TextAttachmentStore.holders.get(file.path);
+    holders?.delete(source);
+    if (!holders?.size) TextAttachmentStore.holders.delete(file.path);
+  }
 
   constructor(private readonly storageRoot: string | undefined, private readonly sessionId: string) {}
 
@@ -97,19 +124,26 @@ export class TextAttachmentStore {
       if (total + upload!.bytes > 256 * 1024 * 1024) throw new Error("Text attachment storage exceeds 256 MiB. Save the input as a workspace file.");
       const ref = randomUUID(), filePath = path.join(directory, `${ref}.txt`);
       const attachment:TextFileAttachment = {ref,name:upload!.name,path:filePath,byteLength:upload!.bytes,...(upload!.origin?{origin:upload!.origin}:{}),...(upload!.originalPath?{originalPath:upload!.originalPath}:{})};
-      await writeFile(filePath, text, {encoding:"utf8",flag:"wx",mode:0o600});
-      await writeFile(path.join(directory, `${ref}.json`), JSON.stringify({...attachment,sessionId:this.sessionId}), {encoding:"utf8",flag:"wx",mode:0o600});
-      if (this.cancelled.has(source) || pending.get(chunk.requestId) !== upload) {
-        await Promise.allSettled([unlink(filePath),unlink(path.join(directory, `${ref}.json`))]);
-        throw new Error("Text attachment was cancelled. Nothing was sent.");
+      const created: string[] = [];
+      const writeNew = async (file: string, contents: string): Promise<void> => {
+        const handle = await open(file, "wx", 0o600);
+        created.push(file);
+        try { await handle.writeFile(contents, "utf8"); }
+        finally { await handle.close(); }
+      };
+      try {
+        await writeNew(filePath, text);
+        await writeNew(path.join(directory, `${ref}.json`), JSON.stringify({...attachment,sessionId:this.sessionId,draft:true}));
+        if (this.cancelled.has(source) || pending.get(chunk.requestId) !== upload) throw new Error("Text attachment was cancelled. Nothing was sent.");
+      } catch (error) {
+        await Promise.all(created.map(file => unlink(file)));
+        throw error;
       }
-      const held = this.held.get(source) ?? new Map<string, TextFileAttachment>();
-      held.set(ref, attachment); this.held.set(source, held);
+      this.hold([attachment], source);
       pending.delete(chunk.requestId);
       return attachment;
     };
-    const result = TextAttachmentStore.writeTail.then(write, write);
-    TextAttachmentStore.writeTail = result.catch(() => {});
+    const result = TextAttachmentStore.enqueue(write);
     try { return {requestId:chunk.requestId,index:chunk.index,attachment:await result}; }
     finally { pending.delete(chunk.requestId); }
   }
@@ -129,7 +163,17 @@ export class TextAttachmentStore {
     return result.attachment;
   }
 
-  async resolve(refs: unknown, source: object, hold = true): Promise<TextFileAttachment[]> {
+  resolve(refs: unknown, source: object, hold = true, historyFiles: readonly TextFileAttachment[] = []): Promise<TextFileAttachment[]> {
+    return TextAttachmentStore.enqueue(async () => {
+      if (hold && this.cancelled.has(source)) throw new Error("The conversation view closed. Nothing was sent.");
+      const files = await this.read(refs, historyFiles);
+      if (hold && this.cancelled.has(source)) throw new Error("The conversation view closed. Nothing was sent.");
+      if (hold && files.length) this.hold(files, source);
+      return files;
+    });
+  }
+
+  private async read(refs: unknown, historyFiles: readonly TextFileAttachment[] = []): Promise<TextFileAttachment[]> {
     if (refs === undefined || (Array.isArray(refs) && !refs.length)) return [];
     if (!Array.isArray(refs) || refs.length > MAX_TEXT_ATTACHMENTS || new Set(refs).size !== refs.length) throw new Error("Attach at most four distinct text files.");
     const files: TextFileAttachment[] = [];
@@ -140,19 +184,61 @@ export class TextAttachmentStore {
       const metadataInfo = await lstat(metadataPath), info = await lstat(filePath);
       if (metadataInfo.isSymbolicLink() || info.isSymbolicLink() || !info.isFile() || metadataInfo.size > 4096) throw new Error("Invalid text attachment file.");
       const saved = JSON.parse(await readFile(metadataPath,"utf8"));
-      if (saved.sessionId !== this.sessionId || saved.ref !== ref || saved.path !== filePath || saved.byteLength !== info.size || typeof saved.name !== "string") throw new Error("Text attachment belongs to another session or has changed.");
+      const inherited = historyFiles.some(file => file.ref === ref && file.path === filePath && file.name === saved.name && file.byteLength === info.size);
+      if ((saved.sessionId !== this.sessionId && !inherited) || saved.ref !== ref || saved.path !== filePath || saved.byteLength !== info.size || typeof saved.name !== "string") throw new Error("Text attachment belongs to another session or has changed.");
       files.push({ref,name:saved.name,path:filePath,byteLength:info.size,...(saved.origin?{origin:saved.origin}:{}),...(saved.originalPath?{originalPath:saved.originalPath}:{})});
     }
     if (files.reduce((sum,file)=>sum+file.byteLength,0)>MAX_TEXT_ATTACHMENT_BYTES) throw new Error("Text attachments exceed the combined 8 MiB limit.");
-    if (hold) { const held=this.held.get(source)??new Map<string,TextFileAttachment>(); files.forEach(file=>held.set(file.ref,file)); this.held.set(source,held); }
     return files;
   }
 
-  release(ref: string, source: object): void { this.held.get(source)?.delete(ref); }
+  /** Admission (including an unknown acknowledgement) makes files durable history. */
+  commit(refs: unknown, source: object): Promise<void> {
+    return TextAttachmentStore.enqueue(async () => {
+      const files = await this.read(refs);
+      files.forEach(file => TextAttachmentStore.admitted.add(file.path));
+      for (const file of files) {
+        const metadataPath = path.join(path.dirname(file.path), `${file.ref}.json`);
+        const saved = JSON.parse(await readFile(metadataPath, "utf8"));
+        if (saved.draft === true) {
+          const temporary = `${metadataPath}.${randomUUID()}.tmp`;
+          try {
+            await writeFile(temporary, JSON.stringify({...saved,draft:false}), {encoding:"utf8",flag:"wx",mode:0o600});
+            await rename(temporary, metadataPath);
+          } finally {
+            await unlink(temporary).catch(error => { if (error.code !== "ENOENT") throw error; });
+          }
+        }
+        TextAttachmentStore.admitted.delete(file.path);
+        this.unhold(file.ref, source);
+      }
+    });
+  }
+
+  /** Only explicit removal reclaims an unsent draft, never a view switch/close. */
+  release(ref: string, source: object): Promise<void> {
+    return TextAttachmentStore.enqueue(async () => {
+      let file: TextFileAttachment;
+      try { [file] = await this.read([ref]); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") { this.unhold(ref, source); return; } throw error; }
+      this.unhold(ref, source);
+      if (TextAttachmentStore.holders.get(file.path)?.size || TextAttachmentStore.admitted.has(file.path)) return;
+      const metadataPath = path.join(path.dirname(file.path), `${ref}.json`);
+      const saved = JSON.parse(await readFile(metadataPath, "utf8"));
+      // Metadata from older versions has no draft marker and may be history.
+      if (saved.draft !== true) return;
+      await unlink(file.path);
+      await unlink(metadataPath);
+    });
+  }
   checkCapacity(count: number, bytes: number, source: object): void {
     const held=[...(this.held.get(source)?.values()??[])],pending=[...(this.uploads.get(source)?.values()??[])];
     if(held.length+pending.length+count>MAX_TEXT_ATTACHMENTS || held.reduce((n,f)=>n+f.byteLength,0)+pending.reduce((n,f)=>n+f.bytes,0)+bytes>MAX_TEXT_ATTACHMENT_BYTES)throw new Error("Attach at most four text files, 8 MiB total.");
   }
   cancel(requestId: number, source: object): void { this.uploads.get(source)?.delete(requestId); }
-  close(source: object): void { this.cancelled.add(source); this.uploads.delete(source); this.held.delete(source); }
+  close(source: object): void {
+    this.cancelled.add(source); this.uploads.delete(source);
+    for (const ref of this.held.get(source)?.keys() ?? []) this.unhold(ref, source);
+    this.held.delete(source);
+  }
 }

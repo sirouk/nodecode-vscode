@@ -73,6 +73,7 @@ export interface StoreView {
   standby?: boolean;
   replayComplete: boolean;
   cached?: boolean;
+  currentThread?: SessionThread;
   threads: SessionThread[];
   ancestors: SessionThread[];
   siblings: SessionThread[];

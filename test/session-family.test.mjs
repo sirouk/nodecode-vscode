@@ -24,6 +24,20 @@ test('native hierarchy preserves ancestors, siblings, descendants and source-def
   assert.deepEqual(sessionFamily(rows,'root').descendants.map(r=>r.id),['parent','child','grandchild','manual']);
 });
 
+test('the current thread is described with its native parent and activity, including after cache restore',()=>{
+  const family=sessionFamily(rows,'child',new Map());
+  assert.equal(family.currentThread?.id,'child');
+  assert.equal(family.currentThread.parentId,'parent');
+  assert.equal(family.currentThread.relativeDepth,0);
+  assert.equal(family.currentThread.status,'idle');
+  assert.equal(sessionFamily(rows,'missing').currentThread,undefined);
+  const store=new SessionStore();store.applyFrame({type:'session_stream_resumed',session_id:'child',replay_chunk_final:true,admission_state:'ready',accumulated_frames:[]});store.setThreads(rows,'child');
+  assert.equal(store.view().currentThread.id,'child');
+  const restored=new SessionStore();restored.restoreProjection(JSON.parse(JSON.stringify(store.snapshotProjection())),'child');
+  assert.equal(restored.view().currentThread.id,'child');
+  assert.equal(restored.view().currentThread.status,'unknown');
+});
+
 test('status distinguishes unavailable activity, running, asked and failed without inventing completion',()=>{
   const rows=[{id:'a',parent_id:'r',waits:{why:'asked'}},{id:'b',parent_id:'r',waits:{why:'failed'}},{id:'c',parent_id:'r'}];
   assert.deepEqual(sessionFamily(rows,'r').threads.map(r=>r.status),['waiting','failed','unknown']);

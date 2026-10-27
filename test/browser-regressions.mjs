@@ -13,18 +13,18 @@ panel.controller={sessionId:'regression-session'};
 panel.panel={webview:{cspSource:'https://webview.local'}};
 panel.markUri='data:image/svg+xml;base64,'+fs.readFileSync(new URL('../media/icon.svg',import.meta.url)).toString('base64');
 panel.markdownUri='https://webview.local/markdown.js';
-const html=panel.html().replace(/<script nonce="([^"]+)" src="[^"]+"><\/script>/,(_,nonce)=>'<script nonce="'+nonce+'">'+fs.readFileSync(new URL('../out/markdown.js',import.meta.url),'utf8')+'</script>');
+const html=sessionId=>{panel.controller={sessionId};return panel.html().replace(/<script nonce="([^"]+)" src="[^"]+"><\/script>/,(_,nonce)=>'<script nonce="'+nonce+'">'+fs.readFileSync(new URL('../out/markdown.js',import.meta.url),'utf8')+'</script>');};
 const browser=await chromium.launch({headless:true});
 const state={type:'state',connection:'connected',attempts:0,history:['first prompt','second prompt'],view:{title:'Regression',sessionId:'regression-session',cwd:'/workspace',totals:{},parts:[],queue:[],threads:[],processes:[],replayComplete:true}};
 const png={name:'draft.png',mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII=','base64')};
 const emit=(page,message)=>page.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),message);
-async function open(saved={}){
+async function open(saved={},sessionId='regression-session'){
   const page=await browser.newPage({viewport:{width:360,height:700}});page.setDefaultTimeout(5000);
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.addInitScript(saved=>{window.posted=[];window.savedState=saved;window.acquireVsCodeApi=()=>({postMessage:m=>window.posted.push(m),getState:()=>window.savedState,setState:s=>{window.savedState=structuredClone(s);}});},saved);
-  await page.goto('data:text/html,'+encodeURIComponent(html));
+  await page.goto('data:text/html,'+encodeURIComponent(html(sessionId)));
   await page.waitForFunction(()=>window.posted.some(m=>m.type==='ready'));
-  await emit(page,state);return {page,errors};
+  await emit(page,{...state,view:{...state.view,sessionId}});return {page,errors};
 }
 const savedDraft=page=>page.evaluate(()=>window.savedState.sessions?.['regression-session']);
 const posted=(page,type)=>page.evaluate(type=>window.posted.filter(m=>m.type===type).at(-1),type);
@@ -60,6 +60,97 @@ try{
     assert.equal(await page.locator('#runtimeUp').isDisabled(),false);assert.equal(await page.locator('#runtimeMore').isDisabled(),false);
     assert.equal(await page.locator('#runtimeFileStatus').textContent(),'Directory unreadable');await page.close();
   });
+  await check('thread navigation stays open across parent, child, sibling and nested webview recreation',async()=>{
+    const {sessionFamily}=require('../out/session-family.js');
+    const rows=[{id:'root',title:'Root'},{id:'parent',title:'Parent',parent_id:'root',source:'fork'},
+      {id:'child-a',title:'Child A',parent_id:'parent',source:'fork',updated_at:'2026-10-20T10:00:00Z'},
+      {id:'child-b',title:'Child B',parent_id:'parent',source:'fork',updated_at:'2026-10-26T10:00:00Z'},
+      {id:'nested',title:'Nested',parent_id:'child-a',source:'fork'}];
+    let opened=await open({},'parent'),page=opened.page;
+    const errors=opened.errors;
+    const snapshot=id=>({...state,view:{...state.view,sessionId:id,title:rows.find(row=>row.id===id).title,...sessionFamily(rows,id,new Map())}});
+    await emit(page,snapshot('parent'));
+    await page.locator('#threadDetails > summary').click();
+    await page.locator('#idleThreadSummary').click();
+    await page.locator('#composer').fill('Parent draft');
+    async function navigate(id){
+      await page.locator('#threadList [data-p="'+id+'"]').click();
+      const navigation=await posted(page,'openThread');
+      assert.equal(navigation.sessionId,id);assert.equal(navigation.threadNavigation.open,true);
+      assert.deepEqual(opened.errors,[]);
+      const saved=await page.evaluate(()=>window.savedState);await page.close();
+      opened=await open(saved,id);page=opened.page;
+      await emit(page,snapshot(id));
+      assert(await page.locator('#threadDetails').evaluate(node=>node.open),'thread menu remains open after '+id);
+      const selected=page.locator('#threadList [aria-current="true"]');
+      assert.equal(await selected.count(),1);assert.equal(await selected.getAttribute('data-p'),id);assert(await selected.isVisible());
+      const before=await page.evaluate(()=>window.posted.filter(m=>m.type==='openThread').length);
+      await selected.click();assert.equal(await page.evaluate(()=>window.posted.filter(m=>m.type==='openThread').length),before,'selected thread is a navigation no-op');
+    }
+    await navigate('child-a');
+    assert(await page.locator('#parentThreadList [data-p="parent"]').isVisible(),'idle parent is always a visible back link');
+    assert(await page.locator('#threadList [data-p="child-b"]').isVisible(),'sibling remains reachable');
+    const left=id=>page.locator('#threadList [data-p="'+id+'"] .agent-dot').evaluate(node=>node.getBoundingClientRect().left);
+    assert(await left('child-a')>await left('parent'),'children indent beneath parent');
+    assert.equal(await left('child-a'),await left('child-b'),'siblings share a level');
+    assert(await left('nested')>await left('child-a'),'nested child indents again');
+    await navigate('child-b');await navigate('parent');
+    assert.equal(await page.locator('#composer').inputValue(),'Parent draft','navigation preserves session-specific drafts');
+    await navigate('child-a');await navigate('nested');
+    assert(await page.locator('#parentThreadList [data-p="child-a"]').isVisible());
+    await navigate('child-a');await navigate('parent');
+    await page.locator('#threadDetails > summary').click();
+    await page.waitForFunction(()=>window.savedState.threadNavigation?.open===false);
+    const saved=await page.evaluate(()=>window.savedState);await page.close();
+    opened=await open(saved,'child-b');await emit(opened.page,snapshot('child-b'));
+    assert.equal(await opened.page.locator('#threadDetails').evaluate(node=>node.open),false,'an explicit collapse also survives a session switch');
+    assert.deepEqual(errors,[]);assert.deepEqual(opened.errors,[]);await opened.page.close();
+  });
+  await check('deep thread navigation reveals the selection without disturbing later live-update scroll',async()=>{
+    const {sessionFamily}=require('../out/session-family.js');
+    for(const depth of [5,14])for(const initiallyOpen of [true,false]){
+      const id='level-'+depth,rows=Array.from({length:depth+1},(_,index)=>({id:'level-'+index,title:'Thread level '+index,...(index?{parent_id:'level-'+(index-1)}:{})}));
+      const {page,errors}=await open({threadNavigation:{open:initiallyOpen,idleOpen:false}},id);
+      await page.setViewportSize({width:320,height:500});
+      const snapshot={...state,view:{...state.view,sessionId:id,...sessionFamily(rows,id,new Map())}};
+      await emit(page,snapshot);
+      if(!initiallyOpen)await page.locator('#threadDetails > summary').click();
+      await page.waitForFunction(()=>{
+        const box=document.querySelector('#threadList').getBoundingClientRect(),row=document.querySelector('#threadList [aria-current="true"]').getBoundingClientRect();
+        return row.top>=box.top-1&&row.bottom<=box.bottom+1;
+      });
+      const parent=await page.locator('#parentThreadList [data-p="level-'+(depth-1)+'"]').boundingBox(),box=await page.locator('#threadList').boundingBox();
+      assert(parent.y>=box.y-1&&parent.y+parent.height<=box.y+box.height+1,'the immediate parent stays in view with the selection');
+      assert(await page.locator('[aria-current="true"] .activity-name').evaluate(node=>node.getBoundingClientRect().width)>40,'deep indentation must leave a readable thread title');
+      await page.locator('#threadList').evaluate(node=>{node.scrollTop=0;});
+      await emit(page,{...snapshot,view:{...snapshot.view,currentThread:{...snapshot.view.currentThread,title:'Updated title'}}});
+      assert.equal(await page.locator('#threadList').evaluate(node=>node.scrollTop),0,'live updates preserve a deliberately scrolled list');
+      assert.deepEqual(errors,[]);await page.close();
+    }
+  });
+  await check('cyclic lineage renders each navigable session only once',async()=>{
+    const {sessionFamily}=require('../out/session-family.js'),{page,errors}=await open({threadNavigation:{open:true,idleOpen:true}},'a');
+    await emit(page,{...state,view:{...state.view,sessionId:'a',...sessionFamily([{id:'a',parent_id:'b'},{id:'b',parent_id:'a'}],'a',new Map())}});
+    const ids=await page.locator('#threadList [data-p]').evaluateAll(nodes=>nodes.map(node=>node.dataset.p));
+    assert.deepEqual(ids,['b','a']);assert.equal(await page.locator('[aria-current="true"]').count(),1);
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('an editor spawn link opens the target sidebar menu despite unrelated saved disclosure state',async()=>{
+    const source=await open({},'editor-parent');
+    await emit(source.page,{...state,view:{...state.view,sessionId:'editor-parent',parts:[{kind:'system',text:'Spawned: Child',childSessionId:'editor-child'}]}});
+    assert.equal(await source.page.locator('#threadDetails').evaluate(node=>node.open),false);
+    await source.page.locator('.spawn-notice [data-a="openThread"]').click();
+    const navigation=await posted(source.page,'openThread');
+    assert.deepEqual(navigation,{type:'openThread',sessionId:'editor-child',threadNavigation:{open:true,idleOpen:false}});
+    const target=await open({threadNavigation:{open:false,idleOpen:true}},'editor-child');
+    await emit(target.page,{type:'threadNavigationRestore',state:navigation.threadNavigation});
+    await emit(target.page,{...state,view:{...state.view,sessionId:'editor-child',parentId:'editor-parent',currentThread:{id:'editor-child',title:'Child',relativeDepth:0,status:'idle'}}});
+    assert(await target.page.locator('#threadDetails').evaluate(node=>node.open));
+    assert.equal(await target.page.locator('#idleThreadDetails').evaluate(node=>node.open),false);
+    assert(await target.page.locator('[aria-current="true"]').isVisible());
+    assert(await target.page.locator('#parentThreadList [data-p="editor-parent"]').isVisible());
+    assert.deepEqual(source.errors,[]);assert.deepEqual(target.errors,[]);await source.page.close();await target.page.close();
+  });
   await check('parent-only thread changes invalidate the render cache',async()=>{
     const {page}=await open();
     for(const id of ['parent-a','parent-b']){await emit(page,{...state,view:{...state.view,parentId:id}});assert.equal(await page.locator('#threadList [data-p]').getAttribute('data-p'),id);}
@@ -75,13 +166,14 @@ try{
     await emit(page,snapshot());
     assert.equal(await page.locator('#threadDetails').evaluate(node=>node.open),false);
     await page.locator('#threadDetails > summary').click();
-    assert.deepEqual(await ids('#activeThreadList'),['active-new','waiting','unknown','failed','active-old','parent','idle-latest']);
+    assert.deepEqual(await ids('#activeThreadList'),['active-new','waiting','unknown','failed','active-old','idle-latest']);
     assert.deepEqual(await ids('#idleThreadList'),['idle-middle','idle-old']);
     assert.equal(await page.locator('#idleThreadDetails').evaluate(node=>node.open),false);
     assert.equal(await page.locator('#idleThreadList [data-p="idle-middle"]').isVisible(),false);
-    for(const id of ['active-new','waiting','unknown','failed','active-old','parent','idle-latest'])assert(await page.locator('#activeThreadList [data-p="'+id+'"]').isVisible(),id+' should remain above the idle fold');
+    for(const id of ['active-new','waiting','unknown','failed','active-old','idle-latest'])assert(await page.locator('#activeThreadList [data-p="'+id+'"]').isVisible(),id+' should remain above the idle fold');
+    assert.deepEqual(await ids('#parentThreadList'),['parent'],'parent links are pinned above the sorted roster');
     assert.equal(await page.locator('#threadList .activity-group').count(),0,'relationship headings must not consume the compact list');
-    assert.match(await page.locator('#activeThreadList [data-p="parent"]').getAttribute('title'),/Parent/i);
+    assert.match(await page.locator('#parentThreadList [data-p="parent"]').getAttribute('title'),/Parent/i);
     assert.match(await page.locator('#activeThreadList [data-p="waiting"]').getAttribute('title'),/Sibling/i);
     await page.locator('#activeThreadList [data-p="active-new"]').click();
     assert.equal((await posted(page,'openThread')).sessionId,'active-new');
@@ -95,7 +187,7 @@ try{
     await page.evaluate(()=>window.idleSummaryNode=document.querySelector('#idleThreadSummary'));
     descendants=descendants.map(thread=>thread.id==='active-new'?{...thread,status:'idle',updatedAt:at(20)}:thread);
     await emit(page,snapshot());
-    assert.deepEqual(await ids('#activeThreadList'),['waiting','unknown','failed','active-old','parent','active-new']);
+    assert.deepEqual(await ids('#activeThreadList'),['waiting','unknown','failed','active-old','active-new']);
     assert.deepEqual(await ids('#idleThreadList'),['idle-latest','idle-middle','idle-old']);
     assert(await page.locator('#idleThreadDetails').evaluate(node=>node.open));
     assert(await page.evaluate(()=>document.activeElement===window.idleSummaryNode&&window.idleSummaryNode===document.querySelector('#idleThreadSummary')),'summary focus and identity survive live regrouping');
@@ -109,7 +201,7 @@ try{
     assert.equal(await restored.page.locator('#idleThreadDetails').evaluate(node=>node.open),false);await restored.page.close();
     descendants=descendants.map(thread=>thread.id==='active-new'?{...thread,status:'running',startedAt:at(21)}:thread);
     await emit(page,snapshot());
-    assert.deepEqual(await ids('#activeThreadList'),['active-new','waiting','unknown','failed','active-old','parent','idle-latest']);
+    assert.deepEqual(await ids('#activeThreadList'),['active-new','waiting','unknown','failed','active-old','idle-latest']);
     assert.equal((await ids('#threadList')).filter(id=>id==='active-new').length,1);
     await emit(page,{...state,view:{...state.view,descendants:[row('only-idle','idle',10)]}});
     assert.deepEqual(await ids('#activeThreadList'),['only-idle']);assert.equal(await page.locator('#idleThreadDetails').isVisible(),false);

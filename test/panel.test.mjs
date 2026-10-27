@@ -50,6 +50,31 @@ test('sidebar switches subscriptions, queues context until ready and keeps curre
 });
 
 
+test('thread navigation carries disclosure state through the host and waits for the target document',async()=>{
+  const received=event(),disposed=event(),visibility=event(),posted=[];
+  const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};
+  const sidebar=new SessionSidebar(uri('/extension'),{},{log(){}}),target=controller('child');
+  const source=Object.create(SessionPanel.prototype),opened=[];
+  source.controller=controller('parent');source.notes={log(){}};
+  source.callbacks={openSession:(id,navigation)=>{opened.push(id);sidebar.show(target,navigation);}};
+  const navigation={open:true,idleOpen:true};
+  await source.onMessage({type:'openThread',sessionId:'parent',threadNavigation:navigation});
+  assert.deepEqual(opened,[],'the selected thread is a host-side no-op too');
+  await source.onMessage({type:'openThread',sessionId:'child',threadNavigation:navigation});
+  assert.deepEqual(opened,['child']);
+  sidebar.resolveWebviewView(view);
+  assert(!posted.some(m=>m.type==='threadNavigationRestore'),'restoration must wait for the new document');
+  received.fire({type:'ready'});
+  assert.deepEqual(posted.find(m=>m.type==='threadNavigationRestore')?.state,navigation);
+  assert.equal(posted.find(m=>m.type==='state')?.view.sessionId,'child');
+  posted.length=0;
+  sidebar.show(target,{open:true,idleOpen:false});
+  assert.deepEqual(posted.find(m=>m.type==='threadNavigationRestore')?.state,{open:true,idleOpen:false},'an already attached sidebar receives editor navigation without being replaced');
+  sidebar.show(controller('sibling'),navigation);posted.length=0;received.fire({type:'ready'});
+  assert.deepEqual(posted.find(m=>m.type==='threadNavigationRestore')?.state,navigation,'state follows sibling document replacement');
+  sidebar.dispose();
+});
+
 test('status and usage follow the complete composer before the keyboard hint', () => {
   const panel=Object.create(SessionPanel.prototype);
   panel.controller={sessionId:'layout-session'};

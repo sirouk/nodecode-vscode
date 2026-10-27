@@ -29,6 +29,8 @@ export interface ModelOptions {
   context?: { used?: number; limit?: number };
 }
 
+export interface ThreadNavigationState { open: boolean; idleOpen: boolean }
+
 export interface PanelCallbacks {
   pickLocalAttachments(): Promise<import("./file-browser").SelectedFileInput[]>;
   runtimeMetadata(): Promise<{version:string;releaseUrl:string;releaseTag?:string;releasePublishedAt?:string;binaryUpdatedAt?:string}>;
@@ -48,7 +50,7 @@ export interface PanelCallbacks {
   favoriteModel(provider: string, model: string, starred: boolean): Promise<ModelFavorite[]>;
   searchFiles(query: string): Promise<Array<{ path: string; isDir: false }>>;
   openInEditor(sessionId: string): void;
-  openSession(sessionId: string): void;
+  openSession(sessionId: string, navigation?: ThreadNavigationState): void;
   forkSession(sessionId: string): void | Promise<void>;
   forkAtMessage(sessionId:string,turnId:string):Promise<void>;
   toggleCheckpointBookmark(sessionId:string,turnId:string):Promise<string[]>;
@@ -101,6 +103,11 @@ export class SessionPanel {
 
   static get(sessionId: string): SessionPanel | undefined {
     return SessionPanel.panels.get(sessionId) ?? [...SessionPanel.instances].find((entry) => entry.controller.sessionId === sessionId);
+  }
+
+  restoreThreadNavigation(state: ThreadNavigationState): void {
+    if (this.ready) this.postMessage({type:"threadNavigationRestore",state});
+    else this.pendingThreadNavigation = state;
   }
 
   showHistory(): void {
@@ -160,6 +167,7 @@ export class SessionPanel {
   private ready = false;
   private pendingContext: string[] = [];
   private pendingHistory = false;
+  private pendingThreadNavigation?: ThreadNavigationState;
   private readonly conversationImages = new Map<string, { url?: string; error?: string }>();
 
   private constructor(
@@ -426,14 +434,19 @@ export class SessionPanel {
           return;
         case "ready":
           this.ready = true;
+          if (this.pendingThreadNavigation) { this.restoreThreadNavigation(this.pendingThreadNavigation); this.pendingThreadNavigation = undefined; }
           if (this.pendingHistory) { this.pendingHistory = false; this.postMessage({type:"showSessions"}); }
           for (const text of this.pendingContext.splice(0)) this.postMessage({ type: "addContext", text });
           this.postState();
           if (typeof message.pendingSendId === "string") await this.resumeSend(message.pendingSendId);
           return;
-        case "openThread":
-          if (typeof message.sessionId === "string") this.callbacks.openSession(message.sessionId);
+        case "openThread": {
+          const navigation = message.threadNavigation as Partial<ThreadNavigationState> | undefined;
+          if (typeof message.sessionId === "string" && message.sessionId !== id) this.callbacks.openSession(message.sessionId,
+            navigation && typeof navigation.open === "boolean" && typeof navigation.idleOpen === "boolean"
+              ? {open:navigation.open,idleOpen:navigation.idleOpen} : undefined);
           return;
+        }
         case "send": {
           if (typeof message.requestId !== "string" || !message.requestId) throw new Error("Missing send request identity");
           const requestId = message.requestId;
@@ -634,6 +647,7 @@ export class SessionSidebar implements vscode.WebviewViewProvider, vscode.Dispos
   private controller: SessionController | undefined;
   private pendingContext: string[] = [];
   private pendingHistory = false;
+  private pendingThreadNavigation?: ThreadNavigationState;
   private welcomeReady = false;
   private welcomeGeneration = 0;
   private historyBrowserState: unknown;
@@ -729,8 +743,12 @@ export class SessionSidebar implements vscode.WebviewViewProvider, vscode.Dispos
     if (this.welcomeReady) { this.pendingHistory = false; void this.view.webview.postMessage({type:"showSessions"}); }
   }
 
-  show(controller: SessionController): void {
-    if (this.controller === controller && this.attached && this.view) { this.view.show(true); return; }
+  show(controller: SessionController, navigation?: ThreadNavigationState): void {
+    if (this.controller === controller && this.attached && this.view) {
+      if (navigation) this.attached.restoreThreadNavigation(navigation);
+      this.view.show(true); return;
+    }
+    this.pendingThreadNavigation = navigation;
     this.controller = controller;
     if (this.view) { this.attach(); this.view.show(true); }
     else void vscode.commands.executeCommand("nodecodeChat.focus");
@@ -750,6 +768,7 @@ export class SessionSidebar implements vscode.WebviewViewProvider, vscode.Dispos
     if (!this.view || !this.controller) return;
     this.attached?.dispose();
     this.attached = SessionPanel.forSidebar(this.view, this.extensionUri, this.controller, this.callbacks, this.notes);
+    if (this.pendingThreadNavigation) { this.attached.restoreThreadNavigation(this.pendingThreadNavigation); this.pendingThreadNavigation = undefined; }
     if (this.pendingHistory) { this.pendingHistory = false; this.attached.showHistory(); }
     for (const text of this.pendingContext.splice(0)) this.attached.addContext(text);
   }
@@ -1029,6 +1048,7 @@ const CLIENT_JS = String.raw`
     if(m.type==='optionApplied'){if(m.requestId!==undefined&&m.requestId!==optionRequest)return;setOptionBusy(false);if(m.warning){E('optionStatus').textContent=m.warning;E('optionChoices').querySelectorAll('button').forEach(function(b){b.disabled=false;});}else closeOptions(true);return;}
     if(m.type==='optionError'){if(m.requestId!==undefined&&m.requestId!==optionRequest)return;setOptionBusy(false);renderOptions();E('optionStatus').textContent=m.message;return;}
     if (m.type === 'fileSearchResults') { if(m.requestId===fileRequest && fileQuery) renderFileResults(m); return; }
+    if (m.type === 'threadNavigationRestore') { restoreThreadNavigation(m.state); return; }
     if (m.type === 'historyRestore') { restoreHistory(m.state); return; }
     if (m.type === 'showSessions') { if(E('sessionPicker').classList.contains('hidden')) E('sessBtn').click(); return; }
     if (m.type === 'sessionsChanged') { if(!E('sessionPicker').classList.contains('hidden')) requestHistory(); return; }
@@ -1649,7 +1669,7 @@ const CLIENT_JS = String.raw`
     else if (action === 'renameSession') { editSessionName(el.parentElement.querySelector('.session-choice'),payload); }
     else if (action === 'deleteSession') { vscode.postMessage({type:'deleteSession',sessionId:payload}); }
     else if (action === 'withdraw') vscode.postMessage({ type: 'withdraw', promptId: payload });
-    else if (action === 'openThread') vscode.postMessage({ type: 'openThread', sessionId: payload });
+    else if (action === 'openThread' && payload !== sessionId) { E('threadDetails').open=true;var navigation=saveThreadNavigation();vscode.postMessage({ type: 'openThread', sessionId: payload, threadNavigation: navigation }); }
     else if (action === 'openChangedFile') {ev.preventDefault();vscode.postMessage({type:'openFile',path:payload});}
     else if (action === 'interrupt') vscode.postMessage({ type: 'interrupt', execId: payload });
   });

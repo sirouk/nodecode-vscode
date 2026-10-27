@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep Agents & threads open when navigating children, siblings or parents, including from spawned-fork links and editor conversations; retain the Idle disclosure without mixing conversation drafts.
+- Show persistent parent links above an indented family list, highlight the current thread without reloading it on click, and keep selected threads and ancestors of visible work out of the Idle fold.
+
 ## [0.1.8]
 
 ### Changed

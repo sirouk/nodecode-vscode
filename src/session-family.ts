@@ -16,6 +16,7 @@ export interface SessionThread {
 }
 
 export interface SessionFamily {
+  currentThread?: SessionThread;
   threads: SessionThread[];
   ancestors: SessionThread[];
   siblings: SessionThread[];
@@ -68,7 +69,9 @@ export function sessionFamily(
     const nested = children.get(row.id) ?? [];
     for (let i = nested.length - 1; i >= 0; i--) pending.push({row:nested[i],depth:depth+1});
   }
+  const current = byId.get(sessionId ?? "");
   return {
+    currentThread: current ? describe(current, 0) : undefined,
     threads: descendants.filter((row) => row.relativeDepth === 1), ancestors, descendants, parentId,
     siblings: parentId ? rows.filter((row) => row.parent_id === parentId && row.id !== sessionId).map((row) => describe(row, 0)) : [],
   };

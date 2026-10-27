@@ -7,7 +7,7 @@ import { NodecodeApi } from "./api";
 import { NodecodeCli, NODECODE_INSTALL_COMMAND, NODECODE_WINDOWS_INSTALL_COMMAND, RuntimeStatus } from "./cli";
 import { NodecodeDiscovery, Notifications } from "./discovery";
 import { SessionController, deleteSessionTree } from "./manager";
-import { SessionPanel, SessionSidebar, type PanelCallbacks } from "./panel";
+import { SessionPanel, SessionSidebar, type ThreadNavigationState, type PanelCallbacks } from "./panel";
 import { registerSessions, type CommandDeps } from "./sessions";
 import { MAX_SELECTED_FILE_BYTES, MAX_SELECTED_TOTAL_BYTES, type SelectedFileInput } from "./file-browser";
 import { CheckpointBookmarks } from "./checkpoint-bookmarks";
@@ -242,7 +242,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     openInEditor: (sid) => SessionPanel.createOrShow(context.extensionUri, controllerFor(sid, { connect: true }), panelCallbacks, notes),
     newSession: () => { void vscode.commands.executeCommand("nodecode.newSession"); },
-    openSession: (sid) => openPanel(sid),
+    openSession: (sid, navigation) => openPanel(sid, navigation),
     toggleCheckpointBookmark: async (sid, turnId) => {
       const controller = controllerFor(sid);
       controller.assertCheckpointTurn(turnId);
@@ -357,9 +357,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const sidebar = new SessionSidebar(context.extensionUri, panelCallbacks, notes);
   context.subscriptions.push(sidebar, vscode.window.registerWebviewViewProvider("nodecodeChat", sidebar, { webviewOptions: { retainContextWhenHidden: true } }));
 
-  const openPanel: CommandDeps["openPanel"] = (sessionId: string) => {
+  const openPanel = (sessionId: string, navigation?: ThreadNavigationState): void => {
     void context.workspaceState.update("nodecode.activeSession", sessionId);
-    sidebar.show(controllerFor(sessionId, { connect: true }));
+    sidebar.show(controllerFor(sessionId, { connect: true }), navigation);
   };
 
   // Send editor context into a draft; the user decides when to submit it.

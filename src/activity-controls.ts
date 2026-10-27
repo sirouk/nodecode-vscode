@@ -1,5 +1,5 @@
 // Compact projections of native session relationships, file receipts and processes.
-export const ACTIVITY_CSS = `.activity-section{width:100%;font-size:12px}.activity-section>summary{cursor:pointer;color:var(--dim);padding:3px}.activity-body{max-height:260px;overflow:auto;padding-top:5px;padding-left:14px}.activity-link{display:flex;align-items:center;gap:7px;width:100%;text-align:left;padding:5px}.activity-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-kind{margin-left:auto;color:var(--dim);font-size:10px;white-space:nowrap}.agent-dot{width:7px;height:7px;flex-shrink:0;border-radius:50%}.activity-file,.activity-process{margin:4px 0;border:1px solid var(--border);border-radius:6px;padding:5px}.activity-file summary,.activity-process summary{cursor:pointer;overflow-wrap:anywhere}.activity-file pre,.activity-process pre{max-height:170px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;overflow-anchor:none;font:11px/1.5 var(--vscode-editor-font-family,monospace);margin:6px 0}.process-controls{display:flex;align-items:center;gap:8px}.process-stop{margin-left:auto;color:var(--err)}#app #threadBar{padding:2px 12px}#threadList{max-height:min(160px,22vh);padding-top:2px;overscroll-behavior:contain}#threadList .activity-link{padding:3px 5px;gap:6px}#idleThreadList{padding-left:14px}#idleThreadDetails>summary{cursor:pointer;color:var(--dim);padding:3px 5px;font-size:11px}.sys.spawn-notice{margin:5px 0;text-align:left;border-left:3px solid var(--agent-color);border-radius:4px;background:var(--surface);max-width:100%;overflow:hidden}.spawn-notice>button{display:block;width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;padding:4px 8px}#fileBar:empty{display:none}#fileBar{padding:2px 12px}`;
+export const ACTIVITY_CSS = `.activity-section{width:100%;font-size:12px}.activity-section>summary{cursor:pointer;color:var(--dim);padding:3px}.activity-body{max-height:260px;overflow:auto;padding-top:5px;padding-left:14px}.activity-link{display:flex;align-items:center;gap:7px;width:100%;text-align:left;padding:5px}.activity-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.activity-kind{margin-left:auto;color:var(--dim);font-size:10px;white-space:nowrap}.agent-dot{width:7px;height:7px;flex-shrink:0;border-radius:50%}.activity-file,.activity-process{margin:4px 0;border:1px solid var(--border);border-radius:6px;padding:5px}.activity-file summary,.activity-process summary{cursor:pointer;overflow-wrap:anywhere}.activity-file pre,.activity-process pre{max-height:170px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;overflow-anchor:none;font:11px/1.5 var(--vscode-editor-font-family,monospace);margin:6px 0}.process-controls{display:flex;align-items:center;gap:8px}.process-stop{margin-left:auto;color:var(--err)}#app #threadBar{padding:2px 12px}#threadList{max-height:min(160px,22vh);padding-top:2px;overscroll-behavior:contain}#threadList .activity-link{padding:3px 5px 3px calc(5px + var(--thread-depth,0)*14px);gap:6px}#threadList [aria-current="true"]{background:var(--vscode-list-activeSelectionBackground,#fa8b3e24);color:var(--vscode-list-activeSelectionForeground,var(--fg));border-color:var(--vscode-focusBorder,var(--accent))}#idleThreadList{padding-left:14px}#idleThreadDetails>summary{cursor:pointer;color:var(--dim);padding:3px 5px;font-size:11px}.sys.spawn-notice{margin:5px 0;text-align:left;border-left:3px solid var(--agent-color);border-radius:4px;background:var(--surface);max-width:100%;overflow:hidden}.spawn-notice>button{display:block;width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;padding:4px 8px}#fileBar:empty{display:none}#fileBar{padding:2px 12px}`;
 
 // Last activity is the roster's recency signal, not a historical idle transition.
 export const THREAD_ORDER_JS = String.raw`
@@ -14,15 +14,46 @@ export const THREAD_ORDER_JS = String.raw`
 
 export const ACTIVITY_CLIENT_JS = String.raw`
   ${THREAD_ORDER_JS}
-  var activitySignature={threads:'',files:''};
-  E('threadBar').innerHTML='<details class="activity-section" id="threadDetails"><summary id="threadSummary">Agents & threads</summary><div class="activity-body" id="threadList"><div id="activeThreadList"></div><details id="idleThreadDetails" class="hidden"><summary id="idleThreadSummary">Idle</summary><div id="idleThreadList"></div></details></div></details>';
+  var activitySignature={threads:'',files:''},threadSelectionRevealed=false;
+  E('threadBar').innerHTML='<details class="activity-section" id="threadDetails"><summary id="threadSummary">Agents & threads</summary><div class="activity-body" id="threadList"><div id="parentThreadList"></div><div id="activeThreadList"></div><details id="idleThreadDetails" class="hidden"><summary id="idleThreadSummary">Idle</summary><div id="idleThreadList"></div></details></div></details>';
   E('fileBar').innerHTML='<details class="activity-section" id="fileDetails"><summary id="fileSummary">Modified files</summary><div class="activity-body" id="fileList"></div></details>';
   E('procBar').innerHTML='<details class="activity-section" id="processDetails"><summary id="processSummary">Background processes</summary><div class="activity-body" id="processList"></div></details>';
-  ['thread','file','process'].forEach(function(name){var details=E(name+'Details');details.open=!!expanded['section-'+name];details.addEventListener('toggle',function(){expanded['section-'+name]=details.open;saveDraft();});});
-  var idleThreadDetails=E('idleThreadDetails');idleThreadDetails.open=!!expanded['section-thread-idle'];
-  idleThreadDetails.addEventListener('toggle',function(){expanded['section-thread-idle']=idleThreadDetails.open;saveDraft();});
+  ['file','process'].forEach(function(name){var details=E(name+'Details');details.open=!!expanded['section-'+name];details.addEventListener('toggle',function(){expanded['section-'+name]=details.open;saveDraft();});});
+  var idleThreadDetails=E('idleThreadDetails');
+  function saveThreadNavigation(){
+    var navigation={open:E('threadDetails').open,idleOpen:idleThreadDetails.open};
+    expanded['section-thread']=navigation.open;expanded['section-thread-idle']=navigation.idleOpen;
+    persisted.threadNavigation=navigation;saveDraft();return navigation;
+  }
+  function restoreThreadNavigation(navigation){
+    if(!navigation)return;
+    E('threadDetails').open=!!navigation.open;idleThreadDetails.open=!!navigation.idleOpen;saveThreadNavigation();revealSelectedThread();
+  }
+  // Reveal on navigation or first opening, not on subsequent live updates or user scrolling.
+  function revealSelectedThread(){
+    var box=E('threadList'),selected=box.querySelector('[aria-current="true"]');
+    if(threadSelectionRevealed||!E('threadDetails').open||!selected)return;
+    var bounds=box.getBoundingClientRect(),row=selected.getBoundingClientRect();
+    if(row.bottom>bounds.bottom)box.scrollTop+=row.bottom-bounds.bottom;
+    else if(row.top<bounds.top)box.scrollTop+=row.top-bounds.top;
+    threadSelectionRevealed=true;
+  }
+  E('threadDetails').open=!!expanded['section-thread'];idleThreadDetails.open=!!expanded['section-thread-idle'];
+  restoreThreadNavigation(persisted.threadNavigation);
+  E('threadDetails').addEventListener('toggle',function(){saveThreadNavigation();revealSelectedThread();});
+  idleThreadDetails.addEventListener('toggle',saveThreadNavigation);
   function agentColor(id){var hash=2166136261;for(var i=0;i<id.length;i++){hash^=id.charCodeAt(i);hash=Math.imul(hash,16777619);}return 'hsl('+(Math.abs(hash)%360)+' 65% 65%)';}
-  function threadRow(row){var kind=row.kind||'thread',status=row.status||'unknown',name=row.title||'Untitled '+kind,context=row.familyRole+(row.relativeDepth>1?' · depth '+row.relativeDepth:'');return '<button class="activity-link" data-a="openThread" data-p="'+esc(row.id)+'" title="'+esc(name+' · '+context+' · '+kind+' · '+status+' · '+row.id)+'"><span class="agent-dot" style="background:'+agentColor(row.id)+'"></span><span class="activity-name">'+esc(name)+'</span><span class="activity-kind">'+esc(kind)+' · '+esc(status)+'</span></button>';}
+  function threadRow(row){
+    var kind=row.kind||'thread',status=row.status||'unknown',name=row.title||'Untitled '+kind,current=row.id===sessionId,context=current?'Current thread':row.familyRole;
+    return '<button class="activity-link" data-a="openThread" data-p="'+esc(row.id)+'"'+(current?' aria-current="true"':'')+' style="--thread-depth:'+Math.min(row.indent,4)+'" title="'+esc(name+' · '+context+' · '+kind+' · '+status+' · '+row.id)+'"><span class="agent-dot" style="background:'+agentColor(row.id)+'"></span><span class="activity-name">'+esc(name)+'</span><span class="activity-kind">'+esc(current?'current':row.familyRole==='Parent'?'parent':kind)+' · '+esc(status)+'</span></button>';
+  }
+  // Sort within each level, keeping native parent/child edges together.
+  function threadHierarchy(rows){
+    var byId=new Map(rows.map(function(row){return [row.id,row];})),children=new Map(),seen=new Set(),ordered=[];
+    rows.forEach(function(row){var parent=byId.has(row.parentId)?row.parentId:null,group=children.get(parent)||[];group.push(row);children.set(parent,group);});
+    function visit(row){if(seen.has(row.id))return;seen.add(row.id);ordered.push(row);(children.get(row.id)||[]).forEach(visit);}
+    (children.get(null)||[]).forEach(visit);rows.forEach(visit);return ordered;
+  }
   function preserveActivityList(box,update){
     var candidates=Array.from(box.querySelectorAll('[data-p],[data-file-path]')),anchor=candidates.find(function(el){return el.getBoundingClientRect().bottom>box.getBoundingClientRect().top;}),key=anchor&&(anchor.dataset.p||anchor.dataset.filePath),offset=anchor&&anchor.getBoundingClientRect().top-box.getBoundingClientRect().top,top=box.scrollTop;
     var diffFocus=rememberDiffFocus(box);
@@ -40,20 +71,30 @@ export const ACTIVITY_CLIENT_JS = String.raw`
     positions.forEach(function(saved){var file=Array.from(box.querySelectorAll('[data-file-path]')).find(function(el){return el.dataset.filePath===saved.path;});if(file)file.querySelectorAll('pre').forEach(function(pre,i){if(saved.panes[i]){pre.scrollTop=saved.panes[i][0];pre.scrollLeft=saved.panes[i][1];}});});
   }
   function renderActivity(view){
-    var ancestors=view.ancestors||[],siblings=view.siblings||[],descendants=view.descendants||view.threads||[],threadSignature=JSON.stringify([view.parentId,ancestors,siblings,descendants]);
-    function related(rows,role){return rows.map(function(row){return Object.assign({},row,{familyRole:role});});}
-    var all=related(ancestors,'Parent').concat(related(siblings,'Sibling'),related(descendants,'Child'));
-    if(!ancestors.length&&view.parentId)all.push({id:view.parentId,title:'Parent session',status:'unknown',kind:'thread',familyRole:'Parent'});
-    E('threadBar').classList.toggle('hidden',!all.length&&!view.parentId);
+    var ancestors=view.ancestors||[],siblings=view.siblings||[],descendants=view.descendants||view.threads||[],current=view.currentThread,threadSignature=JSON.stringify([view.sessionId,view.parentId,current,ancestors,siblings,descendants]);
+    function related(rows,role){return rows.map(function(row){return Object.assign({},row,{familyRole:role,indent:Math.max(0,ancestors.length+(row.relativeDepth||0))});});}
+    var parents=ancestors.map(function(row,index){return Object.assign({},row,{familyRole:'Parent',indent:index});});
+    if(!ancestors.length&&view.parentId)parents.push({id:view.parentId,title:'Parent session',status:'unknown',kind:'thread',familyRole:'Parent',indent:0});
+    var hasFamily=parents.length||siblings.length||descendants.length;
+    var parentIds=new Set(parents.map(function(row){return row.id;}));
+    var all=related(siblings,'Sibling').concat(current&&hasFamily?related([current],'Current'):[],related(descendants,'Child')).filter(function(row){return !parentIds.has(row.id);});
+    if(!ancestors.length&&parents.length)all.forEach(function(row){row.indent++;});
+    E('threadBar').classList.toggle('hidden',!hasFamily);
     E('threadSummary').textContent='Agents & threads · '+descendants.length+(descendants.some(function(t){return t.status==='running';})?' · '+descendants.filter(function(t){return t.status==='running';}).length+' running':'');
     if(threadSignature!==activitySignature.threads&&!hasSelection(E('threadList'))){
-      var groups=threadGroups(all);
+      var groups=threadGroups(all.filter(function(row){return row.id!==sessionId;}));
+      var selected=all.find(function(row){return row.id===sessionId;});if(selected)groups.active.unshift(selected);
+      // Never hide an ancestor of visible work inside the idle fold.
+      var byId=new Map(all.map(function(row){return [row.id,row];})),visible=new Set(groups.active.map(function(row){return row.id;}));
+      groups.active.forEach(function(row){var parent=byId.get(row.parentId);while(parent&&!visible.has(parent.id)){visible.add(parent.id);parent=byId.get(parent.parentId);}});
+      groups.active=threadHierarchy(groups.active.concat(groups.idle.filter(function(row){return visible.has(row.id);})));groups.idle=threadHierarchy(groups.idle.filter(function(row){return !visible.has(row.id);}));
       preserveActivityList(E('threadList'),function(){
+        E('parentThreadList').innerHTML=parents.map(threadRow).join('');
         E('activeThreadList').innerHTML=groups.active.map(threadRow).join('');
         E('idleThreadList').innerHTML=groups.idle.map(threadRow).join('');
         E('idleThreadSummary').textContent='Idle · '+groups.idle.length;
         idleThreadDetails.classList.toggle('hidden',!groups.idle.length);
-      });activitySignature.threads=threadSignature;
+      });activitySignature.threads=threadSignature;revealSelectedThread();
     }
     var files=view.modifiedFiles||[],fileSignature=JSON.stringify(files);
     if(!hasSelection(E('fileList'))){E('fileBar').classList.toggle('hidden',!files.length);

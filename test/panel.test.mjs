@@ -18,7 +18,7 @@ function event() {const listeners=new Set();return {register:fn=>{listeners.add(
 function controller(id) {
   const store = new SessionStore();
   store.setThreads([],id);
-  return {sessionId:id,store,closeTextAttachments(){},commitTextAttachments:async()=>{},releasePreparedTextAttachments:async()=>{},releaseTextAttachment:async()=>{},rpc:{connectionState:'connected',attempts:0},subscribeConnection:()=>({dispose(){}}),imageUrl:key=>'https://example.com/'+key};
+  return {sessionId:id,store,closeTextAttachments(){},commitTextAttachments:async()=>{},releasePreparedTextAttachments:async()=>{},releaseTextAttachment:async()=>{},rpc:{connectionState:'connected',attempts:0},subscribeConnection:()=>({dispose(){}}),imageDataUrl:async()=> 'data:image/png;base64,aGVsbG8='};
 }
 
 test('sidebar switches subscriptions, queues context until ready and keeps current DOM', () => {
@@ -310,4 +310,85 @@ test('cached history is a readonly preview even if stale webview messages try to
   assert.match(posted.find(m=>m.type==='sendRejected').message,/synchroniz/i);
   for(const type of ['withdraw','cancel'])await panel.onMessage({type,promptId:'stale'});
   assert.deepEqual(commands,[]);assert.equal(warnings.length,2);
+});
+
+test('controller deduplicates saved-image requests and retains successful sources without retaining failures',async()=>{
+  let resolveImage,requests=0,fail=false;
+  const api={imageDataUrl:()=>{requests++;return fail?Promise.reject(new Error('gateway 401')):new Promise(resolve=>{resolveImage=resolve;});}};
+  const ctl=new SessionController({},{log(){}},api,'/workspace','images');
+  try{
+    const first=ctl.imageDataUrl('same'),second=ctl.imageDataUrl('same');
+    assert.equal(first,second);assert.equal(requests,1);
+    resolveImage('data:image/png;base64,aGVsbG8=');assert.equal(await first,'data:image/png;base64,aGVsbG8=');
+    assert.equal(await ctl.imageDataUrl('same'),'data:image/png;base64,aGVsbG8=');assert.equal(requests,1);
+    fail=true;await assert.rejects(ctl.imageDataUrl('failed'),/401/);await assert.rejects(ctl.imageDataUrl('failed'),/401/);assert.equal(requests,3);
+  }finally{ctl.dispose();}
+  await assert.rejects(ctl.imageDataUrl('same'),/closed|disposed/i);
+});
+
+test('cached user and assistant images resolve asynchronously without blocking transcript or leaking stale session results',async()=>{
+  const received=event(),disposed=event(),visibility=event(),posted=[];
+  const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};
+  const sidebar=new SessionSidebar(uri('/extension'),{}, {log(){}}),first=controller('image-history'),other=controller('other-image-history');
+  const pending=new Map();let requests=0;
+  first.imageDataUrl=id=>{requests++;return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}));};
+  first.store.applyFrame({type:'session_stream_resumed',session_id:first.sessionId,replay_chunk_final:true,accumulated_frames:[
+    {type:'session_stream_event',session_id:first.sessionId,sequence:1,event:{type:'turn.input_committed',payload:{role:'user',message:'Image question',metadata:{images:[{id:'user-image',media_type:'image/png'}]}}}},
+    {type:'session_stream_event',session_id:first.sessionId,sequence:2,event:{type:'turn.assistant_message_completed',payload:{message:'Image answer',metadata:{images:[{id:'assistant-image',media_type:'image/jpeg'}]}}}}
+  ]});
+  const saved=new SessionStore();saved.restoreProjection(JSON.parse(JSON.stringify(first.store.snapshotProjection())),first.sessionId);first.store=saved;
+  try{
+    sidebar.restore(first);sidebar.resolveWebviewView(view);
+    assert.equal(requests,2);assert.equal(posted.at(-1).view.cached,true);assert.equal(posted.at(-1).view.parts[0].text,'Image question');
+    assert.equal(posted.at(-1).view.parts[0].images[0].url,undefined,'no broken or credential-bearing URL is projected while loading');
+    first.store.applyFrame({type:'session_titled',title:'A title update while images load'});assert.equal(requests,2);
+    pending.get('user-image').resolve('data:image/png;base64,aGVsbG8=');await new Promise(setImmediate);
+    assert.equal(posted.at(-1).view.parts[0].images[0].url,'data:image/png;base64,aGVsbG8=');assert.equal(requests,2);
+    pending.get('assistant-image').reject(new Error('gateway GET image -> 401'));await new Promise(setImmediate);
+    assert.match(posted.at(-1).view.parts[1].images[0].error,/401/);
+    first.store.applyFrame({type:'session_titled',title:'Another stream update'});assert.equal(requests,2,'failed images must not retry on every streamed update');
+    const old=controller('old-images');let finishOld;
+    old.imageDataUrl=()=>new Promise(resolve=>{finishOld=resolve;});
+    old.store.applyFrame({type:'session_stream_event',session_id:old.sessionId,sequence:1,event:{type:'turn.input_committed',payload:{message:'Old image',metadata:{images:[{id:'late',media_type:'image/png'}]}}}});
+    sidebar.show(old);sidebar.show(other);posted.length=0;
+    finishOld('data:image/png;base64,b2xk');await new Promise(setImmediate);
+    assert.equal(posted.length,0,'disposed old-session image completions cannot post into the new conversation');
+  }finally{sidebar.dispose();}
+});
+
+
+test('saved-image failures retry only after connection recovery without refetching successful or pending images',async()=>{
+  const received=event(),disposed=event(),visibility=event(),posted=[];
+  const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};
+  const sidebar=new SessionSidebar(uri('/extension'),{}, {log(){}}),ctl=controller('image-recovery'),requests=new Map();
+  let connected,available=false,finishPending;
+  ctl.subscribeConnection=listener=>{connected=listener;return {dispose(){}};};
+  ctl.imageDataUrl=id=>{
+    requests.set(id,(requests.get(id)||0)+1);
+    if(id==='pending')return new Promise(resolve=>{finishPending=resolve;});
+    return id==='retry'&&!available?Promise.reject(new Error('gateway unavailable')):Promise.resolve('data:image/png;base64,aGVsbG8=');
+  };
+  ctl.store.applyFrame({type:'session_stream_event',session_id:ctl.sessionId,sequence:1,event:{type:'turn.input_committed',payload:{message:'Saved images',metadata:{images:['retry','success','pending'].map(id=>({id,media_type:'image/png'}))}}}});
+  const images=()=>posted.at(-1).view.parts[0].images;
+  try{
+    sidebar.restore(ctl);sidebar.resolveWebviewView(view);await new Promise(setImmediate);
+    assert.match(images()[0].error,/unavailable/);assert(images()[1].url);assert.equal(images()[2].url,undefined);
+    for(let i=0;i<5;i++)ctl.store.applyFrame({type:'session_titled',title:'Streaming '+i});
+    connected('connected',0);await new Promise(setImmediate);
+    assert.equal(requests.get('retry'),1,'frames and duplicate connected notifications must not retry a failure');
+    available=true;connected('disconnected',1);connected('connected',0);await new Promise(setImmediate);
+    assert.equal(requests.get('retry'),2);assert(images()[0].url);assert.equal(images()[0].error,undefined);
+    assert.equal(requests.get('success'),1);assert.equal(requests.get('pending'),1,'recovery must not replace in-flight image reads');
+    connected('connected',0);connected('disconnected',1);connected('connected',0);await new Promise(setImmediate);
+    assert.equal(requests.get('retry'),2,'successful recovery is cached across later reconnects');
+    finishPending('data:image/png;base64,cGVuZGluZw==');await new Promise(setImmediate);
+    assert.equal(images()[2].url,'data:image/png;base64,cGVuZGluZw==');assert.equal(requests.get('pending'),1);
+  }finally{sidebar.dispose();}
+});
+
+test('closing a controller discards an image result already in flight',async()=>{
+  let finish;
+  const ctl=new SessionController({},{log(){}},{imageDataUrl:()=>new Promise(resolve=>{finish=resolve;})},'/workspace','closing-images');
+  const pending=ctl.imageDataUrl('late');ctl.dispose();finish('data:image/png;base64,bGF0ZQ==');
+  await assert.rejects(pending,/closed/);assert.equal(ctl.imageSources.size,0);
 });

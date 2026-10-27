@@ -318,13 +318,37 @@ export class NodecodeApi {
     return this.request("POST", `/api/gateway/sessions/${encodeURIComponent(sessionId)}/effort`, { effort });
   }
 
-  imageUrl(sessionId: string, key: string): string {
-    try {
-      const ep = this.endpoint();
-      return `${ep.baseUrl}/api/gateway/sessions/${encodeURIComponent(sessionId)}/images/${encodeURIComponent(key)}?token=${encodeURIComponent(ep.token)}`;
-    } catch {
-      return "";
-    }
+  async imageDataUrl(sessionId: string, key: string): Promise<string> {
+    const ep = this.endpoint();
+    const path = `/api/gateway/sessions/${encodeURIComponent(sessionId)}/images/${encodeURIComponent(key)}`;
+    return new Promise((resolve, reject) => {
+      const req = http.get(`${ep.baseUrl}${path}`, {
+        timeout: 15000,
+        headers: ep.token ? { Authorization: `Bearer ${ep.token}` } : {},
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("error", reject);
+        res.on("close", () => {
+          if (!res.complete) reject(new Error("gateway image response closed before completion"));
+        });
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status >= 300) {
+            reject(new Error(`gateway GET ${path} -> ${status}`));
+            return;
+          }
+          const mediaType = (res.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase();
+          if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mediaType)) {
+            reject(new Error(`Unsupported saved image type: ${mediaType || "missing Content-Type"}`));
+            return;
+          }
+          resolve(`data:${mediaType};base64,${Buffer.concat(chunks).toString("base64")}`);
+        });
+      });
+      req.on("timeout", () => req.destroy(new Error("gateway image request timed out")));
+      req.on("error", reject);
+    });
   }
 
   async exportJsonl(sessionId: string): Promise<string> {

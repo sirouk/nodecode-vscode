@@ -160,6 +160,7 @@ export class SessionPanel {
   private ready = false;
   private pendingContext: string[] = [];
   private pendingHistory = false;
+  private readonly conversationImages = new Map<string, { url?: string; error?: string }>();
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -180,6 +181,9 @@ export class SessionPanel {
 
     this.disposables.push(controller.store.subscribe(() => this.postState()));
     this.disposables.push(controller.subscribeConnection((state, attempts) => {
+      if (state === "connected" && this.connection !== "connected") {
+        for (const [id, image] of this.conversationImages) if (image.error) this.conversationImages.delete(id);
+      }
       this.connection = state;
       this.connectionAttempts = attempts;
       this.postState();
@@ -220,6 +224,26 @@ export class SessionPanel {
     } catch { return undefined; }
   }
 
+  private conversationImage(id: string): { url?: string; error?: string } {
+    let image = this.conversationImages.get(id);
+    if (!image) {
+      image = {};
+      this.conversationImages.set(id, image);
+      const controller = this.controller, result = image;
+      void controller.imageDataUrl(id).then((url) => {
+        if (this.disposed || this.controller !== controller) return;
+        result.url = url;
+        this.postState();
+      }, (error) => {
+        if (this.disposed || this.controller !== controller) return;
+        result.error = String(error);
+        this.notes.log(`saved image ${id} unavailable: ${String(error)}`);
+        this.postState();
+      });
+    }
+    return image;
+  }
+
   private postState(): void {
     if (this.disposed || this.controller.store.replaying) return;
     const view = this.controller.store.view();
@@ -227,7 +251,7 @@ export class SessionPanel {
     if (title && !this.sidebar) this.panel.title = `Nodecode: ${title}`;
     this.postMessage({
       type: "state",
-      view: { ...view, parts: view.parts.map((part) => part.kind === "tool" ? { ...part, call: { ...part.call, imageUrl: this.toolImageUrl(part.call, view.cwd) } } : (part.kind === "user" || part.kind === "assistant") && part.images?.length ? { ...part, images: part.images.map((image) => ({ ...image, url: this.controller.imageUrl(image.id) })) } : part) },
+      view: { ...view, parts: view.parts.map((part) => part.kind === "tool" ? { ...part, call: { ...part.call, imageUrl: this.toolImageUrl(part.call, view.cwd) } } : (part.kind === "user" || part.kind === "assistant") && part.images?.length ? { ...part, images: part.images.map((image) => ({ ...image, ...this.conversationImage(image.id) })) } : part) },
       connection: this.connection,
       attempts: this.connectionAttempts,
       history: this.controller.store.userPrompts(),
@@ -1077,7 +1101,7 @@ const CLIENT_JS = String.raw`
     if (call.result && !(image && call.imageUrl && call.imageUrl.startsWith('data:image/png'))) body += '<div class="tool-sec"><div class="tool-label">' + (call.failed ? 'Error' : 'Output') + '</div><pre class="tool-io">' + esc(call.result) + '</pre></div>';
     return '<details class="tool" data-detail="tool-' + esc(callKey) + '"><summary class="tool-head ' + status + '">' + esc(call.name) + ' <span class="sub">' + status + (call.durationMs != null ? ' · ' + call.durationMs + ' ms' : '') + '</span></summary>' + body + '</details>';
   }
-  function imageHtml(part){ return (part.images || []).map(function(image){return '<img class="message-image" src="' + esc(image.url) + '" alt="Conversation image" loading="lazy">';}).join(''); }
+  function imageHtml(part){ return (part.images || []).map(function(image){return image.url?'<img class="message-image" src="' + esc(image.url) + '" alt="Conversation image" loading="lazy">':'<span class="sub message-image-status" role="status"'+(image.error?' title="'+esc(image.error)+'"':'')+'>'+(image.error?'Image unavailable: '+esc(image.error):'Loading image…')+'</span>';}).join(''); }
   function textFileHtml(part){return (part.textFiles||[]).map(function(file){return '<button class="message-file" data-a="openTextAttachment" data-p="'+esc(file.ref)+'" title="'+esc(file.name)+' · '+file.byteLength+' bytes">'+esc(file.name)+'</button>';}).join('');}
   function fileHtml(part){return (part.files||[]).filter(function(file){return !(part.text||'').includes('@'+file);}).map(function(file){return '<span class="message-file" title="'+esc(file)+'">@'+esc(file.split(/[\\/]/).pop())+'</span>';}).join('');}
   function forkHtml(part){var saved=(state.view&&state.view.bookmarkedTurnIds||[]).includes(part.forkTurnId);return part.forkTurnId&&!(state.view&&state.view.cached)&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' aria-label="Fork from this turn" title="Fork from this turn into a new editor. Includes all recorded messages in this turn; this conversation is kept.">${icon('fork')}</button><button class="bookmark-turn '+(saved?'saved':'')+'" data-a="toggleCheckpointBookmark" data-p="'+esc(part.forkTurnId)+'" aria-pressed="'+String(saved)+'" aria-label="'+(saved?'Remove bookmark':'Bookmark checkpoint')+'" title="'+(saved?'Remove bookmark':'Bookmark this recorded checkpoint; does not create a new file snapshot')+'" '+(bookmarkingTurns[part.forkTurnId]?'disabled':'')+'>${icon('bookmark')}</button>':'';}

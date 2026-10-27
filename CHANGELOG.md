@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Load saved conversation images through authenticated binary gateway requests, keeping credentials out of image URLs and restoring history and full-size previews.
+
 ## [0.1.7]
 
 ### Fixed

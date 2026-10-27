@@ -160,3 +160,35 @@ test('cache validation reads one exact durable event without using wire sequence
     assert.deepEqual(requests,[{method:'GET',url:'/api/gateway/sessions/session%2Fone/history?before=42&limit=1'},{method:'GET',url:'/api/gateway/sessions/session%2Fone/history?before=43&limit=1'}]);
   }finally{server.close();await once(server,'close');}
 });
+
+test('saved images use authenticated binary retrieval without exposing the operator token in a URL',async()=>{
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII=','base64'),requests=[];
+  const server=http.createServer((req,res)=>{
+    requests.push({method:req.method,url:req.url,auth:req.headers.authorization});
+    if(req.url.endsWith('/denied')){res.writeHead(401,{'Content-Type':'application/json'});res.end('{"error":"operator_auth_failed"}');return;}
+    if(req.url.endsWith('/not-image')){res.writeHead(200,{'Content-Type':'text/html'});res.end('<html>not an image</html>');return;}
+    res.writeHead(200,{'Content-Type':'image/png','Content-Length':png.length});
+    res.write(png.subarray(0,17));res.end(png.subarray(17));
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  try{
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'private-test-token'})},{log(){}});
+    const source=await api.imageDataUrl('session/with spaces','image/one & two');
+    assert.equal(source,'data:image/png;base64,'+png.toString('base64'));
+    assert.deepEqual(Buffer.from(source.split(',')[1],'base64'),png,'binary bytes must never pass through UTF-8 decoding');
+    assert.deepEqual(requests[0],{method:'GET',url:'/api/gateway/sessions/session%2Fwith%20spaces/images/image%2Fone%20%26%20two',auth:'Bearer private-test-token'});
+    assert(!source.includes('private-test-token'));
+    await assert.rejects(api.imageDataUrl('session','denied'),/401/);
+    await assert.rejects(api.imageDataUrl('session','not-image'),/unsupported.*image|image.*type/i);
+    assert(requests.every(request=>!request.url.includes('?')&&request.auth==='Bearer private-test-token'));
+  }finally{server.close();await once(server,'close');}
+});
+
+test('truncated saved-image responses reject rather than producing a corrupt data URI',async()=>{
+  const server=http.createServer((req,res)=>{res.writeHead(200,{'Content-Type':'image/png','Content-Length':'1000'});res.write(Buffer.from([137,80,78,71]));setTimeout(()=>res.destroy(),10);});
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  try{
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'test'})},{log(){}});
+    await assert.rejects(api.imageDataUrl('session','partial'),/aborted|reset|closed|terminated/i);
+  }finally{server.close();await once(server,'close');}
+});

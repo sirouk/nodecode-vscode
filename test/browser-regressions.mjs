@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict';
 import {createRequire,Module} from 'node:module';
 import fs from 'node:fs';
+import http from 'node:http';
+import {once} from 'node:events';
 const require=createRequire(import.meta.url),load=Module._load;
 const {chromium}=require(process.env.PLAYWRIGHT_PATH||'playwright');
 Module._load=function(name,...args){return name==='vscode'?{Uri:{joinPath:()=>({toString:()=>''})}}:load.call(this,name,...args);};
@@ -177,6 +179,37 @@ try{
     await page.locator('#queueBar [data-p="now"]').click();assert.equal((await posted(page,'withdraw')).promptId,'now');
     assert.equal(await chips.count(),2,'native state, not optimistic removal, confirms withdrawal');
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));await page.close();
+  });
+  await check('authenticated saved images decode in cached history and the full-size preview',async()=>{
+    const {NodecodeApi}=require('../out/api.js'),{SessionController}=require('../out/manager.js'),{SessionStore}=require('../out/store.js');
+    const requests=[],server=http.createServer((req,res)=>{
+      requests.push({url:req.url,auth:req.headers.authorization});
+      if(req.headers.authorization!=='Bearer browser-image-token'||req.url.includes('?')){res.writeHead(401);res.end();return;}
+      res.writeHead(200,{'Content-Type':'image/png'});res.end(png.buffer);
+    });
+    server.listen(0,'127.0.0.1');await once(server,'listening');
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'browser-image-token'})},{log(){}});
+    const ctl=new SessionController({},{log(){}},api,'/workspace','saved-images'),projector=Object.create(SessionPanel.prototype),updates=[];
+    const {page,errors}=await open();
+    try{
+      ctl.store.applyFrame({type:'session_stream_resumed',session_id:ctl.sessionId,replay_chunk_final:true,admission_state:'ready',accumulated_frames:[
+        {type:'session_stream_event',sequence:1,event:{type:'turn.input_committed',payload:{message:'Saved image question',metadata:{images:[{id:'saved-png',media_type:'image/png'}]}}}},
+        {type:'session_stream_event',sequence:2,event:{type:'turn.assistant_message_completed',payload:{message:'Saved image reply',metadata:{images:[{id:'saved-png',media_type:'image/png'}]}}}},
+      ]});
+      const cached=new SessionStore();cached.restoreProjection(JSON.parse(JSON.stringify(ctl.store.snapshotProjection())),ctl.sessionId);ctl.store=cached;
+      Object.assign(projector,{controller:ctl,conversationImages:new Map(),notes:{log(){}},panel:{webview:{postMessage:m=>updates.push(m)}},connection:'connecting',connectionAttempts:0});
+      projector.postState();assert.equal(updates[0].view.cached,true);await emit(page,updates[0]);
+      assert.equal(await page.locator('.message-image').count(),0);assert.equal(await page.locator('.message-image-status').count(),2);
+      await ctl.imageDataUrl('saved-png');await new Promise(setImmediate);await emit(page,updates.at(-1));
+      await page.waitForFunction(()=>Array.from(document.querySelectorAll('.message-image')).length===2&&Array.from(document.querySelectorAll('.message-image')).every(image=>image.complete&&image.naturalWidth>0));
+      assert.deepEqual(requests,[{url:'/api/gateway/sessions/saved-images/images/saved-png',auth:'Bearer browser-image-token'}]);
+      for(const image of await page.locator('.message-image').all())assert((await image.getAttribute('src')).startsWith('data:image/png;base64,'));
+      await page.locator('.message-image').first().click();await page.waitForFunction(()=>{var image=document.querySelector('#imagePreviewContent');return image.complete&&image.naturalWidth>0;});
+      assert(await page.locator('#imagePreview').isVisible());await page.keyboard.press('Escape');
+      await emit(page,{...state,view:{...state.view,parts:[{kind:'user',text:'Unavailable image',images:[{id:'missing',error:'gateway GET image -> 401'}]}]}});
+      assert.match(await page.locator('.message-image-status').textContent(),/Image unavailable:.*401/);assert.equal(await page.locator('.message-image').count(),0);
+      assert.deepEqual(errors,[]);
+    }finally{projector.disposed=true;ctl.dispose();await page.close();server.close();await once(server,'close');}
   });
   assert.deepEqual(failures,[],'Chromium regressions failed');
 }finally{await browser.close();}

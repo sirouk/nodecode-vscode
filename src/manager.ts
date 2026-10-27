@@ -49,6 +49,7 @@ export class SessionController {
   private threadsRevision = 0;
   private readonly textAttachments: TextAttachmentStore;
   private readonly browsedFiles = new WeakMap<object, Set<string>>();
+  private readonly imageSources = new Map<string, Promise<string>>();
 
   constructor(
     private readonly cli: NodecodeCli,
@@ -169,8 +170,20 @@ export class SessionController {
     }, delayMs);
   }
 
-  imageUrl(id: string): string {
-    return this.api.imageUrl(this.sessionId, id);
+  imageDataUrl(id: string): Promise<string> {
+    if (this.disposed) return Promise.reject(new Error("Session is closed"));
+    let source = this.imageSources.get(id);
+    if (!source) {
+      source = this.api.imageDataUrl(this.sessionId, id).then((url) => {
+        if (this.disposed) throw new Error("Session is closed");
+        return url;
+      }).catch((error) => {
+        this.imageSources.delete(id);
+        throw error;
+      });
+      this.imageSources.set(id, source);
+    }
+    return source;
   }
 
   refreshHeader(): void {
@@ -421,6 +434,7 @@ export class SessionController {
     if (this.disposed) return;
     this.saveCache();
     this.disposed = true;
+    this.imageSources.clear();
     if (this.cacheTimer) clearTimeout(this.cacheTimer);
     this.headerRevision++; this.targetRevision++; this.threadsRevision++;
     if (this.headerTimer) clearTimeout(this.headerTimer);

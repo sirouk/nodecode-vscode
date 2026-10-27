@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7]
+
 ### Fixed
 
 - Restore complete local thread projections on reopen, validate native history before cursor catch-up, and publish replay as one transaction rather than rebuilding the growing transcript for each fact; preserve recorded files, agent relationships and older messages.
@@ -79,7 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.3...v0.1.4

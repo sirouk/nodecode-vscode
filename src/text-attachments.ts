@@ -51,6 +51,7 @@ export class TextAttachmentStore {
   private readonly uploads = new Map<object, Map<number, Upload>>();
   private readonly held = new Map<object, Map<string, TextFileAttachment>>();
   private readonly cancelled = new WeakSet<object>();
+  private readonly cancelledRequests = new WeakMap<object, Set<number>>();
   private nextRequestId = 0;
   private static writeTail: Promise<unknown> = Promise.resolve();
   private static readonly holders = new Map<string, Set<object>>();
@@ -96,6 +97,7 @@ export class TextAttachmentStore {
   async stageChunk(chunk: TextAttachmentChunk, source: object): Promise<{requestId:number; index:number; attachment?:TextFileAttachment}> {
     const fail = (message: string): never => { this.uploads.get(source)?.delete(chunk.requestId); throw new Error(message); };
     if (this.cancelled.has(source)) return fail("The conversation view closed. Nothing was sent.");
+    if (this.cancelledRequests.get(source)?.has(chunk.requestId)) return fail("Text attachment was cancelled. Retry the attachment.");
     if (chunk.origin !== undefined && !["nodecode","computer","paste"].includes(chunk.origin) || chunk.originalPath !== undefined && (typeof chunk.originalPath !== "string" || chunk.originalPath.includes("\0"))) return fail("Invalid attachment origin.");
     if (typeof chunk.text !== "string" || chunk.text.length > TEXT_ATTACHMENT_CHUNK_CHARS || hasUnpairedSurrogate(chunk.text) || typeof chunk.name !== "string" || !chunk.name.trim() || chunk.name.length > 256 || chunk.name.includes("\0") || !Number.isSafeInteger(chunk.requestId) || !Number.isInteger(chunk.index) || !Number.isInteger(chunk.totalChunks) || chunk.totalChunks < 1 || chunk.totalChunks > 256 || chunk.index < 0 || chunk.index >= chunk.totalChunks) return fail("Invalid text attachment chunk.");
     const pending = this.uploads.get(source) ?? new Map<number, Upload>();
@@ -235,9 +237,13 @@ export class TextAttachmentStore {
     const held=[...(this.held.get(source)?.values()??[])],pending=[...(this.uploads.get(source)?.values()??[])];
     if(held.length+pending.length+count>MAX_TEXT_ATTACHMENTS || held.reduce((n,f)=>n+f.byteLength,0)+pending.reduce((n,f)=>n+f.bytes,0)+bytes>MAX_TEXT_ATTACHMENT_BYTES)throw new Error("Attach at most four text files, 8 MiB total.");
   }
-  cancel(requestId: number, source: object): void { this.uploads.get(source)?.delete(requestId); }
+  cancel(requestId: number, source: object): void {
+    const requests = this.cancelledRequests.get(source) ?? new Set<number>();
+    requests.add(requestId); this.cancelledRequests.set(source, requests);
+    this.uploads.get(source)?.delete(requestId);
+  }
   close(source: object): void {
-    this.cancelled.add(source); this.uploads.delete(source);
+    this.cancelled.add(source); this.uploads.delete(source); this.cancelledRequests.delete(source);
     for (const ref of this.held.get(source)?.keys() ?? []) this.unhold(ref, source);
     this.held.delete(source);
   }

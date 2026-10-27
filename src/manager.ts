@@ -22,6 +22,9 @@ import { withFileReferences, splitFileReferences } from "./file-context";
 import { TextAttachmentStore, TextAttachmentChunk, MAX_PROMPT_TEXT_CHARS, appendTextFileReferences, splitTextFileReferences } from "./text-attachments";
 import { AttachmentSelection, FileBrowserOptions, FileBrowserListing, SelectedFileInput, browseRuntimeDirectory, readSelectedRuntimeFiles, selectedImage, MAX_SELECTED_TOTAL_BYTES } from "./file-browser";
 
+// Block every controller for a deleting tree, including ones created while readers close.
+const deletingSessions = new WeakMap<object, Set<string>>();
+
 export class SessionController {
   readonly store = new SessionStore();
   readonly rpc: RpcProcess;
@@ -98,13 +101,14 @@ export class SessionController {
     };
     this.rpc.onStateChanged = (state, attempts) => {
       if (this.disposed) return;
+      if (state !== "connected") this.store.markProcessesUnconfirmed();
       this.onConnectionChanged(state, attempts);
       for (const listener of this.connectionListeners) listener(state, attempts);
     };
   }
 
   connect(): void {
-    if (this.disposed) return;
+    if (this.disposed || deletingSessions.get(this.api)?.has(this.sessionId)) return;
     if (this.connecting) return;
     const saved = this.cachedCheckpoint;
     this.cachedCheckpoint = undefined;
@@ -122,6 +126,7 @@ export class SessionController {
   }
 
   private startConnection(): void {
+    if (this.disposed || deletingSessions.get(this.api)?.has(this.sessionId)) return;
     this.rpc.start();
     this.refreshHeader();
     this.refreshTarget();
@@ -232,6 +237,7 @@ export class SessionController {
     return this.api.slashCompletions(name, text, this.sessionId);
   }
   private assertSynchronized(): void {
+    if (deletingSessions.get(this.api)?.has(this.sessionId)) throw new Error("Wait for session deletion to finish before using turn controls.");
     if (this.store.cached || this.store.replaying) throw new Error("Wait for the session to finish synchronizing before using turn controls.");
   }
 
@@ -239,6 +245,7 @@ export class SessionController {
     this.assertSynchronized();
     if (!/^\/[^\s]+/.test(line.trim())) throw new Error("Enter a slash command, such as /help.");
     const result = await this.api.runSlash(line.trim(), this.sessionId);
+    if (this.disposed || deletingSessions.get(this.api)?.has(this.sessionId)) return result;
     const name = line.trim().slice(1).split(/\s/,1)[0].toLowerCase();
     if (["clear","new","undo","redo","evict","compact"].includes(name)) this.rpc.resync();
     if (["rename","clear","new","undo","redo","evict","compact","models","think"].includes(name)) {
@@ -262,6 +269,8 @@ export class SessionController {
     const prompt = text || (images.length ? "Please examine the attached images." : "");
     return this.rpc.sendCommand({ type: "start_turn", prompt, ...this.imageContent(prompt, images) });
   }
+
+  get fileReferenceRoot(): string { return this.workspaceRoot; }
 
   withFileReferences(text: string, files: unknown): Promise<string> {
     return withFileReferences(this.workspaceRoot, text, files);
@@ -371,7 +380,9 @@ export class SessionController {
 
   cancelActive(turnId?: string | null): SentCommand | undefined {
     this.assertSynchronized();
-    return this.rpc.sendCommand({ type: "cancel_turn", ...(turnId ? { turn_id: turnId } : {}) });
+    if (this.rpc.connectionState !== "connected" || !this.store.replayComplete) throw new Error("Wait for the session to finish synchronizing before cancelling a turn.");
+    if (!turnId) throw new Error("Session has no active turn to cancel.");
+    return this.rpc.sendCommand({ type: "cancel_turn", turn_id: turnId });
   }
 
   steer(expectedTurnId: string, text: string, images: ImageAttachment[] = []): SentCommand | undefined {
@@ -456,19 +467,24 @@ export async function deleteSessionTree(
     previousSize = ids.size;
     for (const row of rows) if (row.parent_id && ids.has(row.parent_id)) ids.add(row.id);
   }
-  const detached: SessionController[] = [];
+  const deleting = deletingSessions.get(api) ?? new Set<string>();
+  if ([...ids].some(id => deleting.has(id))) throw new Error("Session deletion is already in progress.");
+  for (const id of ids) deleting.add(id);
+  deletingSessions.set(api, deleting);
+  let deleted = false;
   try {
-    for (const id of ids) {
-      const controller = controllers.get(id);
-      if (!controller) continue;
-      detached.push(controller);
-      await controller.rpc.stopAndWait();
-    }
+    for (const id of ids) await controllers.get(id)?.rpc.stopAndWait();
     const result = await api.deleteSession(sessionId);
-    for (const id of result.sessions) controllers.get(id)?.removeCache();
+    for (const id of result.sessions) {
+      const controller = controllers.get(id);
+      controller?.removeCache();
+      controller?.dispose();
+    }
+    deleted = true;
     return result.sessions;
-  } catch (error) {
-    for (const controller of detached) controller.connect();
-    throw error;
+  } finally {
+    for (const id of ids) deleting.delete(id);
+    if (!deleting.size) deletingSessions.delete(api);
+    if (!deleted) for (const id of ids) controllers.get(id)?.connect();
   }
 }

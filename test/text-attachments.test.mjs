@@ -38,7 +38,7 @@ test('chunk validation refuses incomplete uploads, invalid Unicode and oversized
   const initial=await store.stageChunk({text:'begin',name:'x.txt',requestId:2,index:0,totalChunks:2},source);
   assert.equal(initial.attachment,undefined);
   store.cancel(2,source);
-  await assert.rejects(store.stageChunk({text:'end',name:'x.txt',requestId:2,index:1,totalChunks:2},source),/out of order/);
+  await assert.rejects(store.stageChunk({text:'end',name:'x.txt',requestId:2,index:1,totalChunks:2},source),/cancelled/);
   for(let i=0;i<4;i++)await store.stage('file '+i,'file'+i+'.txt',source);
   await assert.rejects(store.stage('fifth','fifth.txt',source),/four text/);
 }));
@@ -197,4 +197,30 @@ test('a send-scoped holder survives closing the composer until admission is sett
   await store.commit([file.ref],submission);store.close(submission);
   await store.release(file.ref,{});
   assert.equal(await readFile(file.path,'utf8'),'pending admission');
+}));
+
+test('restarting a partial upload releases its reservation and rejects delayed cancelled chunks',()=>fixture(async root=>{
+  const store=new TextAttachmentStore(root,'s'),source={};
+  for(let requestId=1;requestId<=6;requestId++){
+    if(requestId>1)store.cancel(requestId-1,source);
+    await store.stageChunk({text:'x'.repeat(64000),name:'restored.txt',requestId,index:0,totalChunks:2},source);
+    store.checkCapacity(3,3,source);
+  }
+  for(const index of [0,1])await assert.rejects(store.stageChunk({text:'stale',name:'restored.txt',requestId:1,index,totalChunks:2},source),/cancelled/);
+  const result=await store.stageChunk({text:'end',name:'restored.txt',requestId:6,index:1,totalChunks:2},source);
+  assert.equal(await readFile(result.attachment.path,'utf8'),'x'.repeat(64000)+'end');
+  for(let i=0;i<3;i++)await store.stage('more '+i,'more'+i+'.txt',source);
+  await assert.rejects(store.stage('fifth','fifth.txt',source),/four text/);
+  store.close(source);
+}));
+
+test('cancelling before an asynchronously admitted first chunk prevents a ghost upload',()=>fixture(async root=>{
+  const controller=new SessionController({},{log(){}},{assertLocalRuntimeFiles:()=>new Promise(resolve=>{ready=resolve;})},root,'s',root),source={};
+  let ready;
+  try{
+    const pending=controller.stageTextAttachmentChunk({text:'old',name:'old.txt',requestId:7,index:0,totalChunks:2},source);
+    controller.cancelTextAttachment(7,source);ready();
+    await assert.rejects(pending,/cancelled/);
+    controller.textAttachments.checkCapacity(4,4,source);
+  }finally{controller.dispose();}
 }));

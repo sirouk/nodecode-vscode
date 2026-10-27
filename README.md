@@ -94,9 +94,11 @@ export PLAYWRIGHT_PATH=/path/to/installed/playwright
 node test/browser-smoke.mjs
 node test/browser-regressions.mjs
 node test/browser-diffs.mjs
+node test/browser-composition-regressions.mjs
+node test/browser-activity-regressions.mjs
 ```
 
-These cover rendering, narrow layouts, navigation, draft persistence, delayed acknowledgements, active-response steering versus explicit queuing, failure recovery, and recorded-diff coloring, copying, navigation and reading-state retention. No browser dependency is added to the extension.
+These cover rendering, narrow layouts, navigation, draft persistence, delayed acknowledgements, active-response steering versus explicit queuing, failure recovery, long-draft references, upload reloads, thread-family grouping and navigation, process reconnection, and recorded-diff coloring, copying, navigation and reading-state retention. No browser dependency is added to the extension.
 
 ## Releasing
 

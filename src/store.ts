@@ -256,6 +256,11 @@ export class SessionStore {
   get cached(): boolean { return this.cachedValue; }
   get replaying(): boolean { return this.replayInProgress; }
 
+  markProcessesUnconfirmed(): void {
+    this.processes.markUnconfirmed();
+    this.bump();
+  }
+
   snapshotProjection(): StoreProjection {
     if (!this.replayCompleteValue || !this.sessionIdValue) throw new Error("Cannot cache an incomplete session replay");
     return {
@@ -383,6 +388,8 @@ export class SessionStore {
     this.sessionIdValue = frame.session_id ?? this.sessionIdValue;
     if (frame.resumed_after != null && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) this.replayFactSessionId = this.sessionIdValue;
     for (const inner of frame.accumulated_frames ?? []) this.applyEvent(inner, true);
+    // Durable tool results describe past shell state; live registry snapshots follow replay.
+    this.processes.markUnconfirmed();
     if (frame.title) this.titleValue = frame.title;
     if (isReplayComplete(frame) && frame.admission_state === "ready") {
       this.runningSinceTurn = false;

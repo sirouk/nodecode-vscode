@@ -54,3 +54,33 @@ test('empty, one-idle and idle-only lists do not duplicate or hide the retained 
   const result=groups([{id:'older',status:'idle',updatedAt:at(10)},{id:'latest',status:'idle',updatedAt:at(15)}]);
   assert.deepEqual(ids(result.active),['latest']);assert.deepEqual(ids(result.idle),['older']);
 });
+
+test('each native parent retains its own newest idle thread instead of sharing a global idle slot',()=>{
+  vm.runInContext(THREAD_ORDER_JS,context);
+  assert.equal(typeof context.threadFamilyGroups,'function','the webview must group each parent independently');
+  const rows=[
+    {id:'new-sibling',parentId:'root',status:'idle',updatedAt:at(19)},
+    {id:'old-sibling',parentId:'root',status:'idle',updatedAt:at(18)},
+    {id:'child-running',parentId:'current',status:'running',startedAt:at(17)},
+    {id:'new-child',parentId:'current',status:'idle',updatedAt:at(12)},
+    {id:'old-child',parentId:'current',status:'idle',updatedAt:at(11)},
+    {id:'nested-new',parentId:'new-child',status:'idle',updatedAt:at(10)},
+    {id:'nested-old',parentId:'new-child',status:'idle',updatedAt:at(9)},
+    {id:'other-only',parentId:'other-parent',status:'idle',updatedAt:at(8)},
+  ];
+  const before=structuredClone(rows),result=context.threadFamilyGroups(rows);
+  assert.deepEqual(ids(result.active),['new-sibling','child-running','new-child','nested-new','other-only']);
+  assert.deepEqual(ids(result.idle),['old-sibling','old-child','nested-old']);
+  assert.deepEqual(rows,before,'grouping must not mutate the authoritative family projection');
+  assert.equal(new Set(ids(result.active).concat(ids(result.idle))).size,rows.length,'each thread appears once');
+});
+
+test('parent-scoped grouping preserves missing-parent and single-level ordering contracts',()=>{
+  vm.runInContext(THREAD_ORDER_JS,context);
+  assert.equal(typeof context.threadFamilyGroups,'function');
+  const rows=[{id:'older',status:'idle',updatedAt:at(10)},{id:'running',status:'running',startedAt:at(12)},{id:'latest',status:'idle',updatedAt:at(15)}];
+  assert.deepEqual(ids(context.threadFamilyGroups(rows).active),ids(groups(rows).active));
+  assert.deepEqual(ids(context.threadFamilyGroups(rows).idle),ids(groups(rows).idle));
+  assert.deepEqual(ids(context.threadFamilyGroups([]).active),[]);
+  assert.deepEqual(ids(context.threadFamilyGroups([]).idle),[]);
+});

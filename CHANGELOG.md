@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve selected workspace-file references when a long draft becomes a text attachment.
+- Open attached workspace-file links from the same workspace used to capture their contents, without changing session-relative Markdown and recorded-change links.
+- Connect and synchronize unopened sessions before cancelling their current turn; never cancel with a missing or cached turn ID.
+- Keep session readers suspended throughout deletion, including pending cache validation and repeated selections, and restore them if deletion fails.
+- Cancel incomplete text-upload reservations before restarting restored or retried uploads, preventing false attachment-limit errors after reloads.
+- Mark running processes as unconfirmed when their connection drops; retain their output but withhold Stop until a fresh runtime update confirms they are running.
+- Retain the most recently updated idle thread separately within each parent’s family level instead of grouping unrelated branches together.
+- Reveal the selected thread again when navigation is explicitly restored, while preserving deliberate scrolling during live updates.
+
 ## [0.1.9]
 
 ### Fixed

@@ -433,3 +433,21 @@ test('closing a controller discards an image result already in flight',async()=>
   const pending=ctl.imageDataUrl('late');ctl.dispose();finish('data:image/png;base64,bGF0ZQ==');
   await assert.rejects(pending,/closed/);assert.equal(ctl.imageSources.size,0);
 });
+
+test('webview reload replaces document staging ownership without losing completed saved drafts',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'nodecode-reload-files-'));
+  const ctl=new SessionController({},{log(){}},{assertLocalRuntimeFiles:async()=>{}},root,'reload-reservations',root);
+  const panel=Object.create(SessionPanel.prototype),posted=[];
+  panel.controller=ctl;panel.attachmentSource={};panel.notes={log(){}};panel.panel={webview:{postMessage:m=>posted.push(m)}};
+  panel.pendingHistory=false;panel.pendingContext=[];panel.postState=()=>{};
+  try{
+    await panel.onMessage({type:'ready'});const original=panel.attachmentSource;
+    const complete=(await ctl.stageTextAttachmentChunk({text:'acknowledgement lost',name:'saved.txt',requestId:1,index:0,totalChunks:1},original)).attachment;
+    await ctl.stageTextAttachmentChunk({text:'partial',name:'partial.txt',requestId:2,index:0,totalChunks:2},original);
+    await panel.onMessage({type:'ready'});assert.notEqual(panel.attachmentSource,original);
+    await assert.rejects(ctl.stageTextAttachmentChunk({text:'late',name:'partial.txt',requestId:2,index:1,totalChunks:2},original),/view closed/);
+    for(let i=0;i<4;i++)await ctl.stageTextAttachmentChunk({text:'new '+i,name:'new'+i+'.txt',requestId:i+3,index:0,totalChunks:1},panel.attachmentSource);
+    assert.equal(fs.readFileSync(complete.path,'utf8'),'acknowledgement lost');
+    assert.equal(await ctl.openTextAttachment(complete.ref,panel.attachmentSource),complete.path);
+  }finally{ctl.closeTextAttachments(panel.attachmentSource);ctl.dispose();fs.rmSync(root,{recursive:true,force:true});}
+});

@@ -10,6 +10,12 @@ export const THREAD_ORDER_JS = String.raw`
     if(idle.length)active.push(idle.shift());
     return {active:active,idle:idle};
   }
+  function threadFamilyGroups(rows){
+    var levels=new Map(),active=[],idle=[];
+    rows.forEach(function(row){var parent=row.parentId||null,level=levels.get(parent)||[];level.push(row);levels.set(parent,level);});
+    levels.forEach(function(level){var group=threadGroups(level);active=active.concat(group.active);idle=idle.concat(group.idle);});
+    return {active:active,idle:idle};
+  }
 `;
 
 export const ACTIVITY_CLIENT_JS = String.raw`
@@ -27,6 +33,7 @@ export const ACTIVITY_CLIENT_JS = String.raw`
   }
   function restoreThreadNavigation(navigation){
     if(!navigation)return;
+    threadSelectionRevealed=false;
     E('threadDetails').open=!!navigation.open;idleThreadDetails.open=!!navigation.idleOpen;saveThreadNavigation();revealSelectedThread();
   }
   // Reveal on navigation or first opening, not on subsequent live updates or user scrolling.
@@ -82,7 +89,7 @@ export const ACTIVITY_CLIENT_JS = String.raw`
     E('threadBar').classList.toggle('hidden',!hasFamily);
     E('threadSummary').textContent='Agents & threads · '+descendants.length+(descendants.some(function(t){return t.status==='running';})?' · '+descendants.filter(function(t){return t.status==='running';}).length+' running':'');
     if(threadSignature!==activitySignature.threads&&!hasSelection(E('threadList'))){
-      var groups=threadGroups(all.filter(function(row){return row.id!==sessionId;}));
+      var groups=threadFamilyGroups(all.filter(function(row){return row.id!==sessionId;}));
       var selected=all.find(function(row){return row.id===sessionId;});if(selected)groups.active.unshift(selected);
       // Never hide an ancestor of visible work inside the idle fold.
       var byId=new Map(all.map(function(row){return [row.id,row];})),visible=new Set(groups.active.map(function(row){return row.id;}));

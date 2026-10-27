@@ -69,6 +69,33 @@ const NODECODE_MD = [
   "",
 ].join("\n");
 
+/** Turn ids from cached or partial history cannot authorize cancellation. */
+async function waitForSynchronizedSession(controller: SessionController): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      changes.dispose(); connection.dispose();
+      if (error) reject(error); else resolve();
+    };
+    const check = (): void => {
+      if (controller.rpc.connectionState === "failed") {
+        finish(new Error("Session is not connected; synchronization failed."));
+      } else if (controller.rpc.connectionState === "connected" && controller.store.replayComplete && !controller.store.cached && !controller.store.replaying) {
+        finish();
+      }
+    };
+    const timer = setTimeout(() => finish(new Error("Session did not finish synchronizing before cancellation. Try again when it is connected.")), 30000);
+    const changes = controller.store.subscribe(check);
+    // RPC announces connected just before the final replay frame reaches the store.
+    const connection = controller.subscribeConnection(() => queueMicrotask(check));
+    try { controller.connect(); check(); }
+    catch (error) { finish(error); }
+  });
+}
+
 /** Register session commands without a second sidebar view. */
 export function registerSessions(deps: CommandDeps): void {
   const subs: vscode.Disposable[] = [];
@@ -174,7 +201,12 @@ export function registerSessions(deps: CommandDeps): void {
     const sid = await sessionIdOf(deps, arg);
     if (!sid) return;
     const controller = deps.controllerFor(sid);
-    await retry("cancel", () => requireAccepted(controller.cancelActive(controller.store.view().activeTurnId)?.done));
+    await retry("cancel", async () => {
+      await waitForSynchronizedSession(controller);
+      const turnId = controller.store.view().activeTurnId;
+      if (!turnId) throw new Error("Session has no active turn to cancel.");
+      await requireAccepted(controller.cancelActive(turnId)?.done);
+    });
   });
 
   cmd("nodecode.undoLastTurn", async (arg: unknown) => {

@@ -131,7 +131,7 @@ test('session deletion releases only the requested tree before deleting', async 
   const calls = [];
   const controllers = new Map(['root','child','grandchild','other'].map(id => [id, {
     removeCache(){calls.push('cache:'+id);},rpc:{stopAndWait:async () => {await delay(1);calls.push('close:'+id);}},
-    connect(){calls.push('reconnect:'+id);},
+    dispose(){},connect(){calls.push('reconnect:'+id);},
   }]));
   const api = {
     sessions: async () => [{id:'grandchild',parent_id:'child'},{id:'other'},{id:'child',parent_id:'root'},{id:'root'}],

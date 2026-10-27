@@ -159,7 +159,7 @@ export class SessionPanel {
 
   private readonly disposables: vscode.Disposable[] = [];
   private disposed = false;
-  private readonly attachmentSource = {};
+  private attachmentSource = {};
   private connection: ConnectionState = "connecting";
   private connectionAttempts = 0;
   private readonly markUri: string;
@@ -414,7 +414,7 @@ export class SessionPanel {
         }
         case "openFile": {
           if (typeof message.path !== "string") return;
-          const cwd = this.controller.store.view().cwd;
+          const cwd = message.workspaceReference === true ? this.controller.fileReferenceRoot : this.controller.store.view().cwd;
           if (!cwd) throw new Error("Open a workspace before opening file references.");
           const root = fs.realpathSync(cwd);
           const file = fs.realpathSync(path.resolve(cwd, message.path));
@@ -433,6 +433,11 @@ export class SessionPanel {
           this.callbacks.newSession();
           return;
         case "ready":
+          if (this.ready) {
+            // The panel survives document reloads; staging reservations must not.
+            this.controller.closeTextAttachments(this.attachmentSource);
+            this.attachmentSource = {};
+          }
           this.ready = true;
           if (this.pendingThreadNavigation) { this.restoreThreadNavigation(this.pendingThreadNavigation); this.pendingThreadNavigation = undefined; }
           if (this.pendingHistory) { this.pendingHistory = false; this.postMessage({type:"showSessions"}); }
@@ -1016,7 +1021,7 @@ const CLIENT_JS = String.raw`
   var pendingSend = saved.pendingSend || null;
   sending = !!pendingSend;
   attachments=Array.isArray(saved.images)?saved.images:[];
-  var textFiles=Array.isArray(saved.textFiles)?saved.textFiles:[],textRequest=Date.now(),textFileCount=textFiles.length,restoredTextStarted=false;
+  var textFiles=Array.isArray(saved.textFiles)?saved.textFiles:[],textRequest=textFiles.reduce(function(next,file){return Number.isSafeInteger(file.requestId)?Math.max(next,file.requestId):next;},Date.now()),textFileCount=textFiles.length,restoredTextStarted=false;
   var files=[],inlineRefs=Array.isArray(saved.inlineRefs)?saved.inlineRefs.filter(function(ref){return ref&&typeof ref.path==='string'&&Number.isInteger(ref.start)&&Number.isInteger(ref.end);}):[],referenceText=saved.draft||'',referenceEdit=null;
   ${INLINE_REFERENCE_JS}
   var fileQuery = null, fileResults = [], fileIndex = 0, fileRequest = 0, fileTimer;
@@ -1095,12 +1100,17 @@ const CLIENT_JS = String.raw`
     external: function(url){ vscode.postMessage({ type: 'openExternal', url: url }); },
     file: function(path, line, endLine){ vscode.postMessage({ type: 'openFile', path: path, line: line, endLine:endLine }); }
   };
-  function md(src){
-    return '<div class="md" data-markdown="' + esc(src || '') + '"></div>';
+  function md(src,workspaceFiles){
+    return '<div class="md" data-markdown="' + esc(src || '') + '"'+(workspaceFiles&&workspaceFiles.length?' data-workspace-files="'+esc(JSON.stringify(workspaceFiles))+'"':'')+'></div>';
   }
   function renderMarkdownBlocks(root){
     root.querySelectorAll('[data-markdown]').forEach(function(el){
-      NodecodeMarkdown.renderMarkdown(el.dataset.markdown, el, markdownLinks);
+      var workspaceFiles=JSON.parse(el.dataset.workspaceFiles||'[]');
+      var links=workspaceFiles.length?{external:markdownLinks.external,file:function(path,line,endLine){
+        if(workspaceFiles.includes(path))vscode.postMessage({type:'openFile',path:path,line:line,endLine:endLine,workspaceReference:true});
+        else markdownLinks.file(path,line,endLine);
+      }}:markdownLinks;
+      NodecodeMarkdown.renderMarkdown(el.dataset.markdown, el, links);
       el.removeAttribute('data-markdown');
     });
   }
@@ -1128,7 +1138,7 @@ const CLIENT_JS = String.raw`
   function forkHtml(part){var saved=(state.view&&state.view.bookmarkedTurnIds||[]).includes(part.forkTurnId);return part.forkTurnId&&!(state.view&&state.view.cached)&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' aria-label="Fork from this turn" title="Fork from this turn into a new editor. Includes all recorded messages in this turn; this conversation is kept.">${icon('fork')}</button><button class="bookmark-turn '+(saved?'saved':'')+'" data-a="toggleCheckpointBookmark" data-p="'+esc(part.forkTurnId)+'" aria-pressed="'+String(saved)+'" aria-label="'+(saved?'Remove bookmark':'Bookmark checkpoint')+'" title="'+(saved?'Remove bookmark':'Bookmark this recorded checkpoint; does not create a new file snapshot')+'" '+(bookmarkingTurns[part.forkTurnId]?'disabled':'')+'>${icon('bookmark')}</button>':'';}
   function replyCaret(part,index){return part.streaming&&part.text&&state.view&&index===state.view.parts.length-1?'<span class="caret"></span>':'';}
   function partHtml(part, index){
-    if (part.kind === 'user') return '<div class="msg user"><div class="bubble"><div class="message-actions"><button class="copy-text" data-a="copyUser" data-p="'+index+'" aria-label="Copy message" title="Copy message">${icon('copy')}</button></div>' + md(part.text) + '<div class="message-files">' + fileHtml(part) + textFileHtml(part) + '</div>' + imageHtml(part) + '</div></div>';
+    if (part.kind === 'user') return '<div class="msg user"><div class="bubble"><div class="message-actions"><button class="copy-text" data-a="copyUser" data-p="'+index+'" aria-label="Copy message" title="Copy message">${icon('copy')}</button></div>' + md(part.text,part.files) + '<div class="message-files">' + fileHtml(part) + textFileHtml(part) + '</div>' + imageHtml(part) + '</div></div>';
     if (part.kind === 'assistant') {
       var key = 'reasoning-' + index;
       var r = part.reasoning ? '<details class="reasoning" data-detail="' + key + '"><summary><span class="reasoning-label">' + (part.streaming && !part.text ? 'Thinking…' : 'Thought process') + '</span><button class="copy-text" data-a="copyThinking" data-p="' + index + '" aria-label="Copy thought process" title="Copy thought process">${icon('copy')}</button></summary><div class="rbody md" tabindex="0" aria-label="Thought process"></div></details>' : '';
@@ -1548,7 +1558,7 @@ const CLIENT_JS = String.raw`
   }
   function splitText(text){var chunks=[];for(var i=0;i<text.length;){var end=Math.min(i+64000,text.length);if(end<text.length&&/[\uD800-\uDBFF]/.test(text[end-1]))end--;chunks.push(text.slice(i,end));i=end;}return chunks;}
   function sendTextChunk(file,index){vscode.postMessage({type:'stageTextChunk',requestId:file.requestId,index:index,totalChunks:file.chunks.length,name:file.name,text:file.chunks[index]});}
-  function stageTextFile(file){file.error=undefined;file.requestId=++textRequest;file.chunks=splitText(file.text||'');renderTextFiles();saveDraft();if(file.chunks.length)sendTextChunk(file,0);}
+  function stageTextFile(file){if(Number.isSafeInteger(file.requestId))vscode.postMessage({type:'cancelTextAttachment',requestId:file.requestId});file.error=undefined;file.requestId=++textRequest;file.chunks=splitText(file.text||'');renderTextFiles();saveDraft();if(file.chunks.length)sendTextChunk(file,0);}
   function addTextFile(text,name){
     var bytes=new TextEncoder().encode(text).length;
     if(!text||text.includes('\0')||/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text))throw new Error('Choose a non-empty UTF-8 text file.');
@@ -1562,7 +1572,16 @@ const CLIENT_JS = String.raw`
     else if(file.chunks&&message.index+1<file.chunks.length)sendTextChunk(file,message.index+1);
     renderTextFiles();saveDraft();renderAll(followLatest);
   }
-  function attachLongDraft(){if(sending||composer.value.length<32000)return;try{addTextFile(composer.value,'pasted-text-'+(++textFileCount)+'.txt');composer.value='';grow();saveDraft();}catch(error){E('attachmentError').textContent=error.message;E('attachmentError').classList.remove('hidden');}}
+  function attachLongDraft(){
+    if(sending||composer.value.length<32000)return;
+    try{
+      reconcileInlineReferences();var selected=files.slice();
+      addTextFile(composer.value,'pasted-text-'+(++textFileCount)+'.txt');composer.value='';
+      // Keep approved references editable after their surrounding text moves to a file.
+      inlineRefs=selected.map(function(path){var start=composer.value.length;composer.value+='@'+path+' ';return {path:path,start:start,end:start+path.length+1};});
+      referenceText=composer.value;referenceEdit=null;files=selected;grow();saveDraft();
+    }catch(error){E('attachmentError').textContent=error.message;E('attachmentError').classList.remove('hidden');}
+  }
   renderTextFiles();
   function renderAttachments(){
     E('attachments').innerHTML = attachments.map(function(a, i){return '<span class="attachment" title="'+esc((a.origin?a.origin+': ':'')+(a.originalPath||a.name))+'"><img src="data:' + a.mediaType + ';base64,' + a.data + '" alt="' + esc(a.name) + '"><button data-a="removeImage" data-p="' + i + '" title="Remove ' + esc(a.name) + '" aria-label="Remove image">×</button></span>';}).join('');

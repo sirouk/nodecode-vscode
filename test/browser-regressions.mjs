@@ -65,6 +65,7 @@ try{
     const rows=[{id:'root',title:'Root'},{id:'parent',title:'Parent',parent_id:'root',source:'fork'},
       {id:'child-a',title:'Child A',parent_id:'parent',source:'fork',updated_at:'2026-10-20T10:00:00Z'},
       {id:'child-b',title:'Child B',parent_id:'parent',source:'fork',updated_at:'2026-10-26T10:00:00Z'},
+      {id:'child-idle',title:'Older idle child',parent_id:'parent',source:'fork',updated_at:'2026-10-19T10:00:00Z'},
       {id:'nested',title:'Nested',parent_id:'child-a',source:'fork'}];
     let opened=await open({},'parent'),page=opened.page;
     const errors=opened.errors;
@@ -359,6 +360,34 @@ try{
     await emit(page,{...cached,connection:'connected',view:{...cached.view,cached:false,replayComplete:true,processes:[]}});
     assert.equal(await page.locator('#transcript').textContent(),visible);assert.equal(await page.locator('#sendBtn').isDisabled(),false);
     assert((await page.locator('#statusLine').textContent()).includes('1.5 M tokens'));assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('reconnecting processes retain output but need a fresh running receipt before Stop returns',async()=>{
+    const {SessionController}=require('../out/manager.js');
+    const {EventEmitter}=require('node:events'),{PassThrough}=require('node:stream');
+    const children=[];
+    const cli={spawnRpc(){const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=()=>true;children.push(child);return child;}};
+    const api={sessionDetail:async()=>({session_id:'regression-session',cwd:'/workspace'}),header:async()=>({}),target:async()=>({}),sessions:async()=>[]};
+    const controller=new SessionController(cli,{log(){}},api,'/workspace','regression-session');
+    const {page,errors}=await open();
+    const frame=value=>children.at(-1).stdout.write(JSON.stringify(value)+'\n');
+    const show=()=>emit(page,{...state,connection:controller.rpc.connectionState,view:controller.store.view()});
+    try{
+      controller.connect();
+      frame({type:'session_stream_resumed',session_id:'regression-session',cursor:1,admission_state:'ready',replay_chunk_final:true,accumulated_frames:[]});
+      frame({type:'session_background_process_updated',session_id:'regression-session',process:{exec_id:7,command:'retained process',status:'running',tail:'last observed output'}});
+      await show();await page.locator('#processDetails > summary').click();await page.locator('.activity-process > summary').click();
+      assert(await page.locator('.process-stop').isVisible());
+      children.at(-1).emit('close',1,null);await show();
+      assert.equal(await page.locator('.process-stop').isVisible(),false);
+      assert((await page.locator('.process-status').textContent()).includes('unknown'));
+      assert.equal(await page.locator('.process-output').textContent(),'last observed output');
+      controller.connect();
+      frame({type:'session_stream_resumed',session_id:'regression-session',cursor:1,resumed_after:1,admission_state:'ready',replay_chunk_final:true,accumulated_frames:[]});
+      await show();assert.equal(await page.locator('.process-stop').isVisible(),false,'a cursor replay alone does not confirm a process is still alive');
+      frame({type:'session_background_process_updated',session_id:'regression-session',process:{exec_id:7,command:'retained process',status:'running'}});
+      await show();assert(await page.locator('.process-stop').isVisible());assert.equal(await page.locator('.process-output').textContent(),'last observed output');
+      assert.deepEqual(errors,[]);
+    }finally{controller.dispose();await page.close();}
   });
   await check('outstanding sends survive recreation and ignore stale acknowledgements',async()=>{
     let {page}=await open();await page.locator('#composer').fill('Original send');await page.locator('#imageInput').setInputFiles(png);

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Compact the conversation header with smaller text, avatar and action icons, less vertical padding, and stable sizing while renaming to leave more room for messages.
 - Move the work, save-state and usage row below the chat input and its action buttons, above the keyboard hint.
 - Indent activity children beneath Background processes, Agents & threads and Modified files, with another inset for Idle rows; widen the chat input to the available panel width with small side gutters.
 - Keep non-idle agents and threads newest-started first, with the most recently updated idle thread above a collapsed, newest-first Idle subsection; retain its disclosure state and cap the compact list’s height.

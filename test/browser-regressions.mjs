@@ -187,6 +187,37 @@ try{
     }
     await page.close();
   });
+  await check('compact header gives space to the conversation without clipping titles or controls',async()=>{
+    const {page,errors}=await open();
+    await emit(page,{...state,view:{...state.view,title:'Review and perfect VS Code extension '+('with a long conversation title '.repeat(8)),parts:[{kind:'assistant',text:'The conversation keeps the available screen space.',streaming:false}]}});
+    for(const viewport of [{width:1108,height:650},{width:360,height:700},{width:320,height:500}]){
+      await page.setViewportSize(viewport);
+      const metrics=await page.evaluate(()=>{
+        const header=document.getElementById('topbar'),title=document.getElementById('title'),img=header.querySelector('.brand img'),style=getComputedStyle(header);
+        const controls=[title,...header.querySelectorAll('.icon-btn')].map(node=>{const box=node.getBoundingClientRect();return {width:box.width,height:box.height,left:box.left,right:box.right,top:box.top,bottom:box.bottom};});
+        return {height:header.getBoundingClientRect().height,paddingTop:parseFloat(style.paddingTop),paddingBottom:parseFloat(style.paddingBottom),avatar:img.getBoundingClientRect().width,titleFont:parseFloat(getComputedStyle(title).fontSize),brandFont:parseFloat(getComputedStyle(header.querySelector('.brand')).fontSize),truncated:title.scrollWidth>title.clientWidth,overflow:document.documentElement.scrollWidth>innerWidth,controls};
+      });
+      assert(metrics.height<=34,'header should reclaim at least 20px of conversation height');
+      assert(metrics.paddingTop<=3&&metrics.paddingBottom<=3,'header vertical padding should stay tight at every width');
+      assert.equal(metrics.avatar,22);assert.equal(metrics.titleFont,12);assert.equal(metrics.brandFont,12);
+      assert.equal(metrics.truncated,true,'long titles should truncate rather than enlarge the header');
+      assert.equal(metrics.overflow,false);
+      for(const control of metrics.controls){assert(control.width>=24&&control.height>=24,'header controls retain usable targets');assert(control.left>=0&&control.right<=viewport.width);assert(control.top>=0&&control.bottom<=metrics.height);}
+      await page.locator('#title').click();
+      assert.equal(await page.locator('#titleInput').isVisible(),true);
+      const editing=await page.locator('#topbar').boundingBox();assert.equal(editing.height,metrics.height,'renaming must not make the compact header jump');
+      await page.locator('#titleInput').press('Escape');
+      assert.equal(await page.locator('#title').evaluate(node=>node===document.activeElement),true);
+      await page.locator('#sessBtn').click();
+      const picker=await page.locator('#sessionPicker').boundingBox();assert(picker.y>=metrics.height-5&&picker.y<=metrics.height+4,'session picker stays anchored to the header padding box');assert(picker.x>=0&&picker.x+picker.width<=viewport.width);
+      await page.locator('#sessionSearch').press('Escape');
+      await page.locator('#menuWrap > summary').click();
+      const menu=await page.locator('#menuWrap .menu').boundingBox();assert(menu.y>=metrics.height-4&&menu.y<=metrics.height+6,'actions menu stays anchored to the smaller header');assert(menu.x>=0&&menu.x+menu.width<=viewport.width);
+      await page.locator('#menuWrap > summary').press('Escape');
+      assert.equal(await page.locator('#menuWrap').evaluate(node=>node.open),false);
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
   await check('status and usage stay below the input and actions at panel and sidebar widths',async()=>{
     const {page,errors}=await open();
     const view={...state.view,standby:false,totals:{total:29500000,costKnown:true,costUsd:11.6276},contextUsage:{input:23900}};

@@ -19,6 +19,14 @@ vm.runInContext(readFileSync(new URL('../out/markdown.js',import.meta.url),'utf8
 function render(text){const root=new Element('div');context.NodecodeMarkdown.renderMarkdown(text,root,{external(){},file(){}});return root;}
 function all(root,tag){return root.children.flatMap(child=>[...(child.tagName===tag.toUpperCase()?[child]:[]),...all(child,tag)]);}
 
+test('inline renderer formats thoughts without adding block structure or losing blank lines',()=>{
+  const root=new Element('div');
+  context.NodecodeMarkdown.renderInline('**Reviewing project tasks**\n\nUse `**literal**` and \\*\\*escaped\\*\\*.',root,{external(){},file(){}});
+  assert.equal(root.textContent,'Reviewing project tasks\n\nUse **literal** and **escaped**.');
+  assert.deepEqual(all(root,'strong').map(n=>n.textContent),['Reviewing project tasks']);
+  assert.equal(all(root,'code')[0].textContent,'**literal**');assert.equal(all(root,'p').length,0);
+});
+
 test('native fences accept matching long markers, tilde and heading levels',()=>{
   const root=render('````md\n```inside\n````\n\n~~~~{.python}\nx=1\n~~~~\n\n###### Small');
   assert.deepEqual(all(root,'code').map(n=>n.textContent),['```inside','x=1']);

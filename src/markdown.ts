@@ -143,7 +143,7 @@ export function parseFileLink(raw: string): { path: string; startLine?: number; 
 }
 
 /** Render inline markdown (code spans, bold, italic, links) into parent. */
-function renderInline(text: string, parent: HTMLElement, links: LinkHandlers, depth = 0): void {
+export function renderInline(text: string, parent: HTMLElement, links: LinkHandlers, depth = 0): void {
 	// Tokenize with a single pass regex; code spans win over emphasis.
 	// Every alternative is newline-bounded AND length-bounded. With open-ended
 	// classes an unmatched delimiter ("[", "**", a stray backtick) rescanned to

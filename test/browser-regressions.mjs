@@ -211,5 +211,138 @@ try{
       assert.deepEqual(errors,[]);
     }finally{projector.disposed=true;ctl.dispose();await page.close();server.close();await once(server,'close');}
   });
+  await check('saved thoughts render safe inline Markdown and copy the original source',async()=>{
+    const {page,errors}=await open();
+    const reasoning='**Reviewing project tasks**\n\nUse `**literal**` and \\*\\*escaped\\*\\*.\n<script>window.thoughtInjected=1</script><img src=x onerror="window.thoughtInjected=1">\n[bad](javascript:alert) [web](https://example.com/thought) [file](src/panel.ts:12)\n\n  \t';
+    await emit(page,{...state,view:{...state.view,parts:[{kind:'assistant',text:'Finished.',reasoning,streaming:false,durable:true}]}});
+    await page.locator('.reasoning summary').click();const body=page.locator('.rbody');
+    assert.equal(await body.locator('strong').textContent(),'Reviewing project tasks');
+    assert(await body.locator('strong').evaluate(el=>parseFloat(getComputedStyle(el).fontWeight)>=600));
+    assert((await body.textContent()).startsWith('Reviewing project tasks\n\nUse **literal** and **escaped**.'));
+    assert.equal(await body.locator('code').textContent(),'**literal**');assert.equal(await body.locator('p,h1,ul,pre').count(),0,'inline formatting must not alter thought paragraph layout');
+    assert.equal(await body.locator('script,img').count(),0);assert.equal(await page.evaluate(()=>window.thoughtInjected),undefined);
+    assert.equal(await body.getByRole('link',{name:'bad',exact:true}).getAttribute('href'),'#');
+    await body.getByRole('link',{name:'bad',exact:true}).click();assert.equal(await posted(page,'openExternal'),undefined);
+    await body.getByRole('link',{name:'web',exact:true}).click();assert.equal((await posted(page,'openExternal')).url,'https://example.com/thought');
+    await body.getByRole('link',{name:'file',exact:true}).click();assert.equal((await posted(page,'openFile')).path,'src/panel.ts');assert.equal((await posted(page,'openFile')).line,12);
+    await page.evaluate(()=>{Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});document.execCommand=()=>{window.copiedThought=document.activeElement.value;return true;};});
+    await page.locator('.reasoning summary').hover();await page.getByRole('button',{name:'Copy thought process',exact:true}).click();
+    assert.equal(await page.evaluate(()=>window.copiedThought),reasoning,'copy must retain Markdown delimiters and trailing whitespace');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('streamed thoughts render completed bold spans without duplicating text',async()=>{
+    const {page,errors}=await open();let reasoning='**Reviewing';
+    const snapshot=(streaming=true)=>({...state,view:{...state.view,running:streaming,parts:[{kind:'assistant',text:streaming?'':'Done.',reasoning,streaming,durable:!streaming}]}});
+    await emit(page,snapshot());const body=page.locator('.rbody');assert.equal(await body.textContent(),reasoning);
+    reasoning+=' project tasks**';await emit(page,snapshot());assert.equal(await body.locator('strong').textContent(),'Reviewing project tasks');
+    reasoning+='\n\nMore **checks**.';await emit(page,snapshot());assert.deepEqual(await body.locator('strong').allTextContents(),['Reviewing project tasks','checks']);
+    assert.equal(await body.textContent(),'Reviewing project tasks\n\nMore checks.');
+    await body.locator('strong').first().evaluate(el=>window.firstThoughtStrong=el);await emit(page,snapshot());
+    assert(await body.locator('strong').first().evaluate(el=>el===window.firstThoughtStrong),'unchanged source must retain rendered nodes');
+    await emit(page,snapshot(false));assert.equal(await body.textContent(),'Reviewing project tasks\n\nMore checks.');assert(await page.locator('.reasoning').evaluate(el=>el.open));
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('formatted thought selections and paused scroll survive updates and catch up on release',async()=>{
+    const {page,errors}=await open();let reasoning='**Reviewing project tasks**\n\n'+'A **bold** thought line.\n'.repeat(40)+'An unfinished **heading';
+    const snapshot=()=>({...state,view:{...state.view,running:true,parts:[{kind:'assistant',text:'',reasoning,streaming:true}]}});
+    await emit(page,snapshot());const body=page.locator('.rbody');await page.waitForFunction(()=>document.querySelector('.rbody')?.clientHeight>0);
+    await body.evaluate(el=>{el.scrollTop=100;});await page.waitForTimeout(20);
+    await body.evaluate(el=>{const text=el.querySelector('strong').firstChild,range=document.createRange();range.setStart(text,0);range.setEnd(text,9);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);window.selectedThoughtNode=text;});
+    const before=await body.textContent(),outerBefore=await page.locator('#scroll').evaluate(el=>el.scrollTop);
+    reasoning+='**\nNew **done** text.';await emit(page,snapshot());
+    assert.equal(await page.evaluate(()=>window.getSelection().toString()),'Reviewing');assert(await body.locator('strong').first().evaluate(el=>el.firstChild===window.selectedThoughtNode));
+    assert.equal(await body.textContent(),before);assert.equal(await body.evaluate(el=>el.scrollTop),100);assert.equal(await page.locator('#scroll').evaluate(el=>el.scrollTop),outerBefore);
+    await page.evaluate(()=>window.getSelection().removeAllRanges());await page.waitForFunction(()=>document.querySelector('.rbody').textContent.endsWith('New done text.'));
+    assert.deepEqual((await body.locator('strong').allTextContents()).slice(-2),['heading','done']);assert.equal(await body.evaluate(el=>el.scrollTop),100);
+    await body.evaluate(el=>{const strong=el.querySelector('strong'),range=document.createRange();range.setStart(strong.firstChild,10);range.setEnd(strong.nextSibling,3);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);window.crossThoughtSelection=selection.toString();});
+    reasoning+='\nAnother **update**.\n'.repeat(10);await emit(page,snapshot());assert.equal(await page.evaluate(()=>window.getSelection().toString()),await page.evaluate(()=>window.crossThoughtSelection));
+    await body.evaluate(el=>{window.getSelection().removeAllRanges();document.dispatchEvent(new Event('selectionchange'));el.scrollTop=el.scrollHeight;el.dispatchEvent(new Event('scroll'));});
+    assert((await body.textContent()).endsWith('Another update.'));
+    reasoning+='\nBack at **tail**.\n'.repeat(10);await emit(page,snapshot());
+    assert(await body.evaluate(el=>el.scrollHeight-el.scrollTop-el.clientHeight<5),'returning to the bottom immediately after selection catch-up must resume following');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('thought panes omit trailing blank space while preserving paragraphs and copied source text',async()=>{
+    const {page,errors}=await open();
+    let reasoning='First paragraph.\n\n'+('A synthetic thought line.\n'.repeat(40))+'The last visible sentence.\n\n  \t';
+    const snapshot=()=>({...state,view:{...state.view,running:true,parts:[{kind:'assistant',text:'',reasoning,streaming:true}]}});
+    const measure=()=>page.locator('.rbody').evaluate(pane=>{
+      pane.scrollTop=pane.scrollHeight;const node=pane.firstChild,range=document.createRange();
+      range.setStart(node,node.length-1);range.setEnd(node,node.length);
+      return {text:pane.textContent,gap:pane.getBoundingClientRect().bottom-range.getBoundingClientRect().bottom,padding:getComputedStyle(pane).paddingBottom};
+    });
+    await emit(page,snapshot());await page.waitForFunction(()=>document.querySelector('.rbody')?.clientHeight>0);
+    let tail=await measure();assert.equal(tail.text,reasoning.trimEnd());assert(tail.text.startsWith('First paragraph.\n\n'));assert(tail.gap<6,'no blank line or bottom padding should follow the final visible character');assert.equal(tail.padding,'0px');
+    reasoning+='\nAn appended paragraph after the original whitespace.\n\n';await emit(page,snapshot());
+    tail=await measure();assert.equal(tail.text,reasoning.trimEnd());assert(tail.gap<6,'incremental updates must not restore the blank tail');
+    await page.evaluate(()=>{Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});document.execCommand=()=>{window.copiedThought=document.activeElement.value;return true;};});
+    await page.locator('.reasoning summary').hover();await page.getByRole('button',{name:'Copy thought process',exact:true}).click();
+    assert.equal(await page.evaluate(()=>window.copiedThought),reasoning,'copy must retain the original text including trailing whitespace');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('passive thought shrink and incoming growth keep following through delayed layout capture',async()=>{
+    const {page,errors}=await open();await page.setViewportSize({width:960,height:760});
+    const history=Array.from({length:12},(_,i)=>({kind:'user',text:'Earlier '+i+' history '.repeat(100)}));
+    let answer={kind:'assistant',text:'',reasoning:'Thinking line\n'.repeat(100),streaming:true};
+    const snapshot=()=>({...state,view:{...state.view,running:true,parts:[...history,answer]}});
+    await emit(page,snapshot());
+    await page.waitForFunction(()=>{const pane=document.querySelector('#scroll');return pane.scrollHeight-pane.scrollTop-pane.clientHeight<2;});
+    answer={...answer,reasoning:'Thinking complete.',text:'New incoming answer. '.repeat(300)};
+    // Force the browser's clamp and later growth into one task, before observers/capture run.
+    const race=await page.evaluate(message=>{
+      const pane=document.querySelector('#scroll'),before=pane.scrollTop;
+      document.querySelector('.rbody').textContent='Thinking complete.';
+      const clamped=pane.scrollTop,smallHeight=pane.scrollHeight;
+      document.querySelector('.reply-text').textContent=message.view.parts.at(-1).text;
+      const grownHeight=pane.scrollHeight;
+      window.dispatchEvent(new MessageEvent('message',{data:message}));
+      return {before,clamped,smallHeight,grownHeight,follow:pane._follow};
+    },snapshot());
+    assert(race.clamped<race.before-20,'thought shrink must actually clamp the viewport');
+    assert(race.grownHeight>race.smallHeight+100,'incoming text must grow before capture');
+    assert.equal(race.follow,true,'layout-driven upward movement must not disable following');
+    await page.waitForFunction(()=>{const pane=document.querySelector('#scroll');return pane.scrollHeight-pane.scrollTop-pane.clientHeight<2;});
+    answer={...answer,text:answer.text+' Subsequent streaming content. '.repeat(100)};
+    await emit(page,snapshot());
+    await page.waitForFunction(()=>{const pane=document.querySelector('#scroll');return pane._follow&&pane.scrollHeight-pane.scrollTop-pane.clientHeight<2;});
+    assert.equal(await page.locator('#jumpBtn').isVisible(),false);assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('an upward pointer drag still pauses following when incoming content changes layout',async()=>{
+    const {page,errors}=await open();await page.setViewportSize({width:960,height:760});
+    const history=Array.from({length:12},(_,i)=>({kind:'user',text:'Earlier '+i+' history '.repeat(100)}));
+    let answer={kind:'assistant',text:'Answer. '.repeat(200),reasoning:'Thinking line\n'.repeat(100),streaming:true};
+    const snapshot=()=>({...state,view:{...state.view,running:true,parts:[...history,answer]}});
+    await emit(page,snapshot());
+    await page.waitForFunction(()=>{const pane=document.querySelector('#scroll');return pane.scrollHeight-pane.scrollTop-pane.clientHeight<2;});
+    await page.locator('#scroll').dispatchEvent('pointerdown');
+    await emit(page,snapshot()); // An unchanged render consumes the initial pointerdown intent.
+    answer={...answer,text:answer.text+'New answer. '.repeat(200)};
+    const drag=await page.evaluate(message=>{
+      const pane=document.querySelector('#scroll');pane.scrollTop-=200;const held=pane.scrollTop;
+      document.querySelector('.reply-text').textContent=message.view.parts.at(-1).text;
+      window.dispatchEvent(new MessageEvent('message',{data:message}));
+      return {held,follow:pane._follow,top:pane.scrollTop};
+    },snapshot());
+    assert.equal(drag.follow,false,'an active upward drag remains reader intent during reflow');assert(Math.abs(drag.top-drag.held)<1);
+    await page.evaluate(()=>document.dispatchEvent(new PointerEvent('pointerup')));
+    answer={...answer,text:answer.text+' Further incoming content. '.repeat(80)};await emit(page,snapshot());
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert(Math.abs(await page.locator('#scroll').evaluate(pane=>pane.scrollTop)-drag.held)<1,'incoming content must leave the reader in place after release');
+    assert(await page.locator('#jumpBtn').isVisible());await page.locator('#jumpBtn').click();
+    await page.waitForFunction(()=>{const pane=document.querySelector('#scroll');return pane._follow&&pane.scrollHeight-pane.scrollTop-pane.clientHeight<2;});
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('response caret belongs only to the latest text response, never a thought-only or tool-running gap',async()=>{
+    const {page,errors}=await open();
+    const thought={kind:'assistant',text:'',reasoning:'Checking the current state.',streaming:true,durable:false};
+    const show=parts=>emit(page,{...state,view:{...state.view,running:true,parts}});
+    await show([thought]);assert.equal(await page.locator('.reply-caret .caret').count(),0,'thought-only streaming has no empty reply caret');
+    const reply={...thought,text:'Checking the tool result.'};await show([reply]);assert.equal(await page.locator('.reply-caret .caret').count(),1,'actual current reply text retains its streaming indicator');
+    const tool={kind:'tool',call:{callId:'running-eval',name:'eval',arguments:'(+ 1 2)',done:false,status:'running'}};
+    await show([reply,tool]);assert.equal(await page.locator('.reply-caret .caret').count(),0,'a running eval must not leave a caret under the preceding reply');
+    await show([{...reply,streaming:false,durable:true},tool]);assert.equal(await page.locator('.reply-caret .caret').count(),0);
+    await show([{...reply,streaming:false,durable:true},{...tool,call:{...tool.call,done:true,result:'3'}},{...thought,text:'The result is 3.',reasoning:''}]);
+    assert.equal(await page.locator('.reply-caret .caret').count(),1);assert.deepEqual(errors,[]);await page.close();
+  });
   assert.deepEqual(failures,[],'Chromium regressions failed');
 }finally{await browser.close();}

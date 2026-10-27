@@ -6,9 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Omit trailing blank thought lines and bottom padding from display without changing saved or copied text.
+
 ### Fixed
 
+- Render inline Markdown in Thought process, including bold instead of literal asterisks, while preserving streamed selections, scrolling and copied source text.
 - Load saved conversation images through authenticated binary gateway requests, keeping credentials out of image URLs and restoring history and full-size previews.
+- Show the streaming reply cursor only after reply text arrives and hide it when a tool follows, avoiding an isolated orange marker under thinking or a preceding reply.
+- Keep automatic transcript following through thought-height and incoming-content reflows, without overriding deliberate scrolling or text selection.
 
 ## [0.1.7]
 

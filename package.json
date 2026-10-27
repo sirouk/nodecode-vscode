@@ -2,7 +2,7 @@
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
   "description": "Nodecode in VS Code: live conversations, thinking, tools, child threads, checkpoints and model controls.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",

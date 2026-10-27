@@ -65,6 +65,108 @@ try{
     for(const id of ['parent-a','parent-b']){await emit(page,{...state,view:{...state.view,parentId:id}});assert.equal(await page.locator('#threadList [data-p]').getAttribute('data-p'),id);}
     await page.close();
   });
+  await check('threads keep non-idle work and one recent idle above the default-collapsed idle fold',async()=>{
+    const {page,errors}=await open(),at=hour=>'2026-10-26T'+String(hour).padStart(2,'0')+':00:00Z';
+    const row=(id,status,time)=>({id,title:id,kind:'subagent',status,relativeDepth:1,createdAt:at(7),...(status==='idle'?{updatedAt:at(time)}:{startedAt:at(time)})});
+    let descendants=[row('idle-old','idle',9),row('active-old','running',10),row('idle-latest','idle',18),row('active-new','running',17),row('idle-middle','idle',12),row('failed','failed',14),row('unknown','unknown',15)];
+    const parents=[{...row('parent','running',8),relativeDepth:-1}],siblings=[{...row('waiting','waiting',16),relativeDepth:0}];
+    const snapshot=()=>({...state,view:{...state.view,parentId:'parent',ancestors:parents,siblings,descendants}});
+    const ids=selector=>page.locator(selector+' [data-a="openThread"]').evaluateAll(rows=>rows.map(row=>row.dataset.p));
+    await emit(page,snapshot());
+    assert.equal(await page.locator('#threadDetails').evaluate(node=>node.open),false);
+    await page.locator('#threadDetails > summary').click();
+    assert.deepEqual(await ids('#activeThreadList'),['active-new','waiting','unknown','failed','active-old','parent','idle-latest']);
+    assert.deepEqual(await ids('#idleThreadList'),['idle-middle','idle-old']);
+    assert.equal(await page.locator('#idleThreadDetails').evaluate(node=>node.open),false);
+    assert.equal(await page.locator('#idleThreadList [data-p="idle-middle"]').isVisible(),false);
+    for(const id of ['active-new','waiting','unknown','failed','active-old','parent','idle-latest'])assert(await page.locator('#activeThreadList [data-p="'+id+'"]').isVisible(),id+' should remain above the idle fold');
+    assert.equal(await page.locator('#threadList .activity-group').count(),0,'relationship headings must not consume the compact list');
+    assert.match(await page.locator('#activeThreadList [data-p="parent"]').getAttribute('title'),/Parent/i);
+    assert.match(await page.locator('#activeThreadList [data-p="waiting"]').getAttribute('title'),/Sibling/i);
+    await page.locator('#activeThreadList [data-p="active-new"]').click();
+    assert.equal((await posted(page,'openThread')).sessionId,'active-new');
+    await page.locator('#idleThreadSummary').click();
+    await page.waitForFunction(()=>window.savedState.sessions?.['regression-session'].expanded?.['section-thread-idle']===true);
+    await page.locator('#idleThreadList [data-p="idle-middle"]').click();assert.equal((await posted(page,'openThread')).sessionId,'idle-middle');
+    descendants=descendants.map(thread=>thread.id==='idle-middle'?{...thread,title:'Renamed idle thread'}:thread);
+    await emit(page,snapshot());
+    assert.equal(await page.evaluate(()=>document.activeElement.dataset.p),'idle-middle','row focus survives an unrelated list refresh');
+    await page.locator('#idleThreadSummary').focus();
+    await page.evaluate(()=>window.idleSummaryNode=document.querySelector('#idleThreadSummary'));
+    descendants=descendants.map(thread=>thread.id==='active-new'?{...thread,status:'idle',updatedAt:at(20)}:thread);
+    await emit(page,snapshot());
+    assert.deepEqual(await ids('#activeThreadList'),['waiting','unknown','failed','active-old','parent','active-new']);
+    assert.deepEqual(await ids('#idleThreadList'),['idle-latest','idle-middle','idle-old']);
+    assert(await page.locator('#idleThreadDetails').evaluate(node=>node.open));
+    assert(await page.evaluate(()=>document.activeElement===window.idleSummaryNode&&window.idleSummaryNode===document.querySelector('#idleThreadSummary')),'summary focus and identity survive live regrouping');
+    let restored=await open(await page.evaluate(()=>window.savedState));await emit(restored.page,snapshot());
+    assert(await restored.page.locator('#threadDetails').evaluate(node=>node.open));
+    assert(await restored.page.locator('#idleThreadDetails').evaluate(node=>node.open),'expanded idle fold survives webview recreation');
+    await restored.page.locator('#idleThreadSummary').click();
+    await restored.page.waitForFunction(()=>window.savedState.sessions?.['regression-session'].expanded?.['section-thread-idle']===false);
+    const collapsedState=await restored.page.evaluate(()=>window.savedState);await restored.page.close();
+    restored=await open(collapsedState);await emit(restored.page,snapshot());
+    assert.equal(await restored.page.locator('#idleThreadDetails').evaluate(node=>node.open),false);await restored.page.close();
+    descendants=descendants.map(thread=>thread.id==='active-new'?{...thread,status:'running',startedAt:at(21)}:thread);
+    await emit(page,snapshot());
+    assert.deepEqual(await ids('#activeThreadList'),['active-new','waiting','unknown','failed','active-old','parent','idle-latest']);
+    assert.equal((await ids('#threadList')).filter(id=>id==='active-new').length,1);
+    await emit(page,{...state,view:{...state.view,descendants:[row('only-idle','idle',10)]}});
+    assert.deepEqual(await ids('#activeThreadList'),['only-idle']);assert.equal(await page.locator('#idleThreadDetails').isVisible(),false);
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('idle regrouping keeps keyboard focus on visible rows or disclosure summaries',async()=>{
+    const {page,errors}=await open();
+    let descendants=[{id:'latest',title:'Latest idle',status:'idle',updatedAt:'2026-10-26T16:00:00Z'},{id:'new',title:'Working',status:'running',startedAt:'2026-10-26T17:00:00Z'}];
+    const snapshot=()=>({...state,view:{...state.view,descendants}});
+    const focused=()=>page.evaluate(()=>document.activeElement.id||document.activeElement.dataset.p);
+    await emit(page,snapshot());await page.locator('#threadDetails > summary').click();
+    await page.locator('#activeThreadList [data-p="latest"]').focus();
+    descendants=descendants.map(row=>row.id==='new'?{...row,status:'idle',updatedAt:'2026-10-26T18:00:00Z'}:row);await emit(page,snapshot());
+    assert.equal(await focused(),'idleThreadSummary');assert.equal(await page.locator('#idleThreadDetails').evaluate(node=>node.open),false);
+    descendants=descendants.map(row=>row.id==='latest'?{...row,status:'running'}:row);await emit(page,snapshot());
+    assert.equal(await focused(),'threadSummary','focus leaves the now-hidden idle disclosure for its visible parent');
+    descendants=descendants.map(row=>row.id==='latest'?{...row,status:'idle'}:row);await emit(page,snapshot());
+    await page.locator('#idleThreadSummary').click();await page.locator('#idleThreadList [data-p="latest"]').focus();
+    descendants=descendants.map(row=>row.id==='latest'?{...row,status:'running'}:row);await emit(page,snapshot());
+    assert.equal(await focused(),'latest','an idle row moved into the visible active list retains focus');
+    descendants=descendants.map(row=>row.id==='latest'?{...row,title:'Renamed working thread'}:row);await emit(page,snapshot());
+    assert.equal(await focused(),'latest');assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('large expanded thread sections stay compact and leave the conversation readable at sidebar widths',async()=>{
+    const {page,errors}=await open();
+    const descendants=Array.from({length:70},(_,i)=>({id:'compact-'+i,title:'A long thread title '+i+' '+('words '.repeat(9)),kind:'subagent',status:i<35?'running':'idle',relativeDepth:i%3+1,createdAt:'2026-10-26T10:00:00Z',startedAt:'2026-10-26T12:00:00Z',updatedAt:'2026-10-26T13:00:00Z'}));
+    const fixture={...state,view:{...state.view,descendants,parts:[{kind:'assistant',text:'The conversation remains readable while many forks exist.\n\n'+'Visible answer content. '.repeat(80),reasoning:'',durable:true,streaming:false}]}};
+    await emit(page,fixture);await page.locator('#threadDetails > summary').click();
+    await page.locator('#idleThreadSummary').click();
+    for(const viewport of [{width:360,height:700},{width:320,height:500}]){
+      await page.setViewportSize(viewport);
+      const size=await page.evaluate(()=>({list:document.querySelector('#threadList').getBoundingClientRect().height,conversation:document.querySelector('#conversation').getBoundingClientRect().height,scrollable:document.querySelector('#threadList').scrollHeight>document.querySelector('#threadList').clientHeight,overflow:document.documentElement.scrollWidth>window.innerWidth}));
+      assert(size.list<=Math.min(160,viewport.height*.22)+1,'thread section must honor its compact viewport cap');
+      assert(size.conversation>=viewport.height*.25,'conversation must retain a useful reading area');
+      assert(size.scrollable,'all remaining rows should be reachable by internal scrolling');assert.equal(size.overflow,false);
+      assert.equal(await page.locator('#composer').isVisible(),true);
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('spawn notices use the concise prefix and a compact matching fork-color cap, including cached notices',async()=>{
+    const {page,errors}=await open();const title='Research fork '+('with a long descriptive title '.repeat(10));
+    const descendants=[{id:'colored-fork',title,status:'running',kind:'subagent',relativeDepth:1}];
+    for(const prefix of ['Spawned subagent: ','Spawned: ']){
+      await emit(page,{...state,view:{...state.view,descendants,parts:[{kind:'system',text:prefix+title,level:'info',childSessionId:'colored-fork'},{kind:'system',text:'Ordinary system notification',level:'info'}]}});
+      const notice=page.locator('.spawn-notice');
+      assert.equal(await notice.count(),1);assert.equal(await notice.textContent(),'Spawned: '+title);
+      const button=notice.locator('[data-a="openThread"]');assert.equal(await button.getAttribute('data-p'),'colored-fork');
+      assert((await notice.getAttribute('title')||await button.getAttribute('title')).includes(title),'full fork title remains available without wrapping');
+      const card=await notice.evaluate(node=>{const s=getComputedStyle(node);return {height:node.getBoundingClientRect().height,borderWidth:parseFloat(s.borderLeftWidth),color:s.borderLeftColor};});
+      const dotColor=await page.locator('#threadList [data-p="colored-fork"] .agent-dot').evaluate(node=>getComputedStyle(node).backgroundColor);
+      assert.equal(card.borderWidth,3,'the leftmost card cap should remain visible');assert.equal(card.color,dotColor);
+      assert(card.height<=32,'spawn notifications must remain a compact single line at sidebar widths');
+      assert.equal(await page.locator('#transcript .sys:not(.spawn-notice)').textContent(),'Ordinary system notification');
+      await button.click();assert.equal((await posted(page,'openThread')).sessionId,'colored-fork');
+    }
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));assert.deepEqual(errors,[]);await page.close();
+  });
   await check('favorite errors use their own identity and restore authoritative state',async()=>{
     const {page}=await open();let optionId;
     for(let i=0;i<3;i++){await page.locator('#modelBtn').click();optionId=(await posted(page,'modelOptions')).requestId;if(i<2)await page.locator('#optionClose').click();}
@@ -280,6 +382,21 @@ try{
     assert.equal(await page.evaluate(()=>window.copiedThought),reasoning,'copy must retain the original text including trailing whitespace');
     assert.deepEqual(errors,[]);await page.close();
   });
+  await check('footer disclosures use tight rows without horizontal divider lines',async()=>{
+    const {page,errors}=await open();
+    const fixture={...state,view:{...state.view,descendants:[{id:'footer-thread',title:'Working thread',kind:'subagent',status:'running'}],modifiedFiles:[{path:'src/example.ts',additions:2,deletions:1}],parts:[{kind:'assistant',text:'The conversation has room to breathe.',reasoning:'',streaming:false}]}};
+    await emit(page,fixture);
+    for(const viewport of [{width:1108,height:650},{width:360,height:700}]){
+      await page.setViewportSize(viewport);
+      const metrics=await page.evaluate(()=>['threadBar','fileBar'].map(id=>{const node=document.getElementById(id),css=getComputedStyle(node);return {id,border:parseFloat(css.borderTopWidth),height:node.getBoundingClientRect().height,paddingTop:parseFloat(css.paddingTop),paddingBottom:parseFloat(css.paddingBottom)};}));
+      for(const row of metrics){assert.equal(row.border,0,row.id+' must not have a separator');assert(row.height<=34,row.id+' collapsed row should stay compact');assert(row.paddingTop<=2&&row.paddingBottom<=2);}
+      assert(await page.locator('#scroll').evaluate(node=>node.clientHeight>180),'compact footer leaves room for the transcript');
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    }
+    await page.locator('#threadDetails > summary').click();assert(await page.locator('#activeThreadList [data-p="footer-thread"]').isVisible());
+    await page.locator('#fileDetails > summary').click();assert(await page.locator('#fileList').isVisible());
+    assert.deepEqual(errors,[]);await page.close();
+  });
   await check('passive thought shrink and incoming growth keep following through delayed layout capture',async()=>{
     const {page,errors}=await open();await page.setViewportSize({width:960,height:760});
     const history=Array.from({length:12},(_,i)=>({kind:'user',text:'Earlier '+i+' history '.repeat(100)}));
@@ -343,6 +460,36 @@ try{
     await show([{...reply,streaming:false,durable:true},tool]);assert.equal(await page.locator('.reply-caret .caret').count(),0);
     await show([{...reply,streaming:false,durable:true},{...tool,call:{...tool.call,done:true,result:'3'}},{...thought,text:'The result is 3.',reasoning:''}]);
     assert.equal(await page.locator('.reply-caret .caret').count(),1);assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('activity children and nested idle rows are inset from their parent headings',async()=>{
+    const {page,errors}=await open();
+    await emit(page,{...state,view:{...state.view,
+      descendants:[
+        {id:'working',title:'Working thread '+('long title '.repeat(30)),kind:'subagent',status:'running'},
+        {id:'recent-idle',title:'Recent idle thread',kind:'subagent',status:'idle',updatedAt:'2026-10-26T18:00:00Z'},
+        {id:'older-idle',title:'Older idle thread '+('long title '.repeat(30)),kind:'subagent',status:'idle',updatedAt:'2026-10-26T17:00:00Z'},
+      ],
+      processes:[{id:'hierarchy-process',execId:7,command:'Inspect '+('long-command-'.repeat(30)),status:'running',output:'Retained process output'}],
+      modifiedFiles:[{path:'src/'+('long-directory/'.repeat(5))+'panel.ts',added:1,removed:0,patch:'@@ -0,0 +1 @@\n+retained change'}],
+    }});
+    for(const id of ['processSummary','threadSummary','fileSummary','idleThreadSummary'])await page.locator('#'+id).click();
+    for(const width of [320,360,960,1440]){
+      await page.setViewportSize({width,height:1100});
+      const rows=await page.evaluate(()=>[
+        ['processSummary','#processList > .activity-process'],
+        ['threadSummary','#activeThreadList > .activity-link'],
+        ['threadSummary','#idleThreadDetails'],
+        ['idleThreadSummary','#idleThreadList > .activity-link'],
+        ['fileSummary','#fileList > .diff-file'],
+      ].map(([id,selector])=>{const parent=document.getElementById(id).getBoundingClientRect(),child=document.querySelector(selector).getBoundingClientRect();return {id,inset:child.left-parent.left,right:child.right,parentRight:parent.right};}));
+      for(const row of rows){
+        assert(row.inset>=12,row.id+' children must be visibly indented, got '+row.inset+'px');
+        assert(row.right<=row.parentRight+1,row.id+' children must stay inside the section');
+      }
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'indented activity lists must not widen the page');
+      assert(await page.locator('#composer').isVisible());
+    }
+    assert.deepEqual(errors,[]);await page.close();
   });
   assert.deepEqual(failures,[],'Chromium regressions failed');
 }finally{await browser.close();}

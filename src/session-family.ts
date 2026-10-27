@@ -11,6 +11,8 @@ export interface SessionThread {
   relation?: "inherited" | "detached" | null;
   source?: string | null;
   startedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface SessionFamily {
@@ -39,6 +41,7 @@ export function sessionFamily(
       parentId: typeof row.parent_id === "string" ? row.parent_id : undefined,
       depth: row.depth, relativeDepth, relation: row.relation, source: row.source,
       startedAt: activity?.get(row.id),
+      createdAt: row.created_at, updatedAt: row.updated_at,
     };
   };
   const ancestors: SessionThread[] = [], descendants: SessionThread[] = [];

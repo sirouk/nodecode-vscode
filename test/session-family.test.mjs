@@ -51,3 +51,36 @@ test('late directory response cannot replace a newer native family snapshot',asy
   assert.equal(controller.store.view().threads[0].id,'parent');
   controller.dispose();
 });
+
+
+test('family timestamps preserve native creation and last-activity recency through cache restore',()=>{
+  const rows=[{id:'root'},{id:'child',parent_id:'root',source:'fork',created_at:'2026-10-25T08:00:00Z',updated_at:'2026-10-26T17:00:00Z'}];
+  const store=new SessionStore();store.applyFrame({type:'session_stream_resumed',session_id:'root',replay_chunk_final:true,admission_state:'ready',accumulated_frames:[]});store.setThreads(rows,'root');
+  store.applyFrame({type:'organism.activity',sessions:[{id:'child',started_at:'2026-10-26T16:00:00Z'}]});
+  const active=store.view().threads[0];
+  assert.equal(active.createdAt,rows[1].created_at);assert.equal(active.updatedAt,rows[1].updated_at);
+  assert.equal(active.startedAt,'2026-10-26T16:00:00Z');
+  const restored=new SessionStore();restored.restoreProjection(JSON.parse(JSON.stringify(store.snapshotProjection())),'root');
+  assert.equal(restored.view().threads[0].status,'unknown','cached activity must not claim a thread is idle or running');
+  assert.equal(restored.view().threads[0].createdAt,active.createdAt);assert.equal(restored.view().threads[0].updatedAt,active.updatedAt);
+  store.applyFrame({type:'organism.activity',sessions:[]});
+  assert.equal(store.view().threads[0].status,'idle');assert.equal(store.view().threads[0].startedAt,undefined);
+  assert.equal(store.view().threads[0].updatedAt,rows[1].updated_at,'last activity is not a fabricated idle-transition timestamp');
+});
+
+test('new delegated forks produce one concise spawned notice and retain its identity through cached reopen',()=>{
+  const store=new SessionStore(),baseline=[{id:'root'},{id:'existing',parent_id:'root',source:'fork',title:'Existing'}];
+  store.applyFrame({type:'session_stream_resumed',session_id:'root',replay_chunk_final:true,admission_state:'ready',accumulated_frames:[]});
+  store.setThreads(baseline,'root');
+  assert.equal(store.view().parts.filter(part=>part.childSessionId).length,0,'opening an existing roster is not a spawn');
+  const draft={id:'new',parent_id:'root',title:'Fresh fork'};
+  store.setThreads([...baseline,draft],'root');
+  assert.equal(store.view().parts.filter(part=>part.childSessionId).length,0,'only native delegated source confirms a spawn');
+  const spawned={...draft,source:'fork'};
+  store.setThreads([...baseline,spawned],'root');store.setThreads([...baseline,{...spawned,title:'Renamed fork'}],'root');
+  const notices=store.view().parts.filter(part=>part.childSessionId);
+  assert.deepEqual(notices,[{kind:'system',text:'Spawned: Fresh fork',level:'info',childSessionId:'new'}]);
+  const restored=new SessionStore();restored.restoreProjection(JSON.parse(JSON.stringify(store.snapshotProjection())),'root');
+  restored.setThreads([...baseline,spawned],'root');
+  assert.deepEqual(restored.view().parts.filter(part=>part.childSessionId),notices,'cache restoration must not repeat a spawn notice');
+});

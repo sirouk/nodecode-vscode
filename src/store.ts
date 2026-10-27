@@ -817,7 +817,7 @@ export class SessionStore {
         this.seenChildIds.add(child.id);
         if (child.source === "fork" && this.pendingSpawnIds.has(child.id) && !this.notifiedSpawnIds.has(child.id)) {
           this.notifiedSpawnIds.add(child.id); this.pendingSpawnIds.delete(child.id);
-          this.parts.push({kind:"system",text:`Spawned subagent: ${child.title || child.prompt || child.id}`,level:"info",childSessionId:child.id});
+          this.parts.push({kind:"system",text:`Spawned: ${child.title || child.prompt || child.id}`,level:"info",childSessionId:child.id});
         }
       }
     }

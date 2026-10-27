@@ -52,6 +52,8 @@ export interface BackgroundProcessView {
   stopped?: unknown;
 }
 
+export interface ProcessCheckpoint { view: BackgroundProcessView; bytes: string; offset: number }
+
 interface ProcessState { view:BackgroundProcessView; bytes:Buffer; offset:number }
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
@@ -60,6 +62,14 @@ export class BackgroundProcesses {
   private readonly rows = new Map<string, ProcessState>();
   clear():void { this.rows.clear(); }
   view():BackgroundProcessView[] { return [...this.rows.values()].map((row)=>({...row.view})); }
+  markUnconfirmed(): void {
+    for (const row of this.rows.values()) if (row.view.status === "running") row.view = {...row.view, status:"unknown"};
+  }
+  snapshot(): ProcessCheckpoint[] { return [...this.rows.values()].map(row => ({view:row.view, bytes:row.bytes.toString("base64"), offset:row.offset})); }
+  restore(rows: ProcessCheckpoint[]): void {
+    this.rows.clear();
+    for (const row of rows) this.rows.set(row.view.id, {view:row.view, bytes:Buffer.from(row.bytes,"base64"), offset:row.offset});
+  }
 
   update(process:Record<string,unknown>):void {
     const execId = typeof process.shell_session_id === "number" && Number.isSafeInteger(process.shell_session_id)

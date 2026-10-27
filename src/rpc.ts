@@ -69,6 +69,13 @@ export class RpcProcess {
     return this.restartAttempts;
   }
 
+  get checkpointCursor(): number | undefined { return this.resumeCursor; }
+
+  restoreCursor(cursor: number): void {
+    if (this.proc || this.everConnected || !Number.isSafeInteger(cursor) || cursor <= 0) throw new Error("Invalid restored RPC cursor");
+    this.resumeCursor = cursor;
+  }
+
   setSession(sessionId: string): void {
     if (this.disposed) return;
     if (sessionId === this.sessionId) return;

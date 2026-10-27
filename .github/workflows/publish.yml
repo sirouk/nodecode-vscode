@@ -39,8 +39,9 @@ jobs:
     needs: verify
     if: github.ref_type == 'tag' && github.repository == 'sirouk/nodecode-vscode'
     runs-on: ubuntu-latest
-    # VSCE_PAT is a repository-level secret (Settings -> Secrets and variables ->
-    # Actions). No environment scoping: the job reads it directly.
+    # VSCE_PAT lives in CI, matching prime-agent-vscode. Only the tag-publish
+    # job may access environment secrets; verification and PRs do not.
+    environment: CI
     permissions:
       contents: write
     steps:
@@ -83,8 +84,9 @@ jobs:
         run: |
           if [ -z "$VSCE_PAT" ]; then
             echo "VSCE_PAT resolved to empty — cannot publish." >&2
-            echo "It must be a repo-level Actions SECRET (not a variable) named VSCE_PAT:" >&2
-            echo "Settings > Secrets and variables > Actions > Repository secrets." >&2
+            echo "It must be an Actions SECRET (not a variable) named VSCE_PAT, stored in the" >&2
+            echo "CI environment (Settings > Environments > CI > Add environment secret)" >&2
+            echo "or at repository level (Settings > Secrets and variables > Actions)." >&2
             echo "Then re-run this failed run." >&2
             exit 1
           fi

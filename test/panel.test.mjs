@@ -139,7 +139,7 @@ test('control actions report disconnected and rejected command results',async t=
   for(const [action,method] of [['withdraw','withdraw'],['cancel','cancelActive'],['interrupt','interruptExec'],['navigateUndo','navigateCheckpoint'],['navigateRedo','navigateCheckpoint']]){
     for(const result of [undefined,{status:'rejected',message:'Runtime refused control'}])await t.test(`${action} ${result?'rejected':'disconnected'}`,async()=>{
       const panel=Object.create(SessionPanel.prototype),logs=[];warnings.length=0;
-      panel.controller={sessionId:'session',[method]:()=>method==='navigateCheckpoint'?Promise.resolve(result):result&&{done:Promise.resolve(result)}};
+      panel.controller={...controller('session'),[method]:()=>method==='navigateCheckpoint'?Promise.resolve(result):result&&{done:Promise.resolve(result)}};
       panel.notes={log:m=>logs.push(m)};
       await panel.onMessage({type:action,promptId:'queued',execId:1});
       assert.equal(warnings.length,1);assert.equal(logs.length,1);
@@ -300,4 +300,14 @@ test('idle sends retain start-or-queue intent when another client starts work du
   finishPreparation('Start this separate task with attachments');await pending;
   assert.deepEqual(commands,[{type:'start_turn',text:'Start this separate task with attachments'}]);
   assert.equal(posted.at(-1).type,'sendAccepted');
+});
+
+test('cached history is a readonly preview even if stale webview messages try to send or control the turn',async()=>{
+  const panel=Object.create(SessionPanel.prototype),posted=[],commands=[];
+  panel.controller={...controller('cached'),store:{view:()=>({cached:true,running:true,activeTurnId:'old',activeTurnSteerable:true})},withAttachments:async text=>text,steer:()=>commands.push('steer'),queuePrompt:()=>commands.push('queue'),withdraw:()=>commands.push('withdraw'),cancelActive:()=>commands.push('cancel')};
+  panel.panel={webview:{postMessage:m=>posted.push(m)}};panel.notes={log(){}};warnings.length=0;
+  await panel.onMessage({type:'send',requestId:'cached-send',text:'Never admit from cache'});
+  assert.match(posted.find(m=>m.type==='sendRejected').message,/synchroniz/i);
+  for(const type of ['withdraw','cancel'])await panel.onMessage({type,promptId:'stale'});
+  assert.deepEqual(commands,[]);assert.equal(warnings.length,2);
 });

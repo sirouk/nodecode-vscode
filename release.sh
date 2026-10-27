@@ -16,7 +16,7 @@
 # - commit release commit, tag, push main+tag, publish GitHub release with the vsix
 #
 # Marketplace publishing is owned by the tag-push workflow: pushing it triggers
-# .github/workflows/publish.yml, which runs `vsce publish` with the repo's
+# .github/workflows/publish.yml, whose CI environment supplies the
 # VSCE_PAT secret. This script waits for that run and reports its real outcome.
 # VSCE_PUBLISH=1 also publishes from the local .env (see the race warning in the plan).
 #
@@ -80,16 +80,30 @@ preferred_remote() {
 }
 
 # Whether publish.yml can actually publish. Reported in the plan block so a
-# missing repo secret is visible before the release is cut, not after it red-Xes.
+# missing publish secret is visible before the release is cut, not after it red-Xes.
 repo_secret_state() {
     have gh || { printf 'gh is not installed, so this run cannot check it'; return; }
-    local names
-    if ! names="$(gh secret list --json name -q '.[].name' 2>/dev/null)"; then
-        printf 'this run could not read the repository secrets'
-    elif printf '%s\n' "$names" | grep -qx VSCE_PAT; then
-        printf 'VSCE_PAT repo secret is set'
+    local names unreadable=false
+    if names="$(gh secret list --env CI --json name -q '.[].name' 2>/dev/null)"; then
+        if printf '%s\n' "$names" | grep -qx VSCE_PAT; then
+            printf 'VSCE_PAT CI environment secret is set'
+            return
+        fi
     else
-        printf 'VSCE_PAT repo secret is NOT set — that run will fail'
+        unreadable=true
+    fi
+    if names="$(gh secret list --json name -q '.[].name' 2>/dev/null)"; then
+        if printf '%s\n' "$names" | grep -qx VSCE_PAT; then
+            printf 'VSCE_PAT repo secret is set'
+            return
+        fi
+    else
+        unreadable=true
+    fi
+    if [ "$unreadable" = true ]; then
+        printf 'this run could not read all publish secret scopes'
+    else
+        printf 'VSCE_PAT is NOT set in the CI environment or repository — that run will fail'
     fi
 }
 

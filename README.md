@@ -19,6 +19,12 @@ Watch and steer live [Nodecode](https://nodecode.ai) sessions without leaving VS
 - **Steering** — pick the model or effort budget for a session, and write `nodecode.md` into any workspace to guide the agent there.
 - **Diagnostics** — an output channel shows activation and CLI protocol traffic when `nodecode.diagnostics` is enabled.
 
+### Reopening history and usage
+
+Open controllers are reused when switching conversations. After a completed sync, the extension saves a private local projection in VS Code’s extension storage. Reopening shows that saved history immediately, including recorded file changes, agent relationships and usage, while validating a durable event and catching up from the saved cursor. The runtime remains authoritative: changed branches, incompatible or corrupt caches, and failed validation trigger a replacement replay. Partial replays never replace the last complete checkpoint. Sending and turn controls wait for synchronization; cached process output is last observed, not proof a process is still running.
+
+The footer shows **current context** separately from **cumulative tokens**, abbreviated in K/M. Hover for exact input, output, cache-read and cache-write counts. Cumulative usage and recorded cost cover this session’s currently visible branch, not child agents or work discarded by undo; cost may exclude unpriced rounds. Earlier messages remain available by scrolling upward—the cache is not a history truncation.
+
 ## Requirements
 
 - VS Code 1.96 or newer.
@@ -99,7 +105,7 @@ This repo follows the same release discipline as [prime-agent-vscode](https://gi
 1. `./release.sh --dry-run` runs every gate and prints the plan without editing anything.
 2. `./release.sh --version vX.Y.Z` — synchronizes the version in `package.json` and `package-lock.json`, promotes `[Unreleased]` changelog entries, runs the full battery (compile, tests/parity, icon freshness), packages the vsix and asserts exactly the intended file set ships, then commits, tags, pushes, and creates the GitHub release with the vsix asset.
 3. The Marketplace publish belongs to CI: pushing the version tag triggers `.github/workflows/publish.yml`. It installs locked dependencies with `npm ci`, verifies tests and icon freshness for that exact tagged commit, then packages and publishes only if verification succeeds. The script monitors that tag-push run, not a GitHub release event.
-4. Once, set the secret: an Azure DevOps PAT with **Marketplace → Manage** scope, stored as a **repository Actions secret** named `VSCE_PAT` (Settings → Secrets and variables → Actions → Repository secrets). The publish job does not use the `CI` environment. `release.sh` reports whether it can read the repository secret names; it never reads their values.
+4. Once, set the secret: an Azure DevOps PAT with **Marketplace → Manage** scope, named `VSCE_PAT` in the GitHub **CI environment** (Settings → Environments → CI → Environment secrets). The tag-only publish job selects `environment: CI`, matching Prime’s setup; repository Actions secrets are also supported. `release.sh` checks environment and repository secret names without reading their values, and distinguishes missing secrets from scopes it cannot inspect. A rerun uses the original workflow revision, so a workflow repair must be included in a new release tag.
 5. Optional local publishing: `.env` with `VSCE_PAT` plus `VSCE_PUBLISH=1` (see `release.sh --help`). This does **not** disable tag-triggered CI publishing, so the two publishers can race and one can fail with a duplicate-version error; leave it unset for the normal CI-owned release. `.env` is excluded from git and from every vsix by `.vscodeignore` and the package allowlist — never commit it.
 
 ## License

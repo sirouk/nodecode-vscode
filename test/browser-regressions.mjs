@@ -85,10 +85,28 @@ try{
   });
   await check('footer displays latest context including cache reads and writes, not cumulative input',async()=>{
     const {page}=await open();
-    await emit(page,{...state,view:{...state.view,totals:{input:99000,output:12000},contextUsage:{input:1000,cached:2000,cacheWrite:300}}});
-    assert((await page.locator('#statusLine').textContent()).includes('12000 out / ctx 3.3 K'));
+    await emit(page,{...state,view:{...state.view,totals:{input:99000,output:12000,cached:2200000,cacheWrite:50000,total:2361000},contextUsage:{input:1000,cached:2000,cacheWrite:300}}});
+    assert((await page.locator('#statusLine').textContent()).includes('ctx 3.3 K · 2.4 M tokens'));
     assert((await page.locator('#statusLine>span').last().getAttribute('title')).includes('3,300'));
+    assert((await page.locator('#statusLine>span').last().getAttribute('title')).includes('12 K (12,000)'));
     await page.close();
+  });
+  await check('cached history renders recent messages and full totals immediately but cannot submit before authoritative resume',async()=>{
+    const {page,errors}=await open();
+    const parts=Array.from({length:1200},(_,i)=>({kind:'assistant',text:'Saved reply '+i,reasoning:'',turnNumber:i+1,durable:true,streaming:false,forkTurnId:'turn-'+i}));
+    const cached={...state,connection:'connecting',view:{...state.view,cached:true,replayComplete:false,parts,totals:{input:1000000,output:200000,cached:300000,cacheWrite:20000,total:1520000},contextUsage:{input:1200,cached:3000,cacheWrite:50},descendants:[{id:'agent',title:'Saved agent',status:'unknown',kind:'subagent'}],modifiedFiles:[{path:'src/saved.ts',added:2,removed:1,changeCount:1}],processes:[{id:'1',execId:1,status:'running',command:'saved process',output:'last observed',outputTruncated:false}]}};
+    await emit(page,cached);
+    assert((await page.locator('#transcript').textContent()).includes('Saved reply 1199'));
+    assert((await page.locator('#statusLine').textContent()).includes('Syncing saved history'));
+    assert((await page.locator('#statusLine').textContent()).includes('ctx 4.3 K · 1.5 M tokens'));
+    assert((await page.locator('#threadSummary').textContent()).includes('1'));assert((await page.locator('#fileSummary').textContent()).includes('1'));
+    assert.equal(await page.locator('.fork-turn').count(),0);assert.equal(await page.locator('.process-stop:not(.hidden)').count(),0);
+    await page.locator('#composer').fill('Do not send while syncing');await page.locator('#composer').press('Enter');
+    assert.equal(await page.locator('#sendBtn').isDisabled(),true);assert.equal(await posted(page,'send'),undefined);
+    const visible=await page.locator('#transcript').textContent();
+    await emit(page,{...cached,connection:'connected',view:{...cached.view,cached:false,replayComplete:true,processes:[]}});
+    assert.equal(await page.locator('#transcript').textContent(),visible);assert.equal(await page.locator('#sendBtn').isDisabled(),false);
+    assert((await page.locator('#statusLine').textContent()).includes('1.5 M tokens'));assert.deepEqual(errors,[]);await page.close();
   });
   await check('outstanding sends survive recreation and ignore stale acknowledgements',async()=>{
     let {page}=await open();await page.locator('#composer').fill('Original send');await page.locator('#imageInput').setInputFiles(png);

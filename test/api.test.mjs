@@ -148,3 +148,15 @@ test('truncated gateway response rejects instead of leaving the request pending'
     assert.match(String(result.error),/aborted|reset|closed|terminated/i);
   }finally{clearTimeout(timer);server.close();await once(server,'close');}
 });
+
+test('cache validation reads one exact durable event without using wire sequence or changing history',async()=>{
+  const requests=[],server=http.createServer((req,res)=>{
+    requests.push({method:req.method,url:req.url});res.setHeader('Content-Type','application/json');res.end(JSON.stringify({frames:[{seq:41,event:{metadata:{event_id:'durable-id'}}}]}));
+  });
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  try{
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'test'})},{log(){}});
+    assert.equal(await api.historyEventId('session/one',41),'durable-id');assert.equal(await api.historyEventId('session/one',42),undefined);
+    assert.deepEqual(requests,[{method:'GET',url:'/api/gateway/sessions/session%2Fone/history?before=42&limit=1'},{method:'GET',url:'/api/gateway/sessions/session%2Fone/history?before=43&limit=1'}]);
+  }finally{server.close();await once(server,'close');}
+});

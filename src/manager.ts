@@ -17,6 +17,7 @@ import {
 } from "./protocol";
 import { RpcProcess, SentCommand } from "./rpc";
 import { SessionStore } from "./store";
+import { SessionCache, type HistoryWitness, type SessionCheckpoint } from "./session-cache";
 import { withFileReferences, splitFileReferences } from "./file-context";
 import { TextAttachmentStore, TextAttachmentChunk, MAX_PROMPT_TEXT_CHARS, appendTextFileReferences, splitTextFileReferences } from "./text-attachments";
 import { AttachmentSelection, FileBrowserOptions, FileBrowserListing, SelectedFileInput, browseRuntimeDirectory, readSelectedRuntimeFiles, selectedImage, MAX_SELECTED_TOTAL_BYTES } from "./file-browser";
@@ -34,6 +35,12 @@ export class SessionController {
     return { dispose: () => this.connectionListeners.delete(listener) };
   }
 
+  private readonly cache: SessionCache;
+  private cachedCheckpoint: SessionCheckpoint | undefined;
+  private witness: HistoryWitness | undefined;
+  private cacheTimer: NodeJS.Timeout | undefined;
+  private cacheRemoved = false;
+  private connecting: Promise<void> | undefined;
   private headerTimer: NodeJS.Timeout | undefined;
   private threadsTimer: NodeJS.Timeout | undefined;
   private disposed = false;
@@ -54,13 +61,27 @@ export class SessionController {
     this.sessionId = sessionId;
     this.textAttachments = new TextAttachmentStore(storageRoot, sessionId);
     this.rpc = new RpcProcess(cli, notes, workspaceRoot, sessionId);
+    this.cache = new SessionCache(storageRoot, sessionId, message => notes.log(message));
+    const saved = this.cache.load();
+    if (saved) {
+      try {
+        this.store.restoreProjection(saved.projection, sessionId);
+        this.cachedCheckpoint = saved;
+        this.witness = saved.witness;
+        this.notes.log(`restored session cache for ${sessionId} at ${saved.cursor}`);
+      } catch (error) { this.notes.log(`session projection ignored: ${String(error)}`); }
+    }
+    this.store.subscribe(() => this.scheduleCache());
     this.rpc.onFrame = (frame: RpcFrame) => {
       if (this.disposed) return;
       if (frame.type === "session_stream_resumed" && frame.resumed_after == null && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) {
         // A checkpoint replay can lower usage watermarks; old-branch HTTP must not win.
         this.headerRevision++;
+        this.witness = undefined;
       }
       this.store.applyFrame(frame);
+      this.observeWitness(frame);
+      this.scheduleCache();
       if (frame.type === "organism.activity" && Array.isArray(frame.sessions)) {
         this.onActivity(frame.sessions.flatMap((row: { id?: unknown }) => typeof row.id === "string" ? [row.id] : []));
       }
@@ -83,10 +104,60 @@ export class SessionController {
 
   connect(): void {
     if (this.disposed) return;
+    if (this.connecting) return;
+    const saved = this.cachedCheckpoint;
+    this.cachedCheckpoint = undefined;
+    if (saved?.witness && saved.cursor > 0) {
+      this.connecting = (async () => {
+        try {
+          const id = await this.api.historyEventId(this.sessionId, saved.witness!.sequence);
+          if (this.disposed) return;
+          if (id === saved.witness!.eventId) this.rpc.restoreCursor(saved.cursor);
+          else this.notes.log("session cache history changed; requesting full replay");
+        } catch (error) { this.notes.log(`session cache validation failed; requesting full replay: ${String(error)}`); }
+        if (!this.disposed) this.startConnection();
+      })().finally(() => { this.connecting = undefined; });
+    } else this.startConnection();
+  }
+
+  private startConnection(): void {
     this.rpc.start();
     this.refreshHeader();
     this.refreshTarget();
     this.refreshThreads();
+  }
+
+  private observeWitness(frame: RpcFrame): void {
+    const facts = frame.type === "session_stream_resumed"
+      ? (frame as import("./protocol").SessionStreamResumedFrame).accumulated_frames
+      : frame.type === "session_stream_event" ? [frame as SessionStreamEventFrame] : [];
+    for (const fact of facts) {
+      const event = fact.event as {metadata?:{event_id?:unknown}};
+      if (Number.isSafeInteger(fact.sequence) && fact.sequence > 0 &&
+          typeof event?.metadata?.event_id === "string" && fact.sequence >= (this.witness?.sequence ?? 0)) {
+        this.witness = {sequence:fact.sequence, eventId:event.metadata.event_id};
+      }
+    }
+  }
+
+  private scheduleCache(): void {
+    if (this.disposed || this.cacheRemoved || this.cacheTimer || !this.store.replayComplete || this.rpc.connectionState !== "connected") return;
+    this.cacheTimer = setTimeout(() => { this.cacheTimer = undefined; this.saveCache(); }, 750);
+    this.cacheTimer.unref();
+  }
+
+  private saveCache(): void {
+    const cursor = this.rpc.checkpointCursor;
+    if (this.cacheRemoved || !this.store.replayComplete || this.rpc.connectionState !== "connected" || cursor === undefined) return;
+    const witness = this.witness && this.witness.sequence <= cursor ? this.witness : undefined;
+    this.cache.save(cursor, witness, this.store.snapshotProjection());
+  }
+
+  removeCache(): void {
+    this.cacheRemoved = true;
+    if (this.cacheTimer) clearTimeout(this.cacheTimer);
+    this.cacheTimer = undefined;
+    this.cache.remove();
   }
 
   private scheduleHeaderRefresh(delayMs = 600): void {
@@ -147,7 +218,12 @@ export class SessionController {
   slashCompletions(name: string, text: string): Promise<Array<{name:string;value:string}>> {
     return this.api.slashCompletions(name, text, this.sessionId);
   }
+  private assertSynchronized(): void {
+    if (this.store.cached || this.store.replaying) throw new Error("Wait for the session to finish synchronizing before using turn controls.");
+  }
+
   async runSlash(line: string): Promise<SlashResult> {
+    this.assertSynchronized();
     if (!/^\/[^\s]+/.test(line.trim())) throw new Error("Enter a slash command, such as /help.");
     const result = await this.api.runSlash(line.trim(), this.sessionId);
     const name = line.trim().slice(1).split(/\s/,1)[0].toLowerCase();
@@ -159,6 +235,7 @@ export class SessionController {
   }
 
   sendPrompt(text: string, images: ImageAttachment[] = []): SentCommand | undefined {
+    this.assertSynchronized();
     const view = this.store.view();
     if (view.running) {
       if (!view.activeTurnSteerable || !view.activeTurnId) throw new Error("The active response cannot be steered right now. Wait or use Queue explicitly.");
@@ -168,6 +245,7 @@ export class SessionController {
   }
 
   queuePrompt(text: string, images: ImageAttachment[] = []): SentCommand | undefined {
+    this.assertSynchronized();
     const prompt = text || (images.length ? "Please examine the attached images." : "");
     return this.rpc.sendCommand({ type: "start_turn", prompt, ...this.imageContent(prompt, images) });
   }
@@ -177,6 +255,7 @@ export class SessionController {
   }
 
   assertCheckpointTurn(turnId: string): void {
+    this.assertSynchronized();
     const view = this.store.view();
     if (this.disposed || (view.running && view.activeTurnId === turnId) || !view.parts.some(part => part.kind === "assistant" && part.durable && !part.streaming && !part.voided && part.forkTurnId === turnId)) {
       throw new Error("Choose a recorded assistant message to bookmark or fork its turn.");
@@ -273,14 +352,17 @@ export class SessionController {
   }
 
   withdraw(promptId: string): SentCommand | undefined {
+    this.assertSynchronized();
     return this.rpc.sendCommand({ type: "withdraw_prompt", prompt_id: promptId });
   }
 
   cancelActive(turnId?: string | null): SentCommand | undefined {
+    this.assertSynchronized();
     return this.rpc.sendCommand({ type: "cancel_turn", ...(turnId ? { turn_id: turnId } : {}) });
   }
 
   steer(expectedTurnId: string, text: string, images: ImageAttachment[] = []): SentCommand | undefined {
+    this.assertSynchronized();
     const prompt = text || (images.length ? "Please examine the attached images." : "");
     return this.rpc.sendCommand({ type: "steer_turn", expected_turn_id: expectedTurnId, prompt, ...this.imageContent(prompt, images) });
   }
@@ -312,6 +394,7 @@ export class SessionController {
   }
 
   interruptExec(execId: string | number): SentCommand | undefined {
+    this.assertSynchronized();
     const id = typeof execId === "number" ? execId : /^\d+$/.test(execId) ? Number(execId) : NaN;
     if (!Number.isSafeInteger(id) || !this.store.view().processes.some((process)=>process.execId===id && process.status==="running")) {
       throw new Error("That process is not running in this session.");
@@ -324,6 +407,7 @@ export class SessionController {
     targetTurnId?: string;
     restoreFiles?: boolean;
   }): Promise<GatewayTurnCommandResult> | undefined {
+    this.assertSynchronized();
     const sent = this.rpc.sendCommand({
       type: "navigate_checkpoint",
       ...(opts.direction ? { direction: opts.direction } : {}),
@@ -335,9 +419,10 @@ export class SessionController {
 
   dispose(): void {
     if (this.disposed) return;
+    this.saveCache();
     this.disposed = true;
+    if (this.cacheTimer) clearTimeout(this.cacheTimer);
     this.headerRevision++; this.targetRevision++; this.threadsRevision++;
-    this.threadsRevision++;
     if (this.headerTimer) clearTimeout(this.headerTimer);
     if (this.threadsTimer) clearTimeout(this.threadsTimer);
     this.rpc.dispose();
@@ -366,6 +451,7 @@ export async function deleteSessionTree(
       await controller.rpc.stopAndWait();
     }
     const result = await api.deleteSession(sessionId);
+    for (const id of result.sessions) controllers.get(id)?.removeCache();
     return result.sessions;
   } catch (error) {
     for (const controller of detached) controller.connect();

@@ -1,6 +1,6 @@
 import type { SessionRow } from "./api";
 import { sessionFamily, type SessionThread } from "./session-family";
-import { BackgroundProcesses, recordedFileChanges, type BackgroundProcessView, type RecordedFileChange } from "./session-activity";
+import { BackgroundProcesses, recordedFileChanges, type BackgroundProcessView, type RecordedFileChange, type ProcessCheckpoint } from "./session-activity";
 export type { SessionThread } from "./session-family";
 import { splitFileReferences } from "./file-context";
 import { splitTextFileReferences } from "./text-attachments";
@@ -55,6 +55,7 @@ export interface UsageTotals {
   input: number;
   output: number;
   cached: number;
+  cacheWrite: number;
   total: number;
   costUsd: number;
   costKnown: boolean;
@@ -71,6 +72,7 @@ export interface StoreView {
   bookmarkedTurnIds: string[];
   standby?: boolean;
   replayComplete: boolean;
+  cached?: boolean;
   threads: SessionThread[];
   ancestors: SessionThread[];
   siblings: SessionThread[];
@@ -92,6 +94,36 @@ export interface StoreView {
   provider?: string;
   effort?: string;
   processes: BgProcess[];
+  noticeCount: number;
+}
+
+/** Reducer state, not the URL-bearing webview projection. Bump the disk schema when this changes. */
+export interface StoreProjection {
+  sessionId: string;
+  parts: ChatPart[];
+  queueSnapshot: TurnQueueSnapshot | null;
+  startedPromptIds: string[];
+  lastSequence: number;
+  diffOrder: number;
+  replayFactSessionId?: string;
+  usageThrough: number;
+  contextUsage: ContextUsage;
+  turnNumber: number;
+  activeTurnId: string | null;
+  runningSinceTurn: boolean;
+  lastUsage: RpcUsage | null;
+  totals: UsageTotals;
+  title: string;
+  cwd: string;
+  standby?: boolean;
+  model?: string;
+  provider?: string;
+  effort?: string;
+  processes: ProcessCheckpoint[];
+  threadRows: SessionRow[];
+  seenChildIds?: string[];
+  pendingSpawnIds: string[];
+  notifiedSpawnIds: string[];
   noticeCount: number;
 }
 
@@ -177,6 +209,9 @@ export class SessionStore {
   }
 
   private replayCompleteValue = false;
+  private cachedValue = false;
+  private replayInProgress = false;
+  private reducingReplay = false;
   private parts: ChatPart[] = [];
   private queueSnapshot: TurnQueueSnapshot | null = null;
   private readonly startedPromptIds = new Set<string>();
@@ -192,7 +227,7 @@ export class SessionStore {
   private liveText = "";
   private liveReasoning = "";
   private lastUsageValue: RpcUsage | null = null;
-  private totalsValue: UsageTotals = { input: 0, output: 0, cached: 0, total: 0, costUsd: 0, costKnown: false, turns: 0 };
+  private totalsValue: UsageTotals = { input: 0, output: 0, cached: 0, cacheWrite: 0, total: 0, costUsd: 0, costKnown: false, turns: 0 };
   private titleValue = "";
   private cwdValue = "";
   private sessionIdValue: string | undefined;
@@ -214,6 +249,72 @@ export class SessionStore {
   subscribe(listener: (revision: number) => void): { dispose(): void } {
     this.listeners.add(listener);
     return { dispose: () => this.listeners.delete(listener) };
+  }
+
+  get replayComplete(): boolean { return this.replayCompleteValue; }
+  get cached(): boolean { return this.cachedValue; }
+  get replaying(): boolean { return this.replayInProgress; }
+
+  snapshotProjection(): StoreProjection {
+    if (!this.replayCompleteValue || !this.sessionIdValue) throw new Error("Cannot cache an incomplete session replay");
+    return {
+      sessionId:this.sessionIdValue, parts:this.parts, queueSnapshot:this.queueSnapshot,
+      startedPromptIds:[...this.startedPromptIds], lastSequence:this.lastSequence, diffOrder:this.diffOrder,
+      replayFactSessionId:this.replayFactSessionId, usageThrough:this.usageThrough,
+      contextUsage:this.contextUsageValue, turnNumber:this.turnNumber, activeTurnId:this.activeTurnId,
+      runningSinceTurn:this.runningSinceTurn, lastUsage:this.lastUsageValue, totals:this.totalsValue,
+      title:this.titleValue, cwd:this.cwdValue, standby:this.standbyValue,
+      model:this.modelValue, provider:this.providerValue, effort:this.effortValue,
+      processes:this.processes.snapshot(), threadRows:this.threadRows,
+      seenChildIds:this.seenChildIds ? [...this.seenChildIds] : undefined,
+      pendingSpawnIds:[...this.pendingSpawnIds], notifiedSpawnIds:[...this.notifiedSpawnIds], noticeCount:this.noticeCountValue,
+    };
+  }
+
+  restoreProjection(state: StoreProjection, sessionId: string): void {
+    const count = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+    const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(id => typeof id === "string");
+    const optionalString = (value: unknown): boolean => value === undefined || typeof value === "string";
+    const images = (value: unknown): boolean => value === undefined || (Array.isArray(value) && value.every(image => image && typeof image.id === "string" && typeof image.mediaType === "string"));
+    const validPart = (part: ChatPart): boolean => {
+      if (!part || typeof part !== "object") return false;
+      if (part.kind === "system") return typeof part.text === "string" && ["info","warn","error"].includes(part.level);
+      if (!Number.isSafeInteger(part.turnNumber) || part.turnNumber < 0) return false;
+      if (part.kind === "tool") return !!part.call && typeof part.call.callId === "string" && typeof part.call.name === "string" && typeof part.call.arguments === "string" && typeof part.call.done === "boolean" && optionalString(part.call.result);
+      if (typeof part.text !== "string" || !images(part.images)) return false;
+      if (part.kind === "assistant") return typeof part.reasoning === "string" && typeof part.streaming === "boolean" && typeof part.durable === "boolean";
+      return part.kind === "user" && (part.files === undefined || strings(part.files)) && (part.textFiles === undefined || (Array.isArray(part.textFiles) && part.textFiles.every(file => file && typeof file.path === "string" && typeof file.name === "string" && count(file.byteLength))));
+    };
+    if (!state || state.sessionId !== sessionId || !Array.isArray(state.parts) || !state.parts.every(validPart) ||
+        !Array.isArray(state.threadRows) || !state.threadRows.every(row => row && typeof row.id === "string") ||
+        !Array.isArray(state.processes) || !state.processes.every(row => row && row.view && typeof row.view.id === "string" && typeof row.view.command === "string" && typeof row.view.status === "string" && typeof row.view.output === "string" && typeof row.view.outputTruncated === "boolean" && typeof row.bytes === "string" && Number.isSafeInteger(row.offset) && row.offset >= 0) ||
+        !strings(state.startedPromptIds) || !strings(state.pendingSpawnIds) || !strings(state.notifiedSpawnIds) ||
+        (state.seenChildIds !== undefined && !strings(state.seenChildIds)) ||
+        ![state.lastSequence,state.usageThrough,state.diffOrder,state.turnNumber,state.noticeCount].every(value => Number.isSafeInteger(value) && value >= 0) ||
+        !state.totals || ![state.totals.input,state.totals.output,state.totals.cached,state.totals.cacheWrite,state.totals.total,state.totals.costUsd,state.totals.turns].every(count) || typeof state.totals.costKnown !== "boolean" ||
+        !state.contextUsage || ![state.contextUsage.input,state.contextUsage.cached,state.contextUsage.cacheWrite].every(count) ||
+        typeof state.title !== "string" || typeof state.cwd !== "string" || typeof state.runningSinceTurn !== "boolean" ||
+        (state.activeTurnId !== null && typeof state.activeTurnId !== "string") ||
+        ![state.model,state.provider,state.effort,state.replayFactSessionId].every(optionalString) ||
+        (state.queueSnapshot !== null && (typeof state.queueSnapshot !== "object" || (state.queueSnapshot.pending_prompts !== undefined && (!Array.isArray(state.queueSnapshot.pending_prompts) || !state.queueSnapshot.pending_prompts.every(prompt => prompt && typeof prompt.prompt_id === "string")))))) {
+      throw new Error("Invalid session projection");
+    }
+    this.sessionIdValue=sessionId; this.parts=state.parts; this.queueSnapshot=state.queueSnapshot;
+    this.startedPromptIds.clear(); for (const id of state.startedPromptIds) this.startedPromptIds.add(id);
+    this.lastSequence=state.lastSequence; this.diffOrder=state.diffOrder; this.replayFactSessionId=state.replayFactSessionId;
+    this.usageThrough=state.usageThrough; this.contextUsageValue=state.contextUsage;
+    this.turnNumber=state.turnNumber; this.activeTurnId=state.activeTurnId; this.runningSinceTurn=state.runningSinceTurn;
+    this.lastUsageValue=state.lastUsage; this.totalsValue=state.totals;
+    this.titleValue=state.title; this.cwdValue=state.cwd; this.standbyValue=state.standby;
+    this.modelValue=state.model; this.providerValue=state.provider; this.effortValue=state.effort;
+    this.processes.restore(state.processes);
+    this.processes.markUnconfirmed(); this.threadRows=state.threadRows;
+    this.seenChildIds=state.seenChildIds ? new Set(state.seenChildIds) : undefined;
+    this.pendingSpawnIds.clear(); for (const id of state.pendingSpawnIds) this.pendingSpawnIds.add(id);
+    this.notifiedSpawnIds.clear(); for (const id of state.notifiedSpawnIds) this.notifiedSpawnIds.add(id);
+    this.noticeCountValue=state.noticeCount;
+    this.replayCompleteValue=false; this.cachedValue=true; this.replayInProgress=false;
+    this.bump();
   }
 
   // ------------------------------------------------------------------ frames
@@ -267,6 +368,8 @@ export class SessionStore {
   }
 
   private applyResumed(frame: SessionStreamResumedFrame): void {
+    this.reducingReplay = true;
+    this.replayInProgress = true;
     // A full replay can arrive in chunks; only its first chunk replaces state.
     if (frame.resumed_after == null && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) this.reset();
     else if (!frame.replay_tail && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) {
@@ -284,6 +387,8 @@ export class SessionStore {
       this.runningSinceTurn = false;
       this.activeTurnId = null;
     }
+    this.reducingReplay = false;
+    if (this.replayCompleteValue) { this.replayInProgress = false; this.cachedValue = false; }
     this.bump();
   }
 
@@ -301,7 +406,7 @@ export class SessionStore {
     this.startedPromptIds.clear();
     this.activeTurnId = null;
     this.lastUsageValue = null;
-    this.totalsValue = { input: 0, output: 0, cached: 0, total: 0, costUsd: 0, costKnown: false, turns: 0 };
+    this.totalsValue = { input: 0, output: 0, cached: 0, cacheWrite: 0, total: 0, costUsd: 0, costKnown: false, turns: 0 };
     this.processes.clear();
     this.lastSequence = 0;
     this.diffOrder = 0;
@@ -315,6 +420,8 @@ export class SessionStore {
   }
 
   private bump(): void {
+    // Replay is a transaction: neither listeners nor the webview see its partial fold.
+    if (this.reducingReplay || this.replayInProgress) return;
     this.revision += 1;
     this.onDidChange(this.revision);
     for (const listener of this.listeners) listener(this.revision);
@@ -479,6 +586,8 @@ export class SessionStore {
         break;
       }
       case "turn.usage": {
+        // The header and footer describe this session's own visible provider rounds.
+        if (this.sessionIdValue && eventSessionId !== this.sessionIdValue) break;
         const usage = payload as RpcUsage;
         this.lastUsageValue = usage;
         this.totalsValue = { ...this.totalsValue, turns: this.totalsValue.turns + 1 };
@@ -487,11 +596,14 @@ export class SessionStore {
         const input = typeof usage["input-tokens"] === "number" ? (usage["input-tokens"] as number) : 0;
         const output = typeof usage["output-tokens"] === "number" ? (usage["output-tokens"] as number) : 0;
         const cached = typeof usage["cached-input-tokens"] === "number" ? (usage["cached-input-tokens"] as number) : 0;
-        const total = typeof usage["total-tokens"] === "number" ? (usage["total-tokens"] as number) : 0;
-        this.contextUsageValue = { input, cached, cacheWrite: typeof usage["cache-write-tokens"] === "number" ? usage["cache-write-tokens"] : 0 };
+        const cacheWrite = typeof usage["cache-write-tokens"] === "number" ? usage["cache-write-tokens"] : 0;
+        // Provider total-tokens is not portable: some exclude cache reads/writes.
+        const total = input + output + cached + cacheWrite;
+        this.contextUsageValue = { input, cached, cacheWrite };
         this.totalsValue.output += output;
         this.totalsValue.input += input;
         this.totalsValue.cached += cached;
+        this.totalsValue.cacheWrite += cacheWrite;
         this.totalsValue.total += total;
         if (usage.cost_known === true && typeof usage.cost_usd === "number") {
           this.totalsValue.costUsd += usage.cost_usd;
@@ -647,11 +759,13 @@ export class SessionStore {
   // -------------------------------------------------------------- projection
 
   applyHeader(header: {
+    session_id?: string;
     title?: string;
     session_usage?: {
       input?: number;
       output?: number;
       cached?: number;
+      cache_write?: number;
       total?: number;
       cost_known?: boolean;
       cost?: number;
@@ -659,6 +773,7 @@ export class SessionStore {
     context_usage?: { input?: number; cached?: number; cache_write?: number; model?: string };
     through?: number;
   }): void {
+    if (header.session_id && this.sessionIdValue && header.session_id !== this.sessionIdValue) return;
     if (header.title) this.titleValue = header.title;
     // Header totals cover a usage watermark, not the transcript cursor. Never
     // roll newer rounds back, or re-add replayed rounds already in this sum.
@@ -666,12 +781,13 @@ export class SessionStore {
     const u = header.session_usage;
     if (u) {
       this.totalsValue = {
-        input: u.input ?? this.totalsValue.input,
-        output: u.output ?? this.totalsValue.output,
-        cached: u.cached ?? this.totalsValue.cached,
-        total: u.total ?? this.totalsValue.total,
-        costUsd: u.cost ?? this.totalsValue.costUsd,
-        costKnown: u.cost_known ?? this.totalsValue.costKnown,
+        input: u.input ?? 0,
+        output: u.output ?? 0,
+        cached: u.cached ?? 0,
+        cacheWrite: u.cache_write ?? 0,
+        total: (u.input ?? 0) + (u.output ?? 0) + (u.cached ?? 0) + (u.cache_write ?? 0),
+        costUsd: u.cost ?? 0,
+        costKnown: u.cost_known ?? false,
         turns: this.totalsValue.turns,
       };
     }
@@ -727,6 +843,7 @@ export class SessionStore {
     );
     return {
       replayComplete: this.replayCompleteValue,
+      cached: this.cachedValue,
       ...sessionFamily(this.threadRows, this.sessionIdValue, this.activeSessions),
       modifiedFiles: recordedFileChanges(this.parts, this.sessionIdValue),
       title: this.titleValue,

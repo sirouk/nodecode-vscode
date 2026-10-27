@@ -43,6 +43,7 @@ export interface SlashResult { text: string; dialog?: Record<string, unknown> }
 export interface ServiceState { pid: number; runs: string; restart: {able:boolean; text:string}; gateway?:string; home?:string }
 
 export interface SessionUsage {
+  cache_write?: number;
   input?: number;
   output?: number;
   cached?: number;
@@ -268,6 +269,13 @@ export class NodecodeApi {
 
   header(sessionId: string): Promise<SessionHeader> {
     return this.request<SessionHeader>("GET", `/api/gateway/sessions/${encodeURIComponent(sessionId)}/header`);
+  }
+
+  async historyEventId(sessionId: string, sequence: number): Promise<string | undefined> {
+    const page = await this.request<{frames:Array<{seq:number;event?:{metadata?:{event_id?:string}}}>}>(
+      "GET", `/api/gateway/sessions/${encodeURIComponent(sessionId)}/history?before=${sequence + 1}&limit=1`,
+    );
+    return page.frames.find(frame => frame.seq === sequence)?.event?.metadata?.event_id;
   }
 
   sessionDetail(sessionId: string): Promise<SessionDetail> {

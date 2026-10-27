@@ -290,9 +290,9 @@ test('session totals sum rounds while context reflects only the newest round',()
   const usage=(sequence,input,output,cached,total,cost)=>event(sequence,'turn.usage',{'input-tokens':input,'output-tokens':output,'cached-input-tokens':cached,'cache-write-tokens':10,'total-tokens':total,cost_known:true,cost_usd:cost});
   store.applyFrames([usage(1,1000,100,30,1130,0.1),usage(2,200,40,20,260,0.2)]);
   const before=store.view();
-  assert.deepEqual({input:before.totals.input,output:before.totals.output,cached:before.totals.cached,total:before.totals.total},{input:1200,output:140,cached:50,total:1390});
+  assert.deepEqual({input:before.totals.input,output:before.totals.output,cached:before.totals.cached,total:before.totals.total},{input:1200,output:140,cached:50,total:1410});
   assert.deepEqual(before.contextUsage,{input:200,cached:20,cacheWrite:10});
-  store.applyHeader({through:2,session_usage:{input:1200,output:140,cached:50,total:1390,cost:0.3,cost_known:true},context_usage:{input:200,cached:20,cache_write:10}});
+  store.applyHeader({through:2,session_usage:{input:1200,output:140,cached:50,cache_write:20,total:1390,cost:0.3,cost_known:true},context_usage:{input:200,cached:20,cache_write:10}});
   const after=store.view();
   assert.deepEqual(after.contextUsage,before.contextUsage);
   assert.deepEqual({...after.totals,costUsd:0},{...before.totals,costUsd:0});
@@ -563,4 +563,47 @@ test('queue snapshot versions order only queue updates while withdrawals and new
   store.applyFrame({type:'session_stream_resumed',session_id:'own',replay_chunk_final:true,admission_state:'active',accumulated_frames:[{...event(1,'turn.started'),turn_id:'replacement'}]});
   store.applyFrame({type:'session_input_queue_snapshot_updated',snapshot:{version:1,active_turn:'replacement',active_turn_steerable:true,pending_prompts:[{prompt_id:'delivered'}]}});
   assert.deepEqual(store.view().queue.map(p=>p.prompt_id),['delivered'],'a replacement branch must rebuild consumed identities');
+});
+
+test('large replay publishes one complete projection rather than one growing transcript per fact',()=>{
+  const store=new SessionStore(),frames=[];let changes=0;
+  store.subscribe(()=>changes++);
+  for(let i=0;i<1200;i++)frames.push(event(i+1,'turn.input_committed',{message:'Prompt '+i}));
+  store.applyFrame({type:'session_stream_resumed',session_id:'large',replay_chunk_index:0,accumulated_frames:frames.slice(0,600)});
+  assert.equal(changes,0,'partial history must remain off the webview transport');
+  store.applyFrame({type:'organism.activity',sessions:[]});
+  assert.equal(changes,0,'interleaved live metadata must not publish a partial transcript');
+  store.applyFrame({type:'session_stream_resumed',session_id:'large',replay_chunk_index:1,replay_chunk_final:true,cursor:1200,accumulated_frames:frames.slice(600)});
+  assert.equal(changes,1);assert.equal(store.view().parts.length,1200);assert.equal(store.view().replayComplete,true);
+});
+
+test('projection cache retains complete history, accounting, file attribution and family identities through cursor catch-up',()=>{
+  const store=new SessionStore();
+  const frames=[
+    event(1,'session.created',{id:'cached',cwd:'/workspace'}),
+    {...event(2,'turn.started'),turn_id:'first'},
+    event(3,'turn.input_committed',{disposition:'started','prompt-id':'used',message:'First prompt'}),
+    {...event(4,'turn.tool_call_started',{'call-id':'edit','tool-name':'eval'}),turn_id:'first'},
+    {...event(5,'turn.tool_result',{'call-id':'edit',metadata:{workspace_diff:{files:[{path:'src/cache.ts',added:7,removed:2,patch:'@@ -1 +1 @@\n-before\n+after'}]}}}),turn_id:'first'},
+    {...event(6,'turn.assistant_message_completed',{message:{content:'Recorded reply',reasoning_content:'Reasoning'}}),turn_id:'first'},
+    event(7,'turn.usage',{'input-tokens':1000,'cached-input-tokens':200,'cache-write-tokens':30,'output-tokens':100,'total-tokens':1330,cost_known:true,cost_usd:0.25}),
+    event(8,'turn.completed'),
+  ];
+  store.applyFrame({type:'session_stream_resumed',session_id:'cached',accumulated_frames:frames,cursor:8,replay_chunk_final:true});
+  store.setThreads([{id:'cached',title:'Cached'}, {id:'child',title:'Agent',parent_id:'cached',source:'fork'}, {id:'nested',title:'Nested',parent_id:'child',source:'fork'}],'cached');
+  store.applyFrame({type:'session_background_process_updated',session_id:'cached',process:{exec_id:1,status:'running',offset:0,output_b64:Buffer.from([0xe2,0x82]).toString('base64')}});
+  const restored=new SessionStore();
+  restored.restoreProjection(JSON.parse(JSON.stringify(store.snapshotProjection())),'cached');
+  assert.equal(restored.view().replayComplete,false,'a disk projection cannot admit commands before native validation');
+  assert.equal(restored.view().cached,true);
+  for(const key of ['parts','totals','contextUsage','modifiedFiles','descendants'])assert.deepEqual(restored.view()[key],store.view()[key],key);
+  restored.setCheckpointBookmarks(['first']);
+  const suffix=[{...event(9,'turn.started'),turn_id:'second'},event(10,'turn.input_committed',{disposition:'started','prompt-id':'new',message:'Latest prompt'}),event(11,'turn.usage',{'input-tokens':300,'output-tokens':20,'total-tokens':320}),event(12,'turn.completed')];
+  const resume={type:'session_stream_resumed',session_id:'cached',resumed_after:8,cursor:12,replay_chunk_final:true,admission_state:'ready',accumulated_frames:suffix};
+  store.applyFrame(resume);restored.applyFrame(resume);
+  const output={type:'session_background_process_updated',session_id:'cached',process:{exec_id:1,status:'exited',offset:2,output_b64:Buffer.from([0xac]).toString('base64')}};
+  store.applyFrame(output);restored.applyFrame(output);
+  for(const key of ['parts','totals','contextUsage','modifiedFiles','descendants','processes'])assert.deepEqual(restored.view()[key],store.view()[key],key);
+  assert.equal(restored.view().processes[0].output,'€');assert.deepEqual(restored.view().bookmarkedTurnIds,['first']);
+  assert.equal(restored.view().cached,false);assert.equal(restored.userPrompts().length,2);
 });

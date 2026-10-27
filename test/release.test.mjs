@@ -64,7 +64,7 @@ shellTest('release dry run leaves package, lock and changelog unchanged',()=>fix
   assert.deepEqual(await Promise.all(names.map(read)),before);
 }));
 
-shellTest('release secret preflight accepts only the repository scope used by publish.yml',()=>fixture(async({shell})=>{
+shellTest('release secret preflight finds the CI environment secret used by publish.yml',()=>fixture(async({shell})=>{
   const output=await shell(`gh(){
     case "$*" in
       *'--env CI'*) printf 'VSCE_PAT\\n' ;;
@@ -72,13 +72,37 @@ shellTest('release secret preflight accepts only the repository scope used by pu
     esac
   }
   repo_secret_state`);
-  assert.match(output,/VSCE_PAT repo secret is NOT set/);
+  assert.equal(output,'VSCE_PAT CI environment secret is set');
 }));
 
-shellTest('release secret preflight distinguishes missing secrets from an unreadable list',()=>fixture(async({shell})=>{
-  assert.equal(await shell('gh(){ return 1; }; repo_secret_state'),'this run could not read the repository secrets');
-  assert.match(await shell('gh(){ return 0; }; repo_secret_state'),/VSCE_PAT repo secret is NOT set/);
-  assert.equal(await shell("gh(){ printf 'VSCE_PAT\\n'; }; repo_secret_state"),'VSCE_PAT repo secret is set');
+shellTest('release secret preflight also accepts a repository PAT inherited by the publish job',()=>fixture(async({shell})=>{
+  const output=await shell(`gh(){
+    case "$*" in
+      *'--env CI'*) printf 'OTHER_SECRET\\n' ;;
+      *) printf 'VSCE_PAT\\n' ;;
+    esac
+  }
+  repo_secret_state`);
+  assert.equal(output,'VSCE_PAT repo secret is set');
+}));
+
+shellTest('release secret preflight distinguishes missing secrets from unreadable publish scopes',()=>fixture(async({shell})=>{
+  assert.equal(await shell('gh(){ return 1; }; repo_secret_state'),'this run could not read all publish secret scopes');
+  assert.match(await shell('gh(){ return 0; }; repo_secret_state'),/VSCE_PAT is NOT set in the CI environment or repository/);
+  assert.equal(await shell(`gh(){
+    case "$*" in
+      *'--env CI'*) return 1 ;;
+      *) printf 'VSCE_PAT\\n' ;;
+    esac
+  }
+  repo_secret_state`),'VSCE_PAT repo secret is set');
+  assert.equal(await shell(`gh(){
+    case "$*" in
+      *'--env CI'*) printf 'OTHER_SECRET\\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  repo_secret_state`),'this run could not read all publish secret scopes');
 }));
 
 shellTest('remote-sync gate reports a mismatched branch without an unbound-variable failure',()=>fixture(async({shell})=>{
@@ -104,6 +128,11 @@ test('tag publication waits for verification of that same event commit',async()=
   assert.match(verify,/npm test/);
   assert.match(verify,/npm run icon/);
   assert.match(publish,/needs: verify/);
+  assert.match(publish,/if: github\.ref_type == 'tag' && github\.repository == 'sirouk\/nodecode-vscode'/);
+  assert.match(publish,/^    environment: CI$/m);
+  assert.doesNotMatch(verify,/^    environment:/m);
+  assert.match(publish,/VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/);
+  assert.doesNotMatch(publish,/repo-level Actions SECRET/);
   assert.match(publish,/package-lock\.json version does not match package\.json/);
   assert.doesNotMatch(workflow,/run: npm install/);
   assert.match(workflow,/run: npm ci/);

@@ -221,7 +221,7 @@ export class SessionPanel {
   }
 
   private postState(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.controller.store.replaying) return;
     const view = this.controller.store.view();
     const title = view.title;
     if (title && !this.sidebar) this.panel.title = `Nodecode: ${title}`;
@@ -426,6 +426,7 @@ export class SessionPanel {
               if (!text && !images.length && !(Array.isArray(message.files) && message.files.length) && !(Array.isArray(message.textFiles) && message.textFiles.length)) throw new Error("Message is empty");
               if (message.mode !== undefined && message.mode !== "steer" && message.mode !== "queue") throw new Error("Invalid send mode");
               const view = this.controller.store.view();
+              if (view.cached || this.controller.store.replaying) throw new Error("Wait for the session to finish synchronizing before sending.");
               // Capture intent before attachment reads yield; a stale steer must be rejected, never queued or retargeted.
               let steerTurnId: string | undefined;
               if (message.mode === "steer") {
@@ -485,9 +486,11 @@ export class SessionPanel {
           return;
         }
         case "withdraw":
+          if (this.controller.store.view().cached) throw new Error("Wait for session synchronization.");
           if (typeof message.promptId === "string") await this.requireAccepted(this.controller.withdraw(message.promptId)?.done);
           return;
         case "cancel":
+          if (this.controller.store.view().cached) throw new Error("Wait for session synchronization.");
           await this.requireAccepted(this.controller.cancelActive(typeof message.turnId === "string" ? message.turnId : undefined)?.done);
           return;
         case "interrupt": {
@@ -1077,7 +1080,7 @@ const CLIENT_JS = String.raw`
   function imageHtml(part){ return (part.images || []).map(function(image){return '<img class="message-image" src="' + esc(image.url) + '" alt="Conversation image" loading="lazy">';}).join(''); }
   function textFileHtml(part){return (part.textFiles||[]).map(function(file){return '<button class="message-file" data-a="openTextAttachment" data-p="'+esc(file.ref)+'" title="'+esc(file.name)+' · '+file.byteLength+' bytes">'+esc(file.name)+'</button>';}).join('');}
   function fileHtml(part){return (part.files||[]).filter(function(file){return !(part.text||'').includes('@'+file);}).map(function(file){return '<span class="message-file" title="'+esc(file)+'">@'+esc(file.split(/[\\/]/).pop())+'</span>';}).join('');}
-  function forkHtml(part){var saved=(state.view&&state.view.bookmarkedTurnIds||[]).includes(part.forkTurnId);return part.forkTurnId&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' aria-label="Fork from this turn" title="Fork from this turn into a new editor. Includes all recorded messages in this turn; this conversation is kept.">${icon('fork')}</button><button class="bookmark-turn '+(saved?'saved':'')+'" data-a="toggleCheckpointBookmark" data-p="'+esc(part.forkTurnId)+'" aria-pressed="'+String(saved)+'" aria-label="'+(saved?'Remove bookmark':'Bookmark checkpoint')+'" title="'+(saved?'Remove bookmark':'Bookmark this recorded checkpoint; does not create a new file snapshot')+'" '+(bookmarkingTurns[part.forkTurnId]?'disabled':'')+'>${icon('bookmark')}</button>':'';}
+  function forkHtml(part){var saved=(state.view&&state.view.bookmarkedTurnIds||[]).includes(part.forkTurnId);return part.forkTurnId&&!(state.view&&state.view.cached)&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' aria-label="Fork from this turn" title="Fork from this turn into a new editor. Includes all recorded messages in this turn; this conversation is kept.">${icon('fork')}</button><button class="bookmark-turn '+(saved?'saved':'')+'" data-a="toggleCheckpointBookmark" data-p="'+esc(part.forkTurnId)+'" aria-pressed="'+String(saved)+'" aria-label="'+(saved?'Remove bookmark':'Bookmark checkpoint')+'" title="'+(saved?'Remove bookmark':'Bookmark this recorded checkpoint; does not create a new file snapshot')+'" '+(bookmarkingTurns[part.forkTurnId]?'disabled':'')+'>${icon('bookmark')}</button>':'';}
   function partHtml(part, index){
     if (part.kind === 'user') return '<div class="msg user"><div class="bubble"><div class="message-actions"><button class="copy-text" data-a="copyUser" data-p="'+index+'" aria-label="Copy message" title="Copy message">${icon('copy')}</button></div>' + md(part.text) + '<div class="message-files">' + fileHtml(part) + textFileHtml(part) + '</div>' + imageHtml(part) + '</div></div>';
     if (part.kind === 'assistant') {
@@ -1372,27 +1375,32 @@ const CLIENT_JS = String.raw`
     E('modelLabel').textContent = view.model || 'Choose model';
     E('effortLabel').textContent = view.effort || 'Effort';
     var replayReady=view.replayComplete!==false;
-    if(replayReady)renderTranscript(parts);
+    var historyReady=replayReady||view.cached===true;
+    if(historyReady)renderTranscript(parts);
     renderActivity(view);
     var q = view.queue || [];
     queueBar.innerHTML = q.map(function(p){
       var label = (p.content || p.prompt_id || '').slice(0, 120);
       var steer=p.disposition==='steer';
-      return chip((steer?'Steer pending: ':'Queued: ')+label, 'withdraw', p.prompt_id, '&#10005; withdraw', steer?'Steers at the next response/tool-batch boundary; not yet delivered.':'Runs after the current turn finishes.');
+      return chip((steer?'Steer pending: ':'Queued: ')+label, 'withdraw', p.prompt_id, (replayReady?'&#10005; withdraw':'syncing'), steer?'Steers at the next response/tool-batch boundary; not yet delivered.':'Runs after the current turn finishes.');
     }).join('');
     var sline = [];
     var t = view.totals || {}, context = view.contextUsage || {};
     var contextTokens = (context.input||0)+(context.cached||0)+(context.cacheWrite||0);
+    if (contextTokens || typeof t.total==='number') sline.push('ctx ' + formatContextCount(contextTokens));
+    if (typeof t.total==='number') sline.push(formatContextCount(t.total) + ' tokens');
     if (t.costKnown) sline.push('$' + (t.costUsd || 0).toFixed(4));
-    if (t.output) sline.push((t.output || 0) + ' out / ctx ' + formatContextCount(contextTokens));
+    var exact=function(n){return new Intl.NumberFormat().format(n||0);};
+    var usageTitle='Context: '+exact(contextTokens)+' tokens\nVisible conversation: '+exact(t.total)+' tokens\nInput: '+exact(t.input)+' · Output: '+formatContextCount(t.output||0)+' ('+exact(t.output)+')\nCache reads: '+exact(t.cached)+' · Cache writes: '+exact(t.cacheWrite)+'\nCurrent branch, this session only; excludes child-agent usage.';
+    if(t.costKnown)usageTitle+='\nRecorded cost: $'+(t.costUsd||0).toFixed(4)+' (unpriced rounds may be excluded).';
     var savedState=view.standby===true?(view.parentId?'Draft fork':'Draft'):view.standby===false?'Saved':'';
-    var status = state.connection === 'connected' ? (sending ? (pendingSend&&pendingSend.mode==='steer'?'Steering…':pendingSend&&pendingSend.mode==='queue'?'Queueing…':'Sending…') : view.running ? 'Working' : 'Ready') : state.connection;
-    statusLine.innerHTML = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+(t.output?'Context: '+esc(new Intl.NumberFormat().format(contextTokens))+' tokens':'')+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
-    cancelBtn.className = view.running ? 'icon-btn' : 'icon-btn hidden';
+    var status = view.cached ? 'Syncing saved history' : state.connection === 'connected' ? (sending ? (pendingSend&&pendingSend.mode==='steer'?'Steering…':pendingSend&&pendingSend.mode==='queue'?'Queueing…':'Sending…') : view.running ? 'Working' : 'Ready') : state.connection;
+    statusLine.innerHTML = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+esc(usageTitle)+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
+    cancelBtn.className = view.running && replayReady && state.connection==='connected' ? 'icon-btn' : 'icon-btn hidden';
     updateSendControls();
-    if (replayReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120)); }
-    else if (replayReady && stick) followPane(scrollBox);
-    if(replayReady)firstRender = false;
+    if (historyReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120)); }
+    else if (historyReady && stick) followPane(scrollBox);
+    if(historyReady)firstRender = false;
     rememberReadingAnchor();
     E('jumpBtn').classList.toggle('hidden', nearBottom());
   }

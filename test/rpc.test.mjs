@@ -130,7 +130,7 @@ test('session deletion releases only the requested tree before deleting', async 
   const {deleteSessionTree} = require('../out/manager.js');
   const calls = [];
   const controllers = new Map(['root','child','grandchild','other'].map(id => [id, {
-    rpc:{stopAndWait:async () => {await delay(1);calls.push('close:'+id);}},
+    removeCache(){calls.push('cache:'+id);},rpc:{stopAndWait:async () => {await delay(1);calls.push('close:'+id);}},
     connect(){calls.push('reconnect:'+id);},
   }]));
   const api = {
@@ -138,13 +138,13 @@ test('session deletion releases only the requested tree before deleting', async 
     deleteSession: async id => {calls.push('delete:'+id);return {sessions:['root','child','grandchild']};},
   };
   assert.deepEqual(await deleteSessionTree(api,controllers,'root'), ['root','child','grandchild']);
-  assert.deepEqual(calls, ['close:root','close:child','close:grandchild','delete:root']);
+  assert.deepEqual(calls, ['close:root','close:child','close:grandchild','delete:root','cache:root','cache:child','cache:grandchild']);
 });
 
 test('a foreign shell refusal restores owned readers without bypassing the refusal', async () => {
   const {deleteSessionTree} = require('../out/manager.js');
   const calls = [];
-  const controller = {rpc:{stopAndWait:async()=>calls.push('close')},connect(){calls.push('reconnect');}};
+  const controller = {removeCache(){},rpc:{stopAndWait:async()=>calls.push('close')},connect(){calls.push('reconnect');}};
   const refusal = new Error('session_open');
   const api = {sessions:async()=>[{id:'root'}],deleteSession:async()=>{calls.push('delete');throw refusal;}};
   await assert.rejects(deleteSessionTree(api,new Map([['root',controller]]),'root'), error => error === refusal);
@@ -332,7 +332,7 @@ test('failed detach rolls back the failing reader as well as previously detached
   const {deleteSessionTree}=require('../out/manager.js'),calls=[];
   const failure=new Error('Nodecode session connection did not close; deletion cancelled');
   const controllers=new Map(['root','child'].map(id=>[id,{
-    rpc:{stopAndWait:async()=>{calls.push('close:'+id);if(id==='child')throw failure;}},
+    removeCache(){},rpc:{stopAndWait:async()=>{calls.push('close:'+id);if(id==='child')throw failure;}},
     connect(){calls.push('reconnect:'+id);},
   }]));
   const api={sessions:async()=>[{id:'root'},{id:'child',parent_id:'root'}],deleteSession:async()=>{calls.push('delete');}};

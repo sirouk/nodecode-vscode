@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Restore complete local thread projections on reopen, validate native history before cursor catch-up, and publish replay as one transaction rather than rebuilding the growing transcript for each fact; preserve recorded files, agent relationships and older messages.
+- Keep cached history read-only until sync completes, retain the last complete checkpoint through interrupted replay, and replace invalidated branch history instead of merging stale state.
+- Show compact current-context and cumulative token counts with exact usage details; include cache writes in normalized totals and clear omitted authoritative header counters.
+- Give the tag-only Marketplace publish job access to its existing CI environment secret, and report environment/repository PAT configuration accurately in the release script.
+
 ## [0.1.6]
 
 ### Fixed

@@ -96,7 +96,7 @@ try {
   assert((await page.locator('[data-model="m3"]').getAttribute('title')).includes('1,050,000'));
   await emit(options);
   await emit({...waiting,view:{...waiting.view,totals:{input:99000,output:12345},contextUsage:{input:2000,cached:200,cacheWrite:100}}});
-  assert((await page.locator('#statusLine').textContent()).includes('12345 out / ctx 2.3 K'));
+  assert((await page.locator('#statusLine').textContent()).includes('ctx 2.3 K'));
   assert((await page.locator('#statusLine>span').last().getAttribute('title')).includes('2,300'));
   await emit(waiting);
   await page.getByRole('button',{name:'Star alpha/m1',exact:true}).click();

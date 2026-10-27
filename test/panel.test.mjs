@@ -50,6 +50,22 @@ test('sidebar switches subscriptions, queues context until ready and keeps curre
 });
 
 
+test('status and usage follow the complete composer before the keyboard hint', () => {
+  const panel=Object.create(SessionPanel.prototype);
+  panel.controller={sessionId:'layout-session'};
+  panel.panel={webview:{cspSource:'https://webview.local'}};
+  panel.markUri='https://webview.local/icon.svg';
+  panel.markdownUri='https://webview.local/markdown.js';
+  const html=panel.html(),composer=html.indexOf('<footer id="composerBar">');
+  const end=html.indexOf('</footer>',composer),status=html.indexOf('<div id="statusLine"'),hint=html.indexOf('<div id="composerHint"');
+  assert(composer>=0&&end>composer);
+  assert(status>end,'the status row must follow the input and its action buttons');
+  assert(hint>status,'the keyboard hint remains beneath the status row');
+  assert.equal(html.split('id="statusLine"').length,2,'only one live status row is rendered');
+  assert(html.includes('<div id="statusLine" role="status" aria-live="polite"></div>'));
+});
+
+
 test('deleting the selected session clears its sidebar without reattaching it', () => {
   const received=event(), disposed=event(), visibility=event();
   const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage(){},onDidReceiveMessage:received.register}};

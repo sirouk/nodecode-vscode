@@ -8,9 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Indent activity children beneath Background processes, Agents & threads and Modified files, with another inset for Idle rows.
+- Move the work, save-state and usage row below the chat input and its action buttons, above the keyboard hint.
+- Indent activity children beneath Background processes, Agents & threads and Modified files, with another inset for Idle rows; widen the chat input to the available panel width with small side gutters.
 - Keep non-idle agents and threads newest-started first, with the most recently updated idle thread above a collapsed, newest-first Idle subsection; retain its disclosure state and cap the compact list’s height.
 - Shorten spawned-fork notices to “Spawned:” and give each compact row a left-edge color cap matching its thread.
+- Reduce eval/tool card header text and spacing; match expanded input, output and result details to the 11px headers with tighter insets, preserving full scrollable contents.
 - Tighten footer disclosure rows and remove their horizontal separators; omit trailing blank thought lines and bottom padding from display without changing saved or copied text.
 
 ### Fixed

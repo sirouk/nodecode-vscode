@@ -187,6 +187,31 @@ try{
     }
     await page.close();
   });
+  await check('status and usage stay below the input and actions at panel and sidebar widths',async()=>{
+    const {page,errors}=await open();
+    const view={...state.view,standby:false,totals:{total:29500000,costKnown:true,costUsd:11.6276},contextUsage:{input:23900}};
+    for(const viewport of [{width:1108,height:650},{width:360,height:700},{width:320,height:500}]){
+      await page.setViewportSize(viewport);
+      for(const running of [true,false]){
+        await emit(page,{...state,view:{...view,running}});
+        await page.locator('#composer').fill(running?'A draft\nwith multiple lines\nand more room to type.':'A short draft');
+        const metrics=await page.evaluate(()=>{
+          const box=id=>document.getElementById(id).getBoundingClientRect(),bar=box('composerBar'),status=box('statusLine'),hint=box('composerHint');
+          return {barBottom:bar.bottom,statusTop:status.top,statusBottom:status.bottom,hintTop:hint.top,hintVisible:getComputedStyle(document.getElementById('composerHint')).display!=='none',ordered:document.getElementById('composerBar').nextElementSibling.id==='statusLine',overflow:document.documentElement.scrollWidth>innerWidth};
+        });
+        assert(metrics.ordered,'DOM order must match the visual order');
+        assert(metrics.statusTop>=metrics.barBottom,'status must be below the whole input box, including action buttons');
+        assert(metrics.statusBottom<=viewport.height,'the row remains visible without page scrolling');
+        if(metrics.hintVisible)assert(metrics.hintTop>=metrics.statusBottom,'the keyboard hint stays last');
+        assert.equal(metrics.overflow,false);
+        assert.equal(await page.locator('#statusLine .connection').textContent(),running?'Working':'Ready');
+        assert((await page.locator('#statusLine').textContent()).includes('Saved · ctx 23.9 K · 29.5 M tokens · $11.6276'));
+        assert((await page.locator('#statusLine>span').last().getAttribute('title')).includes('29,500,000'));
+        assert.equal(await page.locator('#cancelBtn').isVisible(),running);
+      }
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
   await check('footer displays latest context including cache reads and writes, not cumulative input',async()=>{
     const {page}=await open();
     await emit(page,{...state,view:{...state.view,totals:{input:99000,output:12000,cached:2200000,cacheWrite:50000,total:2361000},contextUsage:{input:1000,cached:2000,cacheWrite:300}}});
@@ -461,6 +486,53 @@ try{
     await show([{...reply,streaming:false,durable:true},{...tool,call:{...tool.call,done:true,result:'3'}},{...thought,text:'The result is 3.',reasoning:''}]);
     assert.equal(await page.locator('.reply-caret .caret').count(),1);assert.deepEqual(errors,[]);await page.close();
   });
+  await check('eval cards use compact headers and spacing without losing expandable contents',async()=>{
+    const {page,errors}=await open();
+    await emit(page,{...state,view:{...state.view,parts:[159,192].map((durationMs,i)=>({kind:'tool',call:{callId:'compact-eval-'+i,name:'eval',arguments:'(+ 1 2)',result:'3',done:true,durationMs}}))}});
+    const cards=page.locator('.tool');assert.equal(await cards.count(),2);
+    for(const card of await cards.all()){
+      const size=await card.evaluate(node=>({height:node.getBoundingClientRect().height,font:parseFloat(getComputedStyle(node.querySelector('summary')).fontSize),margin:parseFloat(getComputedStyle(node).marginBottom)}));
+      assert(size.height<=30,'collapsed eval card should be compact');assert(size.font<=11,'eval header text should be smaller');assert(size.margin<=10,'eval cards should not leave large gaps');
+    }
+    const first=cards.first();await first.locator(':scope > summary').focus();await page.keyboard.press('Enter');
+    assert(await first.evaluate(node=>node.open));assert.equal(await first.locator('.tool-io').first().textContent(),'(+ 1 2)');assert.equal(await first.locator('.tool-io').last().textContent(),'3');
+    await page.keyboard.press('Enter');assert.equal(await first.evaluate(node=>node.open),false);
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('expanded eval input and output match compact headers without clipping content',async()=>{
+    const {page,errors}=await open();
+    const input=JSON.stringify({form:';; Inspect the current state\n(list '+ '"retained argument" '.repeat(40)+')'});
+    const output='Recorded result: '+ 'retained output '.repeat(40)+'\nSecond result line.\n';
+    const metadata={snippet:{note:'Inspect the current state without changing it.'},status:'done'};
+    await emit(page,{...state,view:{...state.view,parts:[
+      {kind:'tool',call:{callId:'expanded-eval',name:'eval',arguments:input,result:output,metadata,done:true,durationMs:21}},
+      {kind:'tool',call:{callId:'failed-eval',name:'eval',arguments:'(error "Retained error")',result:'Retained error',done:true,failed:true}},
+    ]}});
+    const card=page.locator('.tool').first();await card.locator(':scope > summary').click();
+    const details=card.locator('.tool-metadata');await details.locator('summary').click();
+    const failed=page.locator('.tool').last();await failed.locator(':scope > summary').click();
+    for(const width of [360,960]){
+      await page.setViewportSize({width,height:760});
+      await page.evaluate(()=>{document.documentElement.style.setProperty('--vscode-font-size','16px');document.documentElement.style.setProperty('--vscode-editor-font-size','24px');});
+      const blocks=await page.locator('pre.tool-io').evaluateAll(nodes=>nodes.map(node=>{const css=getComputedStyle(node);return {font:parseFloat(css.fontSize),line:parseFloat(css.lineHeight),paddingTop:parseFloat(css.paddingTop),paddingLeft:parseFloat(css.paddingLeft),overflow:css.overflowX,scrollable:node.scrollWidth>node.clientWidth};}));
+      for(const block of blocks){
+        assert.equal(block.font,11,'eval input, output and result details must match the compact header font');
+        assert(block.line<=16.5,'eval blocks should retain compact readable line spacing');
+        assert(block.paddingTop<=6&&block.paddingLeft<=8,'eval boxes should not add oversized insets');
+        assert.equal(block.overflow,'auto','long lines must remain scrollable');
+      }
+      assert(blocks[0].scrollable,'long input should scroll inside its box');
+      assert.equal(await details.locator('summary').evaluate(node=>parseFloat(getComputedStyle(node).fontSize)),11);
+      assert(await page.locator('.tool-sec').first().evaluate(node=>parseFloat(getComputedStyle(node).paddingTop)<=6));
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'expanded eval content must not widen the page');
+    }
+    assert.equal(await card.locator('.tool-sec pre').first().textContent(),input);
+    assert.equal(await card.locator('.tool-sec pre').last().textContent(),output);
+    assert.equal(await details.locator('pre').textContent(),JSON.stringify(metadata,null,2));
+    assert.equal(await failed.locator('.tool-label').last().textContent(),'Error');
+    assert.equal(await failed.locator('.tool-io').last().textContent(),'Retained error');
+    assert.deepEqual(errors,[]);await page.close();
+  });
   await check('activity children and nested idle rows are inset from their parent headings',async()=>{
     const {page,errors}=await open();
     await emit(page,{...state,view:{...state.view,
@@ -488,6 +560,29 @@ try{
       }
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'indented activity lists must not widen the page');
       assert(await page.locator('#composer').isVisible());
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('composer uses available panel width with small balanced gutters at every size',async()=>{
+    const {page,errors}=await open();
+    const draft='Use the available width while preserving the draft and its attached image. '.repeat(6);
+    await page.locator('#composer').fill(draft);await page.locator('#imageInput').setInputFiles(png);
+    await page.waitForFunction(()=>document.querySelectorAll('#attachments img').length===1);
+    for(const width of [320,360,960,1440]){
+      await page.setViewportSize({width,height:760});
+      const size=await page.evaluate(()=>{
+        const box=document.querySelector('#composerBar').getBoundingClientRect(),input=document.querySelector('#composer').getBoundingClientRect(),status=document.querySelector('#statusLine').getBoundingClientRect();
+        return {left:box.left,right:innerWidth-box.right,width:box.width,inputWidth:input.width,inputLeft:input.left,inputRight:input.right,boxRight:box.right,statusLeft:status.left,statusRight:status.right,overflow:document.documentElement.scrollWidth>innerWidth};
+      });
+      assert(size.left>=6&&size.left<=10,'composer left gutter should remain small, got '+size.left+'px');
+      assert(Math.abs(size.left-size.right)<1,'composer gutters should be balanced');
+      assert(size.width>=width-20,'composer must not retain a fixed maximum width');
+      assert(size.inputWidth>=size.width-30,'text entry should use the wider composer');
+      assert(size.inputLeft>size.left&&size.inputRight<size.boxRight,'text entry must retain its internal padding');
+      assert.equal(size.statusLeft,size.left);assert.equal(size.statusRight,size.boxRight);
+      assert.equal(size.overflow,false,'wider composer must not cause horizontal page overflow');
+      assert.equal(await page.locator('#composer').inputValue(),draft);assert.equal(await page.locator('#attachments img').count(),1);
+      for(const id of ['attachBtn','modelBtn','effortBtn','sendBtn'])assert(await page.locator('#'+id).isVisible());
     }
     assert.deepEqual(errors,[]);await page.close();
   });

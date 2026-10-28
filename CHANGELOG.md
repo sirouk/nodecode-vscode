@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11]
+
 ### Fixed
 
 - Keep response Copy, Fork and Bookmark controls inside the response body so they stay clickable without overlapping the separate thought-process copy control.
@@ -125,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.7...v0.1.8

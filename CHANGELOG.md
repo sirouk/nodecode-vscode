@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep response Copy, Fork and Bookmark controls inside the response body so they stay clickable without overlapping the separate thought-process copy control.
+
 ## [0.1.10]
 
 ### Fixed

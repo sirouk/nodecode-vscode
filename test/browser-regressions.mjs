@@ -18,8 +18,8 @@ const browser=await chromium.launch({headless:true});
 const state={type:'state',connection:'connected',attempts:0,history:['first prompt','second prompt'],view:{title:'Regression',sessionId:'regression-session',cwd:'/workspace',totals:{},parts:[],queue:[],threads:[],processes:[],replayComplete:true}};
 const png={name:'draft.png',mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII=','base64')};
 const emit=(page,message)=>page.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),message);
-async function open(saved={},sessionId='regression-session'){
-  const page=await browser.newPage({viewport:{width:360,height:700}});page.setDefaultTimeout(5000);
+async function open(saved={},sessionId='regression-session',pageOptions={}){
+  const page=await browser.newPage({viewport:{width:360,height:700},...pageOptions});page.setDefaultTimeout(5000);
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.addInitScript(saved=>{window.posted=[];window.savedState=saved;window.acquireVsCodeApi=()=>({postMessage:m=>window.posted.push(m),getState:()=>window.savedState,setState:s=>{window.savedState=structuredClone(s);}});},saved);
   await page.goto('data:text/html,'+encodeURIComponent(html(sessionId)));
@@ -268,6 +268,123 @@ try{
     await emit(page,{type:'modelFavoriteError',requestId:favorite.requestId,message:'Favorite storage unavailable'});
     assert.equal(await page.getByRole('button',{name:'Star alpha/m',exact:true}).getAttribute('aria-pressed'),'false');
     assert.equal(await page.locator('#optionStatus').textContent(),'Favorite storage unavailable');await page.close();
+  });
+  await check('response actions stay inside the body and remain clickable without hovering thoughts',async()=>{
+    const {page,errors}=await open();
+    const reasoning='Separate **private thoughts**.',text='A response body that keeps its own hover controls.\n\nMove from this paragraph to each action without leaving the response.';
+    const snapshot=reasoning=>({...state,view:{...state.view,parts:[{kind:'assistant',text,reasoning,durable:true,streaming:false,forkTurnId:'hover-turn'}]}});
+    const toolbar=page.locator('.msg.assistant .message-actions');
+    const opacity=()=>toolbar.evaluate(node=>getComputedStyle(node).opacity);
+    await page.evaluate(()=>{Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});document.execCommand=()=>{window.copiedResponse=document.activeElement.value;return true;};});
+    for(const width of [360,1108])for(const thoughtState of ['none','collapsed','expanded']){
+      await page.setViewportSize({width,height:700});await emit(page,snapshot(thoughtState==='none'?'':reasoning));
+      if(thoughtState!=='none')await page.locator('.reasoning').evaluate((node,expanded)=>{node.open=expanded;},thoughtState==='expanded');
+      await page.locator('#composer').focus();await page.mouse.move(0,0);assert.equal(await opacity(),'0');
+      for(const action of ['copyReply','forkAtMessage','toggleCheckpointBookmark']){
+        await page.locator('#composer').focus();
+        const body=await page.locator('.reply-text').boundingBox(),button=page.locator('[data-a="'+action+'"]');
+        const start={x:body.x+8,y:body.y+body.height-8};await page.mouse.move(start.x,start.y);
+        assert.equal(await opacity(),'1','body hover shows actions');
+        const actions=await toolbar.boundingBox(),thought=thoughtState==='none'?null:await page.locator('.reasoning').boundingBox();
+        assert(actions.y>=body.y&&actions.y+actions.height<=body.y+body.height,'toolbar stays within the response body, not above the message');
+        if(thought)assert(actions.y>=thought.y+thought.height,'toolbar never overlaps the thought section');
+        const target=await button.boundingBox(),end={x:target.x+target.width/2,y:target.y+target.height/2};
+        for(let step=1;step<=12;step++){
+          await page.mouse.move(start.x+(end.x-start.x)*step/12,start.y+(end.y-start.y)*step/12);
+          assert.equal(await opacity(),'1','toolbar remains visible along the pointer path to '+action);
+        }
+        assert(await button.evaluate(node=>node.contains(document.elementFromPoint(node.getBoundingClientRect().x+node.clientWidth/2,node.getBoundingClientRect().y+node.clientHeight/2))),'action remains hit-testable');
+        await page.mouse.click(end.x,end.y);
+        if(action==='copyReply')assert.equal(await page.evaluate(()=>window.copiedResponse),(thoughtState==='none'?'':'Thought process\n'+reasoning+'\n\n')+text);
+        else{
+          assert.equal((await posted(page,action)).turnId,'hover-turn');assert(await button.isDisabled());
+          await emit(page,{type:action==='forkAtMessage'?'forkFinished':'bookmarkFinished',turnId:'hover-turn'});assert.equal(await button.isDisabled(),false);
+        }
+      }
+      if(thoughtState!=='none'){
+        await page.locator('#composer').focus();await page.locator('.reasoning').hover();assert.equal(await opacity(),'0','thought hover does not show response actions');
+        const copy=page.locator('[data-a="copyThinking"]');assert.equal(await copy.evaluate(node=>getComputedStyle(node).opacity),'1');
+        await copy.click();assert.equal(await page.evaluate(()=>window.copiedResponse),reasoning);
+      }
+      await page.locator('[data-a="forkAtMessage"]').focus();await page.mouse.move(0,0);assert.equal(await opacity(),'1','keyboard focus keeps response controls reachable');
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'toolbar does not cause horizontal overflow');
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('response-body actions survive incremental thoughts, short replies and image-only replies',async()=>{
+    const {page,errors}=await open();
+    const snapshot=part=>({...state,view:{...state.view,running:part.streaming,parts:[{kind:'assistant',durable:!part.streaming,forkTurnId:'body-turn',...part}]}});
+    await emit(page,snapshot({text:'A.',reasoning:'',streaming:true}));
+    await page.locator('.response-body').evaluate(node=>{window.responseBody=node;});
+    for(const part of [
+      {text:'A short streaming reply.',reasoning:'A late-arriving thought.',streaming:true},
+      {text:'Done.',reasoning:'A late-arriving thought.',streaming:false},
+      {text:'Done.',reasoning:'',streaming:false},
+      {text:'',reasoning:'',streaming:false,images:[{url:'data:image/png;base64,'+png.buffer.toString('base64')}]}
+    ]){
+      await emit(page,snapshot(part));
+      assert(await page.locator('.response-body').evaluate(node=>node===window.responseBody),'incremental updates retain the response body');
+      assert.equal(await page.locator('.response-body .reasoning').count(),0,'thoughts remain outside the response hover region');
+      if(part.reasoning)assert(await page.locator('.reasoning').evaluate(node=>node.nextElementSibling.classList.contains('response-body')));
+      assert.equal(await page.locator('.caret').count(),part.streaming?1:0);
+      assert.equal(await page.locator('[data-a="forkAtMessage"]').count(),part.streaming?0:1);
+      await page.locator('#composer').focus();await page.locator('.response-body').hover();
+      const toolbar=page.locator('.response-body>.message-actions'),body=await page.locator('.response-body').boundingBox(),actions=await toolbar.boundingBox();
+      assert.equal(await toolbar.evaluate(node=>getComputedStyle(node).opacity),'1');
+      assert(actions.y>=body.y&&actions.y+actions.height<=body.y+body.height,'controls fit inside even short and image-only response bodies');
+      await page.locator('[data-a="copyReply"]').click();
+    }
+    assert.equal(await page.locator('.reply-images img').evaluate(node=>node.complete&&node.naturalWidth>0),true);
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('code-first replies keep code copy and response actions independently reachable by pointer, keyboard and touch',async()=>{
+    for(const hasTouch of [false,true]){
+      const {page,errors}=await open({},'regression-session',{hasTouch});
+      await page.evaluate(()=>{Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});document.execCommand=()=>{window.copiedResponse=document.activeElement.value;return true;};});
+      for(const width of [360,1108])for(const quoteDepth of [0,1,2])for(const prose of ['', '\n\nThe answer is ready.']){
+        const prefix='> '.repeat(quoteDepth),text=['```ts','const answer = 42;','```'].map(line=>prefix+line).join('\n')+prose;
+        await page.setViewportSize({width,height:700});
+        await emit(page,{...state,view:{...state.view,parts:[{kind:'assistant',text,reasoning:'',durable:true,streaming:false,forkTurnId:'code-turn'}]}});
+        const toolbar=page.locator('.message-actions'),codeCopy=page.locator('.codeblock-copy');
+        await page.locator('#composer').focus();
+        if(!hasTouch)await page.locator('.codeblock').hover();
+        assert.equal(await toolbar.evaluate(node=>getComputedStyle(node).opacity),'1','code hover also exposes response actions');
+        assert.equal(await codeCopy.evaluate(node=>getComputedStyle(node).opacity),'1');
+        const actions=await toolbar.boundingBox(),head=await page.locator('.codeblock-head').boundingBox(),body=await page.locator('.response-body').boundingBox();
+        assert(actions.y>=body.y&&actions.y+actions.height<=head.y,'response actions stay inside the body without covering code controls');
+        const codeTarget=await codeCopy.boundingBox();
+        assert(await codeCopy.evaluate(node=>{const b=node.getBoundingClientRect();return [2,b.width/2,b.width-2].every(x=>[2,b.height/2,b.height-2].every(y=>node.contains(document.elementFromPoint(b.x+x,b.y+y))));}),'the entire code copy button is free of overlapping response actions');
+        const actionCount=await page.evaluate(()=>window.posted.filter(m=>m.type==='forkAtMessage'||m.type==='toggleCheckpointBookmark').length);
+        for(const offset of [2,codeTarget.height/2,codeTarget.height-2]){
+          const x=codeTarget.x+codeTarget.width/2,y=codeTarget.y+offset;
+          if(hasTouch)await page.touchscreen.tap(x,y);else await page.mouse.click(x,y);
+          assert.equal(await page.evaluate(()=>window.copiedResponse),'const answer = 42;');
+        }
+        assert.equal(await page.evaluate(()=>window.posted.filter(m=>m.type==='forkAtMessage'||m.type==='toggleCheckpointBookmark').length),actionCount,'code copy never triggers a response action');
+        for(const action of ['copyReply','forkAtMessage','toggleCheckpointBookmark']){
+          await page.locator('#composer').focus();
+          const button=page.locator('[data-a="'+action+'"]'),target=await button.boundingBox(),end={x:target.x+target.width/2,y:target.y+target.height/2};
+          if(hasTouch)await page.touchscreen.tap(end.x,end.y);
+          else{
+            const content=await page.locator(prose?'.reply-text p':'.codeblock pre').boundingBox(),start={x:content.x+8,y:content.y+content.height/2};
+            await page.mouse.move(start.x,start.y);
+            for(let step=1;step<=12;step++){
+              await page.mouse.move(start.x+(end.x-start.x)*step/12,start.y+(end.y-start.y)*step/12);
+              assert.equal(await toolbar.evaluate(node=>getComputedStyle(node).opacity),'1','actions stay visible while crossing a code block to '+action);
+            }
+            await page.mouse.click(end.x,end.y);
+          }
+          if(action==='copyReply')assert.equal(await page.evaluate(()=>window.copiedResponse),text);
+          else{
+            assert.equal((await posted(page,action)).turnId,'code-turn');assert(await button.isDisabled());
+            await emit(page,{type:action==='forkAtMessage'?'forkFinished':'bookmarkFinished',turnId:'code-turn'});assert.equal(await button.isDisabled(),false);
+          }
+        }
+        await page.locator('[data-a="forkAtMessage"]').focus();await page.mouse.move(0,0);
+        assert.equal(await toolbar.evaluate(node=>getComputedStyle(node).opacity),'1','keyboard focus keeps response controls reachable over code');
+      }
+      assert.deepEqual(errors,[]);await page.close();
+    }
   });
   await check('fork and bookmark buttons settle without an intervening state update',async()=>{
     const {page}=await open();

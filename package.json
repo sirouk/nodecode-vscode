@@ -223,6 +223,7 @@
     "vscode:prepublish": "npm run compile",
     "typecheck": "tsc --noEmit",
     "test": "npm run compile && node --test test/*.test.mjs && node ./test/parity.mjs",
+    "test:browser": "npm run compile && node test/browser-regressions.mjs && node test/browser-smoke.mjs && node test/browser-diffs.mjs && node test/browser-composition-regressions.mjs && node test/browser-activity-regressions.mjs",
     "package": "npx @vscode/vsce package --no-dependencies",
     "icon": "node test/render-icon.mjs"
   },

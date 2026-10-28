@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Keep response Copy, Fork and Bookmark controls inside the response body so they stay clickable without overlapping the separate thought-process copy control.
+- Reserve the response control strip instead of listing the markdown shapes it must avoid, so reply controls never steal a click from a code copy button below a leading rule, a link at the end of the first line or the zoom corner of a wide image, and an empty streaming body no longer leaves them hanging over the next message.
 
 ## [0.1.10]
 

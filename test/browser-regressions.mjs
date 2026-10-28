@@ -282,11 +282,12 @@ try{
       await page.locator('#composer').focus();await page.mouse.move(0,0);assert.equal(await opacity(),'0');
       for(const action of ['copyReply','forkAtMessage','toggleCheckpointBookmark']){
         await page.locator('#composer').focus();
-        const body=await page.locator('.reply-text').boundingBox(),button=page.locator('[data-a="'+action+'"]');
+        const body=await page.locator('.reply-text').boundingBox(),button=page.locator('[data-a="'+action+'"]'),shell=await page.locator('.response-body').boundingBox();
         const start={x:body.x+8,y:body.y+body.height-8};await page.mouse.move(start.x,start.y);
         assert.equal(await opacity(),'1','body hover shows actions');
         const actions=await toolbar.boundingBox(),thought=thoughtState==='none'?null:await page.locator('.reasoning').boundingBox();
-        assert(actions.y>=body.y&&actions.y+actions.height<=body.y+body.height,'toolbar stays within the response body, not above the message');
+        assert(actions.y>=shell.y&&actions.y+actions.height<=shell.y+shell.height,'toolbar stays within the response body, not above the message');
+        assert(actions.y+actions.height<=body.y,'toolbar occupies the reserved strip instead of covering reply text');
         if(thought)assert(actions.y>=thought.y+thought.height,'toolbar never overlaps the thought section');
         const target=await button.boundingBox(),end={x:target.x+target.width/2,y:target.y+target.height/2};
         for(let step=1;step<=12;step++){
@@ -357,6 +358,7 @@ try{
         const actionCount=await page.evaluate(()=>window.posted.filter(m=>m.type==='forkAtMessage'||m.type==='toggleCheckpointBookmark').length);
         for(const offset of [2,codeTarget.height/2,codeTarget.height-2]){
           const x=codeTarget.x+codeTarget.width/2,y=codeTarget.y+offset;
+          await page.evaluate(()=>{window.copiedResponse=null;});
           if(hasTouch)await page.touchscreen.tap(x,y);else await page.mouse.click(x,y);
           assert.equal(await page.evaluate(()=>window.copiedResponse),'const answer = 42;');
         }
@@ -385,6 +387,133 @@ try{
       }
       assert.deepEqual(errors,[]);await page.close();
     }
+  });
+  await check('response controls never cover clickable reply content in any first-block shape',async()=>{
+    const {page,errors}=await open();
+    const wideImage='data:image/svg+xml;utf8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300"><rect width="900" height="300" fill="#888"/></svg>');
+    const shapes=[
+      ['link on the first line',{text:'Read the [reference](https://example.com/reference) before changing the retention window, the retry budget or the cache.'},true],
+      ['rule then a code fence',{text:'---\n\n```ts\nconst a = 1;\n```'},true],
+      ['heading first',{text:'# Heading\n\nBody text below the heading.'}],
+      ['table first',{text:'| left | right |\n| --- | --- |\n| 1 | 2 |'}],
+      ['list then a fence',{text:'- first item\n\n  ```ts\n  const b = 2;\n  ```'},true],
+      ['quoted code',{text:'> ```ts\n> const c = 3;\n> ```'},true],
+      ['plain prose',{text:'A plain reply whose first line runs to the right edge of a narrow panel and keeps going.'}],
+      ['image only',{text:'',images:[{url:wideImage}]},true]
+    ];
+    for(const width of [360,1108])for(const [name,part,clickable] of shapes){
+      await page.setViewportSize({width,height:700});
+      await emit(page,{...state,view:{...state.view,parts:[{kind:'assistant',reasoning:'',durable:true,streaming:false,forkTurnId:'shape-turn',...part}]}});
+      await page.locator('#composer').focus();
+      // Hover the code block when there is one so its copy button is pointer-enabled, as it is in real use.
+      await (await page.locator('.response-body .codeblock').count()?page.locator('.response-body .codeblock').first():page.locator('.response-body')).hover();
+      const report=await page.evaluate(()=>{
+        const body=document.querySelector('.response-body'),bar=body.querySelector(':scope>.message-actions'),barRect=bar.getBoundingClientRect(),bodyRect=body.getBoundingClientRect();
+        const covered=[],blocked=[],unreachable=[];let examined=0;
+        for(const el of body.querySelectorAll('a,button,summary,img,[tabindex="0"]')){
+          if(bar.contains(el))continue;
+          const r=el.getBoundingClientRect();if(!r.width||!r.height)continue;
+          if(r.top<0||r.bottom>innerHeight||r.left<0||r.right>innerWidth)continue;
+          examined++;
+          const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+          if(!el.contains(hit))covered.push((el.className||el.tagName)+' receives '+(hit?hit.className||hit.tagName:'nothing'));
+          if(r.top<barRect.bottom&&barRect.top<r.bottom&&r.left<barRect.right&&barRect.left<r.right)blocked.push(el.className||el.tagName);
+        }
+        for(const el of bar.querySelectorAll('button')){
+          const r=el.getBoundingClientRect();
+          if(!el.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)))unreachable.push(el.dataset.a);
+        }
+        return {covered,blocked,unreachable,examined,inside:barRect.top>=bodyRect.top-.5&&barRect.bottom<=bodyRect.bottom+.5,strip:getComputedStyle(body).paddingTop};
+      });
+      assert(report.inside,name+': controls stay inside the response body');
+      assert.equal(report.strip,'20px',name+': the control strip is reserved rather than overlapping content');
+      assert.deepEqual(report.covered,[],name+': every clickable element in the reply receives its own click');
+      assert.deepEqual(report.blocked,[],name+': the control strip overlaps no clickable element');
+      assert.deepEqual(report.unreachable,[],name+': every response control is hit-testable');
+      if(clickable)assert(report.examined>0,name+': the shape really renders clickable content to protect');
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('reply clicks reach their own control after a leading rule, a first-line link and a wide image',async()=>{
+    const {page,errors}=await open();
+    await page.evaluate(()=>{Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});document.execCommand=()=>{window.copiedResponse=document.activeElement.value;return true;};});
+    const wideImage='data:image/svg+xml;utf8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300"><rect width="900" height="300" fill="#888"/></svg>');
+    const hijacks=()=>page.evaluate(()=>window.posted.filter(m=>m.type==='forkAtMessage'||m.type==='toggleCheckpointBookmark').length);
+    for(const width of [360,1108]){
+      await page.setViewportSize({width,height:700});
+      await emit(page,{...state,view:{...state.view,parts:[{kind:'assistant',text:'---\n\n```ts\nconst a = 1;\n```',reasoning:'',durable:true,streaming:false,forkTurnId:'rule-turn'}]}});
+      await page.locator('.codeblock').hover();
+      const copy=page.locator('.codeblock-copy'),target=await copy.boundingBox();
+      for(const offset of [2,target.height/2,target.height-2]){
+        await page.evaluate(()=>{window.copiedResponse=null;});
+        await page.mouse.click(target.x+target.width/2,target.y+offset);
+        assert.equal(await page.evaluate(()=>window.copiedResponse),'const a = 1;','code copy below a leading rule copies code at offset '+offset);
+      }
+      assert.equal(await hijacks(),0,'code copy below a leading rule never forks or bookmarks');
+      await emit(page,{...state,view:{...state.view,parts:[{kind:'assistant',text:'Read the [reference](https://example.com/reference) before changing the retention window, the retry budget or the cache.',reasoning:'',durable:true,streaming:false,forkTurnId:'link-turn'}]}});
+      await page.locator('.reply-text').hover();
+      const link=await page.locator('.reply-text a').boundingBox();
+      await page.mouse.click(link.x+link.width/2,link.y+link.height/2);
+      assert.equal((await posted(page,'openExternal')).url,'https://example.com/reference','a first-line link opens instead of forking the conversation');
+      assert.equal(await hijacks(),0,'a first-line link never forks or bookmarks');
+      await emit(page,{...state,view:{...state.view,parts:[{kind:'assistant',text:'',reasoning:'',durable:true,streaming:false,images:[{url:wideImage}]}]}});
+      await page.locator('.response-body').hover();
+      const image=await page.locator('.message-image').boundingBox();
+      assert(image.width>200,'the image reaches across the reply at '+width+'px, width '+image.width);
+      await page.mouse.click(image.x+image.width-6,image.y+6);
+      assert.equal(await page.locator('#imagePreview').evaluate(node=>!node.classList.contains('hidden')),true,'the top corner of a wide image still opens the preview');
+      await page.locator('#closeImagePreview').click();
+      assert.equal(await hijacks(),0,'an image corner never forks or bookmarks');
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a thought-only response body keeps its controls inside and off the next message',async()=>{
+    const {page,errors}=await open({},'regression-session',{hasTouch:true});
+    for(const width of [360,1108]){
+      await page.setViewportSize({width,height:700});
+      await emit(page,{...state,view:{...state.view,running:true,parts:[
+        {kind:'assistant',text:'',reasoning:'Thinking it through.',durable:false,streaming:true},
+        {kind:'user',text:'The next message keeps its own first line.'}]}});
+      const bar=page.locator('.response-body>.message-actions');
+      assert.equal(await bar.evaluate(node=>getComputedStyle(node).opacity),'1','touch shows response controls without a hover');
+      const geo=await page.evaluate(()=>{
+        const body=document.querySelector('.response-body'),bar=body.querySelector(':scope>.message-actions');
+        const b=body.getBoundingClientRect(),r=bar.getBoundingClientRect();
+        const next=document.querySelector('.msg.user .bubble'),n=next.getBoundingClientRect();
+        const hit=document.elementFromPoint(n.left+n.width/2,n.top+8);
+        return {bodyHeight:b.height,inside:r.top>=b.top-.5&&r.bottom<=b.bottom+.5,nextClear:hit?next.contains(hit):false,hit:hit?String(hit.className||hit.tagName):'nothing'};
+      });
+      assert(geo.bodyHeight>=20,'the reserved strip gives an otherwise empty body height: '+geo.bodyHeight);
+      assert(geo.inside,'controls stay inside an empty response body');
+      assert(geo.nextClear,'controls never hang over the next message, they hit '+geo.hit);
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('user message controls stay reachable and yield to code copy',async()=>{
+    const {page,errors}=await open();
+    await page.evaluate(()=>{Object.defineProperty(navigator,'clipboard',{value:undefined,configurable:true});document.execCommand=()=>{window.copiedResponse=document.activeElement.value;return true;};});
+    const text='Check this paragraph first.\n\n```ts\nconst u = 9;\n```';
+    for(const width of [360,1108]){
+      await page.setViewportSize({width,height:700});
+      await emit(page,{...state,view:{...state.view,parts:[{kind:'user',text,durable:true}]}});
+      const bar=page.locator('.msg.user .message-actions'),copy=page.locator('[data-a="copyUser"]');
+      await page.locator('#composer').focus();await page.mouse.move(0,0);
+      assert.equal(await bar.evaluate(node=>getComputedStyle(node).opacity),'0','idle user controls stay hidden');
+      await page.locator('.msg.user .md>p').hover();
+      assert.equal(await bar.evaluate(node=>getComputedStyle(node).opacity),'1','hovering the user message shows its controls');
+      assert(await copy.evaluate(node=>{const r=node.getBoundingClientRect();return node.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2));}),'the user copy button is hit-testable');
+      await page.evaluate(()=>{window.copiedResponse=null;});
+      await copy.click();
+      assert.equal(await page.evaluate(()=>window.copiedResponse),text,'user copy copies the message');
+      await page.locator('.msg.user .codeblock').hover();
+      assert.equal(await bar.evaluate(node=>getComputedStyle(node).opacity),'0','hovering code in a user message yields to the code copy button');
+      const codeCopy=page.locator('.msg.user .codeblock-copy');
+      assert.equal(await codeCopy.evaluate(node=>getComputedStyle(node).opacity),'1');
+      await page.evaluate(()=>{window.copiedResponse=null;});
+      const box=await codeCopy.boundingBox();await page.mouse.click(box.x+box.width/2,box.y+2);
+      assert.equal(await page.evaluate(()=>window.copiedResponse),'const u = 9;','code copy inside a user message still copies code');
+    }
+    assert.deepEqual(errors,[]);await page.close();
   });
   await check('fork and bookmark buttons settle without an intervening state update',async()=>{
     const {page}=await open();

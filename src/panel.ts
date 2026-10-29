@@ -15,7 +15,7 @@ import { ACTIVITY_CSS, ACTIVITY_CLIENT_JS } from "./activity-controls";
 import { DIFF_CSS, DIFF_CLIENT_JS } from "./diff-view";
 import { Notifications } from "./discovery";
 import { SessionController } from "./manager";
-import { StoreView } from "./store";
+import { partWeight, StoreView } from "./store";
 import { ConnectionState, GatewayTurnCommandResult, ImageAttachment } from "./protocol";
 
 export interface ModelFavorite { provider: string; model: string }
@@ -270,6 +270,25 @@ export class SessionPanel {
 
   /** Parts a fresh webview receives; the panel asks for older ones as the reader scrolls back. */
   private static readonly tailParts = 240;
+  /** What that tail may weigh. The client renders at most WINDOW_WEIGHT of a fresh open, so shipping more is serialization for nothing. */
+  private static readonly tailWeight = 450_000;
+  /** What one on-demand history slice may weigh: the client's HARD_WEIGHT, the most its window ever holds on screen. */
+  private static readonly sliceWeight = 2_600_000;
+
+  /**
+   * First index of the run ending at `end` that fits the budget: at most `rows`
+   * parts and at most `weight` of transcript, but always at least `minimum` of
+   * them, so one huge tool result still leaves the panel something to show.
+   */
+  private static boundedFrom(parts: StoreView["parts"], end: number, rows: number, weight: number, minimum: number): number {
+    let total = 0, count = 0;
+    for (let i = Math.min(end, parts.length) - 1; i >= 0; i--) {
+      const next = partWeight(parts[i]);
+      if (count >= minimum && (count >= rows || total + next > weight)) return i + 1;
+      total += next; count++;
+    }
+    return 0;
+  }
 
   private decorateParts(parts: StoreView["parts"], cwd: string, waiting?: Promise<void>[]): StoreView["parts"] {
     return parts.map((part) => part.kind === "tool" ? { ...part, call: { ...part.call, imageUrl: this.toolImageUrl(part.call, cwd) } } : (part.kind === "user" || part.kind === "assistant") && part.images?.length ? { ...part, images: part.images.map((image) => {
@@ -287,7 +306,9 @@ export class SessionPanel {
     // Ship the tail only. The whole transcript would otherwise be serialized
     // across the webview bridge on every streamed token: measured at 4-7 MB and
     // 3-7 ms per tick on a 1200-turn thread, all of it re-parsed by the panel.
-    const start = Math.max(0, view.parts.length - SessionPanel.tailParts);
+    // Counting rows does not deliver that on its own: 240 tool results of 64 KB
+    // measured 5.1 MB and 10.5 ms per tick, the cost the tail exists to avoid.
+    const start = SessionPanel.boundedFrom(view.parts, view.parts.length, SessionPanel.tailParts, SessionPanel.tailWeight, 1);
     this.postMessage({
       type: "state",
       view: { ...view, parts: this.decorateParts(view.parts.slice(start), view.cwd), partsStart: start, partsTotal: view.parts.length },
@@ -487,7 +508,9 @@ export class SessionPanel {
           const limit = Math.min(400, Math.max(1, Math.floor(Number(message.limit)) || 200));
           const before = Number(message.before);
           const end = Number.isFinite(before) ? Math.max(0, Math.min(Math.floor(before), view.parts.length)) : view.parts.length;
-          const from = Math.max(0, end - limit);
+          // Bounded by weight as well as by count, but never shorter than the
+          // two parts the panel's merge witness needs to accept the answer.
+          const from = SessionPanel.boundedFrom(view.parts, end, limit, SessionPanel.sliceWeight, 2);
           void this.postPartsWindow(message.requestId, id, from, view.parts.slice(from, end), view.cwd);
           return;
         }
@@ -1359,6 +1382,8 @@ const CLIENT_JS = String.raw`
 
   function partAt(index){ return cachedParts[index - partsStart]; }
 
+  // The extension keeps a copy of this rule in src/store.ts to bound what it
+  // ships across the bridge; the two change together.
   function partWeight(part){
     if (!part) return 16;
     if (part.kind === 'assistant') return 32 + (part.text ? part.text.length : 0) + (part.reasoning ? part.reasoning.length : 0) + 800 * (part.images ? part.images.length : 0);

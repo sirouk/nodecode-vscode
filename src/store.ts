@@ -49,6 +49,24 @@ export type ChatPart =
   | { kind: "tool"; call: ChatToolCall; turnNumber: number }
   | { kind: "system"; text: string; level: "info" | "warn" | "error"; childSessionId?: string };
 
+/**
+ * What one part costs to ship across the webview bridge and to render, in bytes
+ * of transcript. Both ends bound the transcript with this rather than with a row
+ * count, which says nothing about a part carrying a 64 KB tool result. The
+ * panel's script keeps its own copy of the rule (`partWeight` in panel.ts); the
+ * two change together.
+ */
+export function partWeight(part: ChatPart): number {
+  if (part.kind === "assistant") return 32 + (part.text?.length ?? 0) + (part.reasoning?.length ?? 0) + 800 * (part.images?.length ?? 0);
+  if (part.kind === "user") return 32 + (part.text?.length ?? 0) + 800 * (part.images?.length ?? 0) + 120 * (part.textFiles?.length ?? 0);
+  if (part.kind === "tool") {
+    const metadata = part.call?.metadata;
+    return 64 + (part.call?.arguments?.length ?? 0) + (part.call?.result?.length ?? 0)
+      + (metadata?.workspace_diff ? 6000 : 0) + (metadata?.image ? 4000 : 0);
+  }
+  return 16;
+}
+
 export type BgProcess = BackgroundProcessView;
 
 export interface UsageTotals {

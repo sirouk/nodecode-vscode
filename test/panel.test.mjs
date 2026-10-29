@@ -171,6 +171,38 @@ test('the extension ships a bounded transcript tail and answers scroll-back requ
 });
 
 
+test('a fat transcript is bounded by what it weighs, not by how many rows it holds', async () => {
+  const posted=[];
+  // Every third part is a tool result of 64 KB: ordinary enough for a file read
+  // or a command's output, and enough to make a row count say nothing.
+  const parts=Array.from({length:600},(_,i)=>i%3===2
+    ? {kind:'tool',turnNumber:i,call:{callId:'c'+i,name:'sh',arguments:'ls',result:'y'.repeat(65536),done:true,status:'done'}}
+    : {kind:'user',turnNumber:i,text:'part '+i});
+  const panel=Object.create(SessionPanel.prototype);
+  panel.conversationImages=new Map(); // Object.create skips field initializers
+  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts}),userPrompts:()=>[]}};
+  panel.panel={webview:{postMessage:m=>posted.push(m)}};
+  panel.postMessage=m=>{panel.panel.webview.postMessage(m);};
+  panel.postState();
+  const state=posted.find(m=>m.type==='state');
+  const tickBytes=JSON.stringify(state).length;
+  assert(state.view.parts.length<240,'240 rows of 64 KB tool results is what the tail exists not to send on every token');
+  assert(tickBytes<700000,`one streamed token serialized ${(tickBytes/1048576).toFixed(2)} MB across the bridge`);
+  assert.equal(state.view.partsTotal,600,'the panel still knows how much history exists');
+  assert.equal(state.view.parts[state.view.parts.length-1].turnNumber,599,'the newest part always arrives, however fat it is');
+  assert.equal(state.view.partsStart+state.view.parts.length,600,'and the tail still ends at the end of the thread');
+
+  posted.length=0;
+  await panel.onMessage({type:'requestParts',requestId:20,before:state.view.partsStart,limit:200});
+  const win=posted.find(m=>m.type==='partsWindow');
+  const sliceBytes=JSON.stringify(win).length;
+  assert(win.parts.length>=2,'a slice keeps the overlap its merge witness needs to accept it');
+  assert(win.parts.length<200,'and is bounded by weight as well as by count');
+  assert.equal(win.start+win.parts.length,state.view.partsStart,'so it still ends where the cached tail begins');
+  assert(sliceBytes<3000000,`one scroll-back slice serialized ${(sliceBytes/1048576).toFixed(2)} MB`);
+});
+
+
 test('deleting the selected session clears its sidebar without reattaching it', () => {
   const received=event(), disposed=event(), visibility=event();
   const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage(){},onDidReceiveMessage:received.register}};

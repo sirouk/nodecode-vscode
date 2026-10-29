@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bound the transcript shipped to the panel by what it weighs as well as by how many rows it holds. A row count says nothing about a part carrying a large tool result: 240 of them at 64 KB each were serialized across the webview bridge on every streamed token, 5 MB and 10.5 ms a tick, for a panel that renders at most 450 KB of what it is sent. The same thread now ships 18 rows and 0.38 MB a tick, an ordinary thread still ships its 240 rows, and a scroll-back slice is bounded the same way.
 - Withhold a requested history slice while a session replay is still rebuilding the transcript, so half-built rows such as a finished tool still shown as running are never pinned above the tail where no later state can reach them.
 - Resolve images in a history slice instead of leaving them at Loading image... when they are older than the tail the panel was first given.
 - Keep a text selection that is still being dragged out of the automatic window slide, so copying near the far end of a truncated transcript no longer loses the selected rows.

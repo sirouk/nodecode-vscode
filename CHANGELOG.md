@@ -8,7 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Keep the conversation window bounded. A reopened thread renders the newest messages, or the place the reader left when the panel still holds it, instead of rebuilding its whole history, streaming updates ship only the tail of the transcript across the webview bridge, scrolling up fetches the next slice of history on demand while holding the reading position, and rows far above the reader are released again. A 2000-message thread now opens in tens of milliseconds instead of seconds, and its updates stay under a millisecond.
+- Keep the conversation window bounded. A reopened thread renders the newest messages, or the place the reader left when the panel still holds it, instead of rebuilding its whole history, and streaming updates ship only the tail of the transcript across the webview bridge. The window is bounded around the reader rather than ending at the newest message: scrolling up fetches the next slice of history on demand while holding the reading position, rows far above the reader are released again, and reading past the far end slides the window forward instead of growing it, with a Load later messages button for the rest. A 10,000-message thread walked back to its first message holds 900 rows and about 12,000 nodes at its peak instead of all 10,000 rows and 134,000 nodes, and a streamed update stays under half a millisecond wherever the reader is. Following the latest, the pause on deliberate scrolling and the Latest message jump all refer to the end of the thread, not the end of the rendered window.
+
+### Fixed
+
+- Withhold a requested history slice while a session replay is still rebuilding the transcript, so half-built rows such as a finished tool still shown as running are never pinned above the tail where no later state can reach them.
+- Resolve images in a history slice instead of leaving them at Loading image... when they are older than the tail the panel was first given.
+- Keep a text selection that is still being dragged out of the automatic window slide, so copying near the far end of a truncated transcript no longer loses the selected rows.
+- Hold the reading position when rows leave the document: the scroll compensation now starts from the browser's clamped offset rather than the offset the render began at, so a slide cannot drop the reader at the bottom and slide again.
 
 ## [0.1.11]
 

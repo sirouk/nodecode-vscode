@@ -1531,6 +1531,13 @@ const CLIENT_JS = String.raw`
     cachedParts = cachedParts.slice(drop); partsStart = front;
   }
 
+  function focusSurvivor(lost){
+    var order = lost < visibleStart ? ['historyEarlier','historyLater'] : ['historyLater','historyEarlier'];
+    for (var i = 0; i < order.length; i++) {
+      var control = E(order[i]);
+      if (!control.classList.contains('hidden')) { control.focus({preventScroll:true}); return; }
+    }
+  }
   function renderTranscript(){
     var restoredPlace = false;
     if (!partsTotal) {
@@ -1542,6 +1549,12 @@ const CLIENT_JS = String.raw`
       return;
     }
     var last = partsTotal - 1, tail = budgetStart();
+    // The tail also has to be a suffix the window can hold. A part too heavy for
+    // the forward budget stops every window that starts behind it, so a tail
+    // reaching only that far shows neither it nor anything after it - and
+    // following, which only ever moves the window up to the tail, cannot escape.
+    var holdable = walkBack(partsTotal, HARD_ROWS, HARD_WEIGHT, 1);
+    if (holdable > tail) tail = holdable;
     if (visibleStart === null || visibleStart > last) {
       // A reopened thread comes back where the reader left it when that place is
       // still in the tail it was handed, and to the latest otherwise. The tail
@@ -1569,7 +1582,13 @@ const CLIENT_JS = String.raw`
     var anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
     if (transcript.dataset.empty === 'true') transcript.innerHTML = '';
     transcript.dataset.empty = 'false';
+    // Dropping a row drops whatever inside it held focus, and focus left on the
+    // body sends the next Tab back to the top of the document. Hand it to the
+    // control that goes back toward the row the reader was in.
+    var lostFocus = null;
+    for (var f = 0; f < drop.length; f++) if (drop[f].contains(document.activeElement)) { lostFocus = drop[f]._partIndex; break; }
     for (var d = 0; d < drop.length; d++) { captureDetailState(drop[d]); drop[d].remove(); }
+    if (lostFocus !== null) focusSurvivor(lostFocus);
     for (var ci = 0; ci < changes.length; ci++) {
       var index = changes[ci], changed = partAt(index), target = existing.get(index);
       var html = partHtml(changed, index);
@@ -1956,9 +1975,14 @@ const CLIENT_JS = String.raw`
   // free: the cache already runs to the tail, so this only moves the window and
   // keeps the row the reader is looking at where it is on screen.
   function loadLater(){
-    if(visibleStart===null||windowEnd()>=partsTotal)return;
+    if(visibleStart===null)return;
+    var end=windowEnd();
+    if(end>=partsTotal)return;
     var keep=visibleRow();
-    if(keep===null||keep<=visibleStart)return;
+    // No row to keep in view means the window already reaches as far forward as it
+    // can see: the part after it is too heavy to join, and only a window starting
+    // there includes it at all. The reader asked to go forward, so go.
+    if(keep===null||keep<=visibleStart)keep=end;
     setFollow(scrollBox,false);
     visibleStart=keep;
     boundCache();

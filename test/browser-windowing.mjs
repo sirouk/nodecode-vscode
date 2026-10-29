@@ -30,6 +30,9 @@ function thread(turns){
   }
   return out;
 }
+// One tool result with nothing upstream capping its size: heavier on its own than
+// the whole forward window budget.
+const fat=bytes=>({kind:'tool',call:{callId:'fat',name:'sh',arguments:'{}',result:'x'.repeat(bytes),done:true,status:'done',durationMs:5}});
 const emit=(page,message)=>page.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),message);
 async function open(saved={},parts=thread(500),sessionId='window-session'){
   const page=await browser.newPage({viewport:{width:1200,height:900}});page.setDefaultTimeout(8000);
@@ -473,6 +476,78 @@ try{
     const empty=await open({},[]);
     assert.equal(await empty.page.evaluate(()=>document.getElementById('transcript').firstElementChild.className),'welcome','an empty thread shows the welcome');
     assert.deepEqual(empty.errors,[]);await empty.page.close();
+  });
+  await check('a latest message too heavy for the window is still shown and still followed',async()=>{
+    // Nothing caps one tool result, so a single part can outweigh the whole
+    // forward budget. It has to be the thing on screen when the reader is
+    // following, and the next message has to arrive after it.
+    const parts=thread(500);parts.push(fat(3000000));
+    const {page,errors}=await open({},parts);
+    const newest=parts.length-1;
+    assert.equal(await lastIndex(page),newest,'the newest part is rendered even though it alone exceeds the window budget');
+    assert.equal(await firstIndex(page),newest,'it is rendered alone rather than pushing the reader past it');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyLater').classList.contains('hidden')),true,'nothing later is offered at the end of the thread');
+    assert(await page.locator('#historyEarlier').isVisible(),'the rest of the thread stays reachable');
+    // A following reader keeps seeing new messages.
+    parts.push({kind:'assistant',text:'After the huge result.',reasoning:'',streaming:false,durable:true,turnNumber:500});
+    await page.evaluate(p=>{window.__all=p;},parts);
+    await page.evaluate(()=>window.__ship());
+    await page.waitForTimeout(80);
+    assert.equal(await lastIndex(page),newest+1,'the next message arrives after a part too heavy for the window');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a part too heavy to join the window does not wall the reader off from the rest',async()=>{
+    const parts=thread(500);const FAT=2450;parts.splice(FAT,0,fat(3000000));
+    const {page,errors}=await open({},parts);
+    const newest=parts.length-1;
+    // Opening lands past it: the tail is a suffix the window can hold.
+    assert.equal(await lastIndex(page),newest,'the thread opens at its newest message');
+    assert(await firstIndex(page)>FAT,'the window starts past the part it cannot hold ('+await firstIndex(page)+')');
+    // One step back puts the reader behind it, and from there every forward step
+    // has to move, all the way through it to the end.
+    await page.evaluate(()=>document.getElementById('historyEarlier').click());
+    await page.waitForTimeout(80);
+    assert(await lastIndex(page)<FAT,'the reader can be behind the heavy part');
+    let reached=false;
+    for(let i=0;i<14&&!reached;i++){
+      const before=await firstIndex(page);
+      await page.evaluate(()=>document.getElementById('historyLater').click());
+      await page.waitForTimeout(60);
+      const after=await firstIndex(page);
+      assert(after>=before,'the window only moves forward ('+before+' -> '+after+')');
+      if(after===FAT)reached=true;
+    }
+    assert(reached,'the reader reaches the part that outweighs the window ('+FAT+')');
+    assert.equal(await lastIndex(page),FAT,'it is rendered');
+    await page.evaluate(()=>document.getElementById('historyLater').click());
+    await page.waitForTimeout(80);
+    assert.equal(await lastIndex(page),newest,'and the thread after it is reachable');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyLater').classList.contains('hidden')),true,'nothing later is offered at the end');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a forward slide leaves keyboard focus on a control, not on the body',async()=>{
+    const parts=thread(500);parts.splice(2450,0,fat(3000000));
+    const {page,errors}=await open({},parts);
+    // Behind the heavy part, where a forward step has to drop the rows it leaves.
+    await page.evaluate(()=>document.getElementById('historyEarlier').click());
+    await page.waitForTimeout(80);
+    const focused=await page.evaluate(()=>{
+      const row=Array.from(document.getElementById('transcript').children).find(r=>r.querySelector('.copy-text'));
+      const control=row.querySelector('.copy-text');control.focus({preventScroll:true});
+      return {index:row._partIndex,active:document.activeElement===control};
+    });
+    assert(focused.active,'a control in the window holds focus ('+focused.index+')');
+    await page.evaluate(()=>document.getElementById('historyLater').click());
+    await page.waitForTimeout(80);
+    assert(await firstIndex(page)>focused.index,'the slide moved past the row that held focus');
+    const after=await page.evaluate(()=>{
+      const active=document.activeElement;
+      return {id:active.id,body:active===document.body,hidden:active.classList?active.classList.contains('hidden'):true};
+    });
+    assert(!after.body,'focus is not left on the body, where the next Tab would start over at the top');
+    assert(['historyEarlier','historyLater'].includes(after.id),'focus goes to a control that leads back into the thread ('+after.id+')');
+    assert(!after.hidden,'and that control is on screen');
+    assert.deepEqual(errors,[]);await page.close();
   });
   assert.deepEqual(failures,[],'scrollback windowing regressions failed');
 }finally{await browser.close();}

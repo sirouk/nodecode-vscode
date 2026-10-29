@@ -121,6 +121,14 @@ test('the extension ships a bounded transcript tail and answers scroll-back requ
   posted.length=0;
   await panel.onMessage({type:'requestParts',requestId:9,before:600});
   assert.deepEqual([posted[0].start,posted[0].parts.length],[400,200]);
+  // A slice loaded on demand is decorated exactly like the shipped tail: an older
+  // tool row still carries the image it was rendered from. Nothing else here would
+  // notice that mapping being dropped.
+  posted.length=0;
+  const shot={kind:'tool',turnNumber:9,call:{callId:'shot',name:'screenshot',arguments:'{}',result:'data:image/png;base64,aGVsbG8=',done:true,status:'done',metadata:{image:{}}}};
+  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts:[shot].concat(parts)}),userPrompts:()=>[]}};
+  await panel.onMessage({type:'requestParts',requestId:10,before:1,limit:1});
+  assert.equal(posted.find(m=>m.type==='partsWindow').parts[0].call.imageUrl,'data:image/png;base64,aGVsbG8=','the older slice is decorated like the tail');
 });
 
 

@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Keep the conversation window bounded. A reopened thread renders the newest messages instead of rebuilding its whole history, streaming updates ship only the tail of the transcript across the webview bridge, scrolling up fetches the next slice of history on demand while holding the reading position, and rows far above the reader are released again. A 2000-message thread now opens in tens of milliseconds instead of seconds, and its updates stay under a millisecond.
+- Keep the conversation window bounded. A reopened thread renders the newest messages, or the place the reader left when the panel still holds it, instead of rebuilding its whole history, streaming updates ship only the tail of the transcript across the webview bridge, scrolling up fetches the next slice of history on demand while holding the reading position, and rows far above the reader are released again. A 2000-message thread now opens in tens of milliseconds instead of seconds, and its updates stay under a millisecond.
 
 ## [0.1.11]
 

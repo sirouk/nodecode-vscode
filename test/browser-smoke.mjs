@@ -823,15 +823,19 @@ try {
   await reopened.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),{...longState,view:{...longState.view,replayComplete:false,parts:longState.view.parts.slice(0,50)}});
   assert.equal(await reopened.locator('#transcript > section').count(),0);
   await reopened.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),{...longState,view:{...longState.view,replayComplete:true}});await reopened.waitForTimeout(30);
-  // Reopening a long thread shows its last bunch, not the deep place it was closed
-  // at; that place stays reachable by scrolling back, which loads it on demand.
-  assert(savedHistory.sessions['test-session'].visibleStart<1001-160,'the closed thread must have been read above the reopened window');
-  assert.equal(await reopened.locator('#transcript > section').count(),160);
-  assert(await reopened.locator('#scroll').evaluate(e=>e.scrollHeight-e.scrollTop-e.clientHeight<5));
-  assert(await reopened.evaluate(()=>document.querySelector('#transcript').firstElementChild.textContent.includes('History row 841')));
+  // Reopening comes back to the place the reader left, as long as the panel still
+  // holds it. This fixture ships the whole transcript because nothing here answers
+  // a scroll-back request, so the saved place is inside what the panel was handed;
+  // a place it no longer holds lands on the newest bunch instead, which is what
+  // browser-windowing.mjs asserts against a shipped tail.
+  const savedPlace=savedHistory.sessions['test-session'].visibleStart;
+  assert(savedPlace<1001-160,'the closed thread must have been read above the reopened window');
+  assert.equal(await reopened.locator('#transcript > section').count(),1001-savedPlace);
+  assert(await reopened.evaluate(w=>Math.abs(document.getElementById('scroll').scrollTop-w)<2,savedHistory.sessions['test-session'].scrollTop),'the reader is back at the same place in the thread');
+  assert(await reopened.evaluate(p=>document.querySelector('#transcript').firstElementChild.textContent.includes('History row '+p),savedPlace),'the window starts at the place the reader left');
   assert(await reopened.locator('#historyEarlier').evaluate(e=>!e.classList.contains('hidden')));
   await reopened.locator('#scroll').evaluate(e=>{e.scrollTop=150;});await reopened.waitForTimeout(60);
-  assert.equal(await reopened.locator('#transcript > section').count(),250);
+  assert.equal(await reopened.locator('#transcript > section').count(),1001-savedPlace+90,'scrolling back adds the next chunk of rows');
   await reopened.close();
   for(let i=0;i<6;i++){await longPage.locator('#scroll').evaluate(e=>{e.scrollTop=150;});await longPage.waitForTimeout(30);}
   assert.equal(await longPage.locator('#transcript > section').count(),791);

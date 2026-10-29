@@ -60,16 +60,22 @@ const box=page=>page.evaluate(()=>{const b=document.getElementById('scroll');ret
 const draft=page=>page.evaluate(()=>window.savedState.sessions?.['window-session']);
 // One upward gesture: the panel may extend the window from what it already
 // holds, or ask the extension for the next slice; wait until that settles.
-async function gestureUp(page){
+async function gestureUp(page,serve=true){
   const before=await rows(page);
   await page.evaluate(()=>{const b=document.getElementById('scroll');b.scrollTop=60;b.dispatchEvent(new Event('scroll'));});
   for(let k=0;k<40;k++){
     await page.waitForTimeout(16);
-    if(await page.evaluate(()=>window.__serve())){await page.waitForTimeout(16);continue;}
     const pending=await page.evaluate(()=>window.posted.some(m=>m.type==='requestParts'&&!m.__served));
+    if(pending){
+      if(!serve)return;
+      if(await page.evaluate(()=>window.__serve())){await page.waitForTimeout(16);continue;}
+    }
     if(!pending&&await rows(page)>=before)break;
   }
 }
+// The request the panel is waiting on, if any: the slice it expects ends one past
+// the cache front, the last part being the overlap it checks.
+const pendingRequest=page=>page.evaluate(()=>{const all=window.posted.filter(m=>m.type==='requestParts'&&!m.__served);const last=all[all.length-1];return last?{id:last.requestId,before:last.before}:null;});
 async function scrollBack(page,times=1){for(let i=0;i<times;i++)await gestureUp(page);}
 const failures=[];
 async function check(name,run){try{await run();console.log('PASS '+name);}catch(error){failures.push(name);console.error('FAIL '+name+'\n'+error.stack);}}
@@ -124,30 +130,34 @@ try{
   });
   await check('an answer that does not match the request or the cache is ignored',async()=>{
     const {page,errors}=await open();
-    // Two gestures: the first is served from the shipped tail, the second has to
-    // ask the extension, which is the request these answers are checked against.
-    await scrollBack(page,2);
+    // Walk the reader up until the panel has to ask the extension, and leave that
+    // request unanswered: it is the one these mismatched answers are checked against.
+    await scrollBack(page,1);
+    let req=null;
+    for(let i=0;i<8&&!req;i++){await gestureUp(page,false);req=await pendingRequest(page);}
+    assert(req,'scrolling back past what the panel holds asks the extension');
     const settled={rows:await rows(page),first:await firstIndex(page)};
-    // The request the panel is actually waiting on, and where its cache now begins.
-    const req=await page.evaluate(()=>{const all=window.posted.filter(m=>m.type==='requestParts');const last=all[all.length-1];return{id:last.requestId,before:last.before,limit:Math.min(400,Math.max(1,last.limit||200))};});
-    const front=Math.max(0,req.before-req.limit);
-    const filler=thread(40).slice(0,20);
-    // A stale id, another thread, a gap before the cache, and an empty slice.
+    const good=await page.evaluate(before=>window.__all.slice(Math.max(0,before-41),before),req.before);
+    const alien=good.slice();alien[alien.length-1]={kind:'tool',call:{callId:'alien',name:'x',arguments:'',result:'',done:true,status:'done',metadata:{}},turnNumber:-1};
+    // A stale id, another thread, a slice that stops short of the cache, an empty
+    // slice, and a contiguous slice whose overlapping part is not the part the
+    // cache holds there - a transcript replaced while the answer was in flight.
     for(const bad of [
-      {type:'partsWindow',requestId:req.id+1,sessionId:'window-session',start:front-20,total:2500,parts:filler},
-      {type:'partsWindow',requestId:req.id,sessionId:'other-session',start:front-20,total:2500,parts:filler},
-      {type:'partsWindow',requestId:req.id,sessionId:'window-session',start:0,total:2500,parts:filler},
-      {type:'partsWindow',requestId:req.id,sessionId:'window-session',start:front-20,total:2500,parts:[]}
+      {type:'partsWindow',requestId:req.id+1,sessionId:'window-session',start:req.before-good.length,total:2500,parts:good},
+      {type:'partsWindow',requestId:req.id,sessionId:'other-session',start:req.before-good.length,total:2500,parts:good},
+      {type:'partsWindow',requestId:req.id,sessionId:'window-session',start:req.before-good.length-20,total:2500,parts:good},
+      {type:'partsWindow',requestId:req.id,sessionId:'window-session',start:req.before,total:2500,parts:[]},
+      {type:'partsWindow',requestId:req.id,sessionId:'window-session',start:req.before-alien.length,total:2500,parts:alien}
     ]){
       await emit(page,bad);await page.waitForTimeout(40);
       assert.equal(await rows(page),settled.rows,'a mismatched answer must not change the window');
       assert.equal(await firstIndex(page),settled.first);
     }
-    // The same request answered with a slice that ends where the cache begins is
-    // taken, and the window reaches back over it. (A slice shorter than the chunk
-    // minimum is cached but held back, so this one has to be worth rendering.)
-    await page.evaluate(({id,front})=>{const all=window.__all;
-      window.dispatchEvent(new MessageEvent('message',{data:{type:'partsWindow',requestId:id,sessionId:'window-session',start:front-40,total:all.length,parts:all.slice(front-40,front)}}));},{id:req.id,front});
+    // The same request answered with a slice that overlaps the cache by one part,
+    // and that part is still the same part, is taken: the window reaches back over
+    // it. (A slice shorter than the chunk minimum is cached but held back, so this
+    // one has to be worth rendering.)
+    await emit(page,{type:'partsWindow',requestId:req.id,sessionId:'window-session',start:req.before-good.length,total:2500,parts:good});
     await page.waitForTimeout(60);
     const after={first:await firstIndex(page),rows:await rows(page)};
     assert(after.first<settled.first,'a contiguous answer extends the window ('+settled.first+' -> '+after.first+')');
@@ -160,7 +170,7 @@ try{
     const ticks=await page.evaluate(()=>{const t=[];for(let i=0;i<12;i++){const s=performance.now();window.__ship();t.push(performance.now()-s);}return t;});
     await page.waitForTimeout(80);
     assert.equal(await page.evaluate(()=>window.__muts),0,'an idle tick must not touch the transcript');
-    assert(Math.max(...ticks)<25,'idle ticks stay cheap: '+Math.max(...ticks).toFixed(1)+'ms');
+    assert(Math.max(...ticks)<10,'idle ticks stay cheap: '+Math.max(...ticks).toFixed(1)+'ms');
     // A token arriving on the last part still updates just that row.
     await page.evaluate(()=>{window.__muts=0;const all=window.__all;all[all.length-1]={...all[all.length-1],text:all[all.length-1].text+' more'};window.__ship();});
     await page.waitForTimeout(60);
@@ -249,6 +259,74 @@ try{
     assert(still!==null&&Math.abs(still-seen.top)<=2,'what the reader was looking at did not move ('+seen.top+' -> '+still+')');
     assert.equal(await lastIndex(page),2499,'the newest content is still in the window');
     assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a saved place inside the shipped tail is where the reader comes back to',async()=>{
+    const parts=thread(500),place=parts.length-TAIL;
+    const {page,errors}=await open({sessions:{'window-session':{visibleStart:place,scrollTop:0,thread:'window-session'}},'thread':'window-session'},parts);
+    assert.equal(await firstIndex(page),place,'the reader is back where they left off, above the row budget');
+    assert.equal(await rows(page),TAIL,'the window holds every part it was handed');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyEarlier').classList.contains('hidden')),false,'older history is still offered');
+    assert.equal(await page.evaluate(()=>document.getElementById('jumpBtn').classList.contains('hidden')),false,'coming back to a saved place does not resume following');
+    assert.equal((await draft(page)).visibleStart,place,'the place is kept for the next reopen');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a transcript replaced under the reader starts over from the new tail',async()=>{
+    const {page,errors}=await open();
+    await scrollBack(page,2);
+    const before=await firstIndex(page);
+    // The same session and a longer transcript, shifted by one part: the part at
+    // the cache front is no longer that part, so the cached prefix cannot be kept.
+    await page.evaluate(()=>{const all=window.__all;window.__all=all.slice(1).concat(all.slice(0,5));window.__ship();});
+    await page.waitForTimeout(200);
+    const total=await page.evaluate(()=>window.__all.length);
+    const now={first:await firstIndex(page),rows:await rows(page)};
+    assert(now.first>before,'the window starts over from the new tail ('+before+' -> '+now.first+')');
+    assert.equal(now.first,total-now.rows,'every row on screen belongs to the new transcript');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a thread of huge results is bounded by weight, not by row count',async()=>{
+    const big='x'.repeat(200000),parts=[];
+    for(let i=0;i<40;i++){
+      parts.push({kind:'user',text:'Prompt '+i,turnNumber:i});
+      parts.push({kind:'tool',call:{callId:'h'+i,name:'read_file',arguments:'{}',result:big,done:true,status:'done',durationMs:5,metadata:{workspace_diff:{files:[{path:'a.ts',hunks:'y'.repeat(400)}]}}},turnNumber:i});
+    }
+    const {page,errors}=await open({},parts);
+    const shown={rows:await rows(page),first:await firstIndex(page)};
+    assert(shown.rows<20,'the weight budget bounds the window, not the 160 row budget ('+shown.rows+' rows of 200KB results)');
+    assert.equal(shown.first,parts.length-shown.rows,'the rows it does hold are the newest');
+    assert.equal(await lastIndex(page),parts.length-1);
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a thread longer than the cache is readable all the way to its first message',async()=>{
+    // The cache is capped, and trimming it must never drop the slice a fetch just
+    // handed over: on a thread longer than the cap that used to wedge the reader
+    // a few hundred messages from the beginning with 'Load earlier' still offered.
+    const parts=thread(520);
+    const {page,errors}=await open({},parts);
+    for(let i=0;i<60;i++){
+      await gestureUp(page);
+      if(await firstIndex(page)===0)break;
+    }
+    const first=await firstIndex(page);
+    assert.equal(first,0,'the reader reaches the first message of the thread ('+first+')');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyEarlier').classList.contains('hidden')),true,'nothing older is offered once the beginning is on screen');
+    const asked=await page.evaluate(()=>window.posted.filter(m=>m.type==='requestParts').length);
+    assert(asked>=10&&asked<=40,'the walk back asked for slices, not for the whole thread ('+asked+' requests)');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a thread shorter than the window is rendered whole and never fetched',async()=>{
+    const parts=thread(2);
+    const {page,errors}=await open({},parts);
+    assert.equal(await rows(page),parts.length,'every part is on screen');
+    assert.equal(await firstIndex(page),0);
+    assert.equal(await page.evaluate(()=>document.getElementById('historyEarlier').classList.contains('hidden')),true,'nothing older is offered');
+    await gestureUp(page);
+    assert.equal(await page.evaluate(()=>window.posted.filter(m=>m.type==='requestParts').length),0,'it never asks for parts it already has');
+    assert.equal(await rows(page),parts.length);
+    assert.deepEqual(errors,[]);await page.close();
+    const empty=await open({},[]);
+    assert.equal(await empty.page.evaluate(()=>document.getElementById('transcript').firstElementChild.className),'welcome','an empty thread shows the welcome');
+    assert.deepEqual(empty.errors,[]);await empty.page.close();
   });
   assert.deepEqual(failures,[],'scrollback windowing regressions failed');
 }finally{await browser.close();}

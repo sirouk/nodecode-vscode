@@ -1349,7 +1349,9 @@ const CLIENT_JS = String.raw`
   var HASH_LIMIT = 20000, hashNodes = 0;
   function sample(text){ var n = text.length; return text.charCodeAt(0) + '.' + text.charCodeAt(n >> 2) + '.' + text.charCodeAt(n >> 1) + '.' + text.charCodeAt(n - 1); }
   function hashValue(value){
-    if (hashNodes++ > HASH_LIMIT) return '';
+    // Past the budget, say what shape ran out rather than nothing: an empty
+    // answer is the same for every huge value, which would freeze the row.
+    if (hashNodes++ > HASH_LIMIT) return 'over' + (Array.isArray(value) ? 'a' + value.length : value && typeof value === 'object' ? 'k' + Object.keys(value).length : typeof value);
     if (value === null || value === undefined) return '0';
     if (typeof value === 'string') return value.length <= 48 ? value : 's' + value.length + '.' + sample(value);
     if (typeof value !== 'object') return String(value);
@@ -1394,6 +1396,16 @@ const CLIENT_JS = String.raw`
     });
   }
 
+  // Identity only, never content: a part in the overlap may legitimately have
+  // grown between states, and mistaking that for a replaced transcript would
+  // throw the reader to the bottom.
+  function samePart(a,b){
+    if(!a||!b)return false;
+    if(a.kind!==b.kind||a.turnNumber!==b.turnNumber||(a.forkTurnId||'')!==(b.forkTurnId||''))return false;
+    if(a.call||b.call)return !!(a.call&&b.call&&a.call.callId===b.call.callId);
+    return (a.childSessionId||'')===(b.childSessionId||'');
+  }
+
   function syncParts(view){
     var incoming = (view && view.parts) || [];
     var start = view && Number.isInteger(view.partsStart) ? view.partsStart : 0;
@@ -1401,10 +1413,13 @@ const CLIENT_JS = String.raw`
     var session = view ? view.sessionId : null;
     // The same transcript, appended to: extend the cache in place so the reader's
     // window and scroll position survive the tick. Anything else - another
-    // thread, a shorter one, or a window that does not line up - starts over
-    // from the tail it was handed.
-    if (session === cacheSession && total >= partsTotal && start >= partsStart && start - partsStart <= cachedParts.length) {
-      cachedParts = cachedParts.slice(0, start - partsStart).concat(incoming);
+    // thread, a shorter one, a window that does not line up, or a part that is no
+    // longer the part the cache holds at that index - starts over from the tail
+    // it was handed.
+    var overlap = start - partsStart;
+    if (session === cacheSession && total >= partsTotal && overlap >= 0 && overlap <= cachedParts.length
+        && (overlap === cachedParts.length || samePart(cachedParts[overlap], incoming[0]))) {
+      cachedParts = cachedParts.slice(0, overlap).concat(incoming);
       partsTotal = total;
       boundCache();
       return;
@@ -1413,7 +1428,11 @@ const CLIENT_JS = String.raw`
   }
   function boundCache(){
     if (cachedParts.length <= CACHE_MAX) return;
-    var room = visibleStart === null ? 0 : Math.max(0, visibleStart - partsStart);
+    // The cap yields to the reader: nothing at or within one chunk below them is
+    // dropped, or a fetch would be cancelled by the trim it just caused and
+    // history older than the cap could never be reached. The rows reclaimed above
+    // the reader are what make room again.
+    var room = visibleStart === null ? 0 : Math.max(0, visibleStart - CHUNK_ROWS - partsStart);
     var drop = Math.min(cachedParts.length - CACHE_MAX, room);
     if (drop <= 0) return;
     cachedParts = cachedParts.slice(drop); partsStart += drop;
@@ -1438,6 +1457,7 @@ const CLIENT_JS = String.raw`
   }
 
   function renderTranscript(){
+    var restoredPlace = false;
     if (!partsTotal) {
       captureDetailState(transcript);
       visibleStart=null;E('historyEarlier').classList.add('hidden');
@@ -1449,13 +1469,15 @@ const CLIENT_JS = String.raw`
     var last = partsTotal - 1, tail = budgetStart();
     if (visibleStart === null || visibleStart > last) {
       // A reopened thread comes back where the reader left it when that place is
-      // still on hand, and to the latest otherwise.
+      // still in the tail it was handed, and to the latest otherwise. The tail
+      // bounds what that can cost and the valve below bounds the heavy case.
       var restored = firstRender && Number.isInteger(saved.visibleStart) ? saved.visibleStart : null;
-      visibleStart = restored !== null && restored >= tail && restored >= partsStart && restored <= last ? restored : tail;
+      visibleStart = restored !== null && restored >= partsStart && restored <= last ? restored : tail;
       windowReset = restored !== null && visibleStart !== restored;
+      restoredPlace = !windowReset && visibleStart === restored;
     }
     if (visibleStart < partsStart) visibleStart = Math.max(partsStart, tail);
-    if (followLatest && !hasSelection(transcript) && visibleStart < tail) visibleStart = tail;
+    if (followLatest && !restoredPlace && !hasSelection(transcript) && visibleStart < tail) visibleStart = tail;
     if (!hasSelection(transcript) && (partsTotal - visibleStart > HARD_ROWS || windowWeight(visibleStart) > HARD_WEIGHT)) reclaimAboveViewport(hardStart());
     var epoch = forkEpoch(), existing = new Map(), keys = new Map(), changes = [], drop = [];
     for (var c = 0; c < transcript.children.length; c++) existing.set(transcript.children[c]._partIndex, transcript.children[c]);
@@ -1820,15 +1842,18 @@ const CLIENT_JS = String.raw`
     if(partsStart===0)return;
     // The cache is exhausted behind the reader: ask for the parts before it.
     loadingEarlier=true;
-    vscode.postMessage({type:'requestParts',requestId:++loadRequest,before:partsStart,limit:FETCH_PARTS});
+    // One part of overlap: the answer's last part has to be the cache's first,
+    // which is the witness that it was cut from the transcript still on screen.
+    vscode.postMessage({type:'requestParts',requestId:++loadRequest,before:partsStart+1,limit:FETCH_PARTS+1});
   }
   function receivePartsWindow(m){
     if(m.requestId!==loadRequest)return;
     loadingEarlier=false;
-    // Contiguity is what matters: the answer has to end where the cache begins.
-    // The thread may have grown since the request, so its total is not checked.
-    if(m.sessionId!==sessionId||!Array.isArray(m.parts)||!m.parts.length||m.start+m.parts.length!==partsStart){renderAll(false);return;}
-    cachedParts=m.parts.concat(cachedParts);partsStart=m.start;
+    // Contiguity is what matters: the answer has to end one past where the cache
+    // begins, and the part they share has to still be that part. The thread may
+    // have grown since the request, so its total is not checked.
+    if(m.sessionId!==sessionId||!Array.isArray(m.parts)||m.parts.length<2||m.start+m.parts.length!==partsStart+1||!samePart(m.parts[m.parts.length-1],cachedParts[0])){renderAll(false);return;}
+    cachedParts=m.parts.slice(0,m.parts.length-1).concat(cachedParts);partsStart=m.start;
     boundCache();
     var target=chunkStart(visibleStart);
     if(target<visibleStart)visibleStart=target;

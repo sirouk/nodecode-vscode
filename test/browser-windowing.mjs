@@ -297,6 +297,45 @@ try{
     assert.equal(await lastIndex(page),parts.length-1);
     assert.deepEqual(errors,[]);await page.close();
   });
+  // 2504 parts, so that after one fetch the cache front lands on a system line:
+  // the part kind that carries no turn identity for a witness to hold onto.
+  const systemFront=()=>thread(500).concat([1,2,3,4].map(i=>({kind:'system',text:'Extra line '+i,level:'info'})));
+  // Replace the transcript under the reader, keeping a marked line in the prefix
+  // the panel already holds, then read back over it: the marked line may only
+  // appear if the panel kept a prefix from the abandoned transcript.
+  async function stalePrefix(mark,replay,mutateBoundary){
+    const parts=systemFront();
+    parts[2100]={...parts[2100],text:mark+' '+parts[2100].text};
+    const {page,errors}=await open({},parts);
+    await scrollBack(page,2);
+    await page.evaluate(({mark,replay,mutateBoundary,tailStart})=>{
+      const all=window.__all.map(p=>p.text&&String(p.text).startsWith(mark)?{...p,text:String(p.text).slice(mark.length+1)}:p);
+      // The witness is the part the new tail starts with, which the cache holds at
+      // the front of that overlap: a system line, with nothing but its text to go by.
+      if(mutateBoundary)all[tailStart]={...all[tailStart],text:all[tailStart].text+' (and it was cancelled, not completed)'};
+      window.__all=all;window.__ship(replay?{replayComplete:false,cached:true}:{});
+    },{mark,replay,mutateBoundary,tailStart:parts.length-TAIL});
+    await page.waitForTimeout(200);
+    for(let i=0;i<4;i++)await gestureUp(page);
+    const seen=await page.evaluate(mark=>document.getElementById('transcript').textContent.includes(mark),mark);
+    const rendered=await rows(page);
+    assert.deepEqual(errors,[]);await page.close();
+    return {seen,rendered};
+  }
+  await check('a replaced transcript whose boundary is a system line is not merged',async()=>{
+    // Both boundaries are system lines with no turn identity; only their text
+    // length tells them apart, so this is the witness that has to hold.
+    const {seen,rendered}=await stalePrefix('STALE-A',false,true);
+    assert(rendered>200,'the reader did read back over the replaced prefix ('+rendered+' rows)');
+    assert(!seen,'no line from the abandoned transcript is left on screen');
+  });
+  await check('a transcript restored under the reader starts over even when its boundary still matches',async()=>{
+    // The boundary part is untouched here, so the witness cannot help: the restore
+    // has to be taken on its own word.
+    const {seen,rendered}=await stalePrefix('STALE-B',true,false);
+    assert(rendered>200,'the reader did read back over the restored prefix ('+rendered+' rows)');
+    assert(!seen,'a restored transcript leaves no line from the one it replaced');
+  });
   await check('a thread longer than the cache is readable all the way to its first message',async()=>{
     // The cache is capped, and trimming it must never drop the slice a fetch just
     // handed over: on a thread longer than the cap that used to wedge the reader

@@ -1403,7 +1403,12 @@ const CLIENT_JS = String.raw`
     if(!a||!b)return false;
     if(a.kind!==b.kind||a.turnNumber!==b.turnNumber||(a.forkTurnId||'')!==(b.forkTurnId||''))return false;
     if(a.call||b.call)return !!(a.call&&b.call&&a.call.callId===b.call.callId);
-    return (a.childSessionId||'')===(b.childSessionId||'');
+    if(a.childSessionId||b.childSessionId)return (a.childSessionId||'')===(b.childSessionId||'');
+    // System lines carry no turn identity at all, so without this any two of them
+    // witness as the same part and a prefix cut from an abandoned transcript is
+    // kept. Their text is pushed complete and never appended to - only the
+    // streaming tail grows, far from a cache boundary - so its length is stable.
+    return (a.text||'').length===(b.text||'').length;
   }
 
   function syncParts(view){
@@ -1417,7 +1422,10 @@ const CLIENT_JS = String.raw`
     // longer the part the cache holds at that index - starts over from the tail
     // it was handed.
     var overlap = start - partsStart;
-    if (session === cacheSession && total >= partsTotal && overlap >= 0 && overlap <= cachedParts.length
+    // A restored projection replaces the transcript and says so: replayComplete is
+    // false while its parts are already cached, which is the one replacement the
+    // boundary witness below cannot be relied on to notice.
+    if (session === cacheSession && view.replayComplete !== false && total >= partsTotal && overlap >= 0 && overlap <= cachedParts.length
         && (overlap === cachedParts.length || samePart(cachedParts[overlap], incoming[0]))) {
       cachedParts = cachedParts.slice(0, overlap).concat(incoming);
       partsTotal = total;

@@ -202,6 +202,61 @@ test('a fat transcript is bounded by what it weighs, not by how many rows it hol
   assert(sliceBytes<3000000,`one scroll-back slice serialized ${(sliceBytes/1048576).toFixed(2)} MB`);
 });
 
+test('a tick that changes neither the recorded files nor the prompts does not reship them', async () => {
+  const posted=[];
+  const patch='@@ -1,1 +1,1 @@\n-'+'old line\n+'+'z'.repeat(400000);
+  const view={sessionId:'files',cwd:'/work',title:'files',parts:[{kind:'user',turnNumber:0,text:'first prompt'}],
+    modifiedFiles:[{path:'src/a.ts',callId:'c1',changeCount:1,added:2,removed:1,binary:false,patch}]};
+  const prompts=['first prompt'];
+  const panel=Object.create(SessionPanel.prototype);
+  panel.conversationImages=new Map(); // Object.create skips field initializers
+  // The store builds a fresh array on every call; only its strings persist.
+  panel.controller={sessionId:'files',store:{replaying:false,view:()=>view,userPrompts:()=>prompts.slice()}};
+  panel.panel={webview:{postMessage:m=>posted.push(m)}};
+  panel.postMessage=m=>{panel.panel.webview.postMessage(m);};
+  panel.postState();
+  const first=posted.find(m=>m.type==='state');
+  assert.equal(first.view.modifiedFiles[0].path,'src/a.ts','the first state a document sees carries the recorded files');
+  assert.deepEqual(first.history,prompts,'and the prompt history');
+  const withFiles=JSON.stringify(first).length;
+
+  posted.length=0;panel.postState();
+  const idle=posted.find(m=>m.type==='state');
+  assert(!('modifiedFiles' in idle.view),'a tick that recorded no change ships no patch text');
+  assert.equal(idle.view.modifiedFilesOmitted,true,'and says the list is the one the panel already has');
+  assert(!('history' in idle),'a tick with no new prompt ships no prompt history');
+  assert.equal(idle.historyOmitted,true,'and says so');
+  assert(JSON.stringify(idle).length<withFiles/100,`an unchanged tick still serialized ${(JSON.stringify(idle).length/1024).toFixed(0)} KB of ${(withFiles/1024).toFixed(0)} KB`);
+
+  posted.length=0;
+  view.modifiedFiles=[{path:'src/a.ts',callId:'c2',changeCount:2,added:3,removed:1,binary:false,patch:patch+'\n+more'}];
+  panel.postState();
+  const changed=posted.find(m=>m.type==='state');
+  assert.equal(changed.view.modifiedFiles[0].changeCount,2,'a newly recorded change ships the list again');
+  assert.equal(changed.historyOmitted,true,'while the prompt history, unchanged, is still left out');
+
+  posted.length=0;
+  prompts.push('second prompt');view.parts.push({kind:'user',turnNumber:1,text:'second prompt'});
+  panel.postState();
+  assert.deepEqual(posted.find(m=>m.type==='state').history,prompts,'a new prompt ships the history again');
+
+  // A reloaded document has nothing to carry over, and another thread's lists are
+  // its own: both have to be shipped whole.
+  panel.ready=false;panel.pendingContext=[];
+  posted.length=0;
+  await panel.onMessage({type:'ready'});
+  const reloaded=posted.find(m=>m.type==='state');
+  assert.equal(reloaded.view.modifiedFiles.length,1,'a reloaded document gets the recorded files');
+  assert.deepEqual(reloaded.history,prompts,'and the prompt history');
+
+  posted.length=0;
+  view.sessionId='other';
+  panel.postState();
+  const switched=posted.find(m=>m.type==='state');
+  assert.equal(switched.view.modifiedFiles.length,1,'a thread switch ships its own files, not the last thread\u2019s');
+  assert.deepEqual(switched.history,prompts,'and its own prompt history');
+});
+
 
 test('deleting the selected session clears its sidebar without reattaching it', () => {
   const received=event(), disposed=event(), visibility=event();

@@ -108,5 +108,21 @@ try{
       assert.deepEqual(errors,[]);
     }finally{await page.close();}
   });
+  await check('a tick that omits unchanged collections keeps the file list and the prompt history',async()=>{
+    const {page,errors}=await open();
+    try{
+      await emit(page,{...state,history:['an earlier prompt'],view:{...state.view,modifiedFiles:[{path:'src/kept.ts',added:2,removed:1,changeCount:1,patch:'@@ -1 +1 @@\n-old\n+new'}]}});
+      await page.locator('#fileDetails > summary').click();
+      assert.equal(await page.locator('#fileList .diff-file').count(),1,'the recorded file is listed');
+      // The next tick ships neither collection: the panel keeps what it holds.
+      await emit(page,{...state,historyOmitted:true,view:{...state.view,modifiedFilesOmitted:true}});
+      assert.equal(await page.locator('#fileList .diff-file').count(),1,'an omitted file list is the one already shown');
+      assert((await page.locator('#fileList .diff-file').first().textContent()).includes('kept.ts'),'and it is still the same file');
+      await page.locator('#composer').click();
+      await page.keyboard.press('ArrowUp');
+      assert.equal(await page.inputValue('#composer'),'an earlier prompt','an omitted prompt history is the one already held');
+      assert.deepEqual(errors,[]);
+    }finally{await page.close();}
+  });
 }finally{await browser.close();}
 if(failures.length)process.exitCode=1;

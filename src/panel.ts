@@ -159,6 +159,12 @@ export class SessionPanel {
 
   private readonly disposables: vscode.Disposable[] = [];
   private disposed = false;
+  // What the last state message carried, so a tick that changes neither can say
+  // so instead of serializing both again. Cleared for a reloaded document, which
+  // has nothing to carry over, and for a different thread, whose lists are its own.
+  private shippedSession: string | undefined;
+  private shippedFiles: StoreView["modifiedFiles"] | null = null;
+  private shippedPrompts: string[] | null = null;
   private attachmentSource = {};
   private connection: ConnectionState = "connecting";
   private connectionAttempts = 0;
@@ -298,6 +304,21 @@ export class SessionPanel {
     }) } : part);
   }
 
+  /** Exact and cheap: string equality is by value, so this walks the two lists
+   * comparing them instead of serializing one to find out whether it moved. */
+  private static samePrompts(next: string[], last: string[] | null): boolean {
+    if (last === null || next.length !== last.length) return false;
+    return next.every((text, index) => text === last[index]);
+  }
+  private static sameFiles(next: StoreView["modifiedFiles"], last: StoreView["modifiedFiles"] | null): boolean {
+    if (last === null || next.length !== last.length) return false;
+    return next.every((file, index) => {
+      const was = last[index];
+      return file.path === was.path && file.callId === was.callId && file.changeCount === was.changeCount
+        && file.added === was.added && file.removed === was.removed && file.binary === was.binary
+        && file.truncated === was.truncated && file.patch === was.patch;
+    });
+  }
   private postState(): void {
     if (this.disposed || this.controller.store.replaying) return;
     const view = this.controller.store.view();
@@ -309,12 +330,29 @@ export class SessionPanel {
     // Counting rows does not deliver that on its own: 240 tool results of 64 KB
     // measured 5.1 MB and 10.5 ms per tick, the cost the tail exists to avoid.
     const start = SessionPanel.boundedFrom(view.parts, view.parts.length, SessionPanel.tailParts, SessionPanel.tailWeight, 1);
+    const { modifiedFiles, ...rest } = view;
+    // Two derived collections would otherwise ride along whole on every streamed
+    // token: the patch text of every file this thread recorded, and every prompt it
+    // ever had. They move rarely, so a tick that changes neither says so and the
+    // panel keeps the copy it has.
+    if (view.sessionId !== this.shippedSession) { this.shippedSession = view.sessionId; this.shippedFiles = null; this.shippedPrompts = null; }
+    const prompts = this.controller.store.userPrompts();
+    const filesUnchanged = SessionPanel.sameFiles(modifiedFiles, this.shippedFiles);
+    const promptsUnchanged = SessionPanel.samePrompts(prompts, this.shippedPrompts);
+    if (!filesUnchanged) this.shippedFiles = modifiedFiles;
+    if (!promptsUnchanged) this.shippedPrompts = prompts;
     this.postMessage({
       type: "state",
-      view: { ...view, parts: this.decorateParts(view.parts.slice(start), view.cwd), partsStart: start, partsTotal: view.parts.length },
+      view: {
+        ...rest,
+        parts: this.decorateParts(view.parts.slice(start), view.cwd),
+        partsStart: start,
+        partsTotal: view.parts.length,
+        ...(filesUnchanged ? { modifiedFilesOmitted: true } : { modifiedFiles }),
+      },
       connection: this.connection,
       attempts: this.connectionAttempts,
-      history: this.controller.store.userPrompts(),
+      ...(promptsUnchanged ? { historyOmitted: true } : { history: prompts }),
     });
   }
 
@@ -491,6 +529,7 @@ export class SessionPanel {
             this.attachmentSource = {};
           }
           this.ready = true;
+          this.shippedSession = undefined; this.shippedFiles = null; this.shippedPrompts = null;
           if (this.pendingThreadNavigation) { this.restoreThreadNavigation(this.pendingThreadNavigation); this.pendingThreadNavigation = undefined; }
           if (this.pendingHistory) { this.pendingHistory = false; this.postMessage({type:"showSessions"}); }
           for (const text of this.pendingContext.splice(0)) this.postMessage({ type: "addContext", text });
@@ -1161,6 +1200,11 @@ const CLIENT_JS = String.raw`
     var answerWithheld = loadingEarlier;
     loadingEarlier = false;
     var wasNearBottom = followLatest;
+    // A collection the extension left out is one that has not changed since the
+    // last tick: it ships the recorded files and the prompt history only when they
+    // move, so carry over the copy this panel already holds.
+    if (m.historyOmitted && state) m.history = state.history;
+    if (m.view && m.view.modifiedFilesOmitted && state && state.view) m.view.modifiedFiles = state.view.modifiedFiles;
     state = m;
     syncParts(m.view);
     renderAll(wasNearBottom);

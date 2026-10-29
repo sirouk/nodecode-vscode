@@ -316,6 +316,34 @@ try{
     assert.equal(await lastIndex(page),total,'a part that arrives at the end is followed onto the screen');
     assert.deepEqual(errors,[]);await page.close();
   });
+  await check('a selection in progress is not slid out of the window',async()=>{
+    const {page,errors}=await open({},thread(900));
+    for(let i=0;i<12;i++){await gestureUp(page);if(await firstIndex(page)===0)break;}
+    assert.equal(await page.evaluate(()=>document.getElementById('historyLater').classList.contains('hidden')),false,'the window stops short of the newest');
+    const held=()=>page.evaluate(()=>{const s=window.getSelection();return s&&!s.isCollapsed?s.toString():null;});
+    await page.evaluate(()=>{
+      const row=document.querySelector('#transcript').children[3];
+      const range=document.createRange();range.selectNodeContents(row);
+      const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+    });
+    const text=await held(),place=await firstIndex(page);
+    assert(text&&text.length>4,'the reader really is holding a selection');
+    const nearEnd=()=>page.evaluate(()=>{const b=document.getElementById('scroll');b.scrollTop=b.scrollHeight-b.clientHeight-900;b.dispatchEvent(new Event('scroll'));});
+    await nearEnd();await page.waitForTimeout(240);
+    assert.equal(await held(),text,'dragging toward the far end keeps what the reader selected');
+    assert.equal(await firstIndex(page),place,'and the window does not slide out from under it');
+    // The asymmetry: loading older parts prepends and drops nothing, so it must
+    // still answer the same reader while they hold a selection.
+    await page.evaluate(()=>{const b=document.getElementById('scroll');b.scrollTop=60;b.dispatchEvent(new Event('scroll'));});
+    for(let k=0;k<30;k++){await page.waitForTimeout(16);if(await page.evaluate(()=>window.posted.some(m=>m.type==='requestParts'&&!m.__served)))await page.evaluate(()=>window.__serve());else break;}
+    await page.waitForTimeout(120);
+    assert.equal(await held(),text,'and reading backwards with a selection held still works');
+    assert(await firstIndex(page)<place,'older parts arrived ('+place+' -> '+await firstIndex(page)+')');
+    await page.evaluate(()=>window.getSelection().removeAllRanges());
+    await nearEnd();await page.waitForTimeout(240);
+    assert(await firstIndex(page)>place,'the same gesture slides the window once the selection is gone');
+    assert.deepEqual(errors,[]);await page.close();
+  });
   await check('a saved place inside the shipped tail is where the reader comes back to',async()=>{
     const parts=thread(500),place=parts.length-TAIL;
     const {page,errors}=await open({sessions:{'window-session':{visibleStart:place,scrollTop:0,thread:'window-session'}},'thread':'window-session'},parts);
@@ -338,6 +366,26 @@ try{
     const now={first:await firstIndex(page),rows:await rows(page)};
     assert(now.first>before,'the window starts over from the new tail ('+before+' -> '+now.first+')');
     assert.equal(now.first,total-now.rows,'every row on screen belongs to the new transcript');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a transcript replaced under a reader deep in a truncated window starts over',async()=>{
+    const {page,errors}=await open({},thread(900));
+    for(let i=0;i<12;i++){await gestureUp(page);if(await firstIndex(page)===0)break;}
+    const later=()=>page.evaluate(()=>document.getElementById('historyLater').classList.contains('hidden'));
+    assert.equal(await later(),false,'the reader is inside a window that stops short of the newest');
+    // A restore in progress: the same session, a much shorter transcript, and a
+    // boundary the cache still holds, so only replayComplete says it is a replace.
+    await page.evaluate(()=>{window.__all=window.__all.slice(0,300);window.__ship({replayComplete:false});});
+    await page.waitForTimeout(120);
+    await page.evaluate(()=>window.__ship({replayComplete:true}));
+    await page.waitForTimeout(200);
+    const total=await page.evaluate(()=>window.__all.length);
+    const shown=await rows(page);
+    assert.equal(await lastIndex(page),total-1,'the reader ends up on the new transcript, at its end');
+    assert.equal(await firstIndex(page),total-shown,'every row on screen belongs to the new transcript');
+    assert(shown<=TAIL,'and the window is the tail it was handed ('+shown+' rows for '+total+' parts)');
+    assert.equal(await later(),true,'nothing further is offered at the end of a thread that fits');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyEarlier').classList.contains('hidden')),false,'older history is still offered');
     assert.deepEqual(errors,[]);await page.close();
   });
   await check('a thread of huge results is bounded by weight, not by row count',async()=>{

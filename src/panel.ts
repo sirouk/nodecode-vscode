@@ -1919,6 +1919,9 @@ const CLIENT_JS = String.raw`
   function maybeLoadEarlier(){
     // The follow flag is set by a listener that runs after this one, so gate on
     // where the reader actually is; loadEarlier stops following by itself.
+    // Prepending is safe with a selection held - it drops no rows, and the
+    // anchor compensation keeps the reader's place - so this path does not wait
+    // for one the way the forward slide does.
     if(firstRender||loadingEarlier||nearBottom()||visibleStart===null||visibleStart===0||autoLoads>=8)return;
     if(scrollBox.scrollTop>=LOAD_NEAR_PX||scrollBox.scrollHeight<scrollBox.clientHeight*2)return;
     autoLoads++;
@@ -1938,7 +1941,11 @@ const CLIENT_JS = String.raw`
     requestAnimationFrame(maybeLoadLater);
   }
   function maybeLoadLater(){
-    if(firstRender||visibleStart===null||autoLoads>=8||atThreadEnd())return;
+    // Dragging a selection scrolls the box too, and a slide drops the rows it
+    // leaves behind, taking the selection with them: while the reader holds one,
+    // only their own click moves the window forward. Loading older parts is the
+    // other way round - it prepends, drops nothing, and must not wait.
+    if(firstRender||visibleStart===null||autoLoads>=8||atThreadEnd()||hasSelection(transcript))return;
     if(scrollBox.scrollHeight-scrollBox.scrollTop-scrollBox.clientHeight>=LOAD_NEAR_PX)return;
     if(scrollBox.scrollHeight<scrollBox.clientHeight*2)return;
     autoLoads++;

@@ -168,7 +168,7 @@ export class SessionPanel {
   private pendingContext: string[] = [];
   private pendingHistory = false;
   private pendingThreadNavigation?: ThreadNavigationState;
-  private readonly conversationImages = new Map<string, { url?: string; error?: string }>();
+  private readonly conversationImages = new Map<string, { url?: string; error?: string; pending?: Promise<void> }>();
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -232,19 +232,21 @@ export class SessionPanel {
     } catch { return undefined; }
   }
 
-  private conversationImage(id: string): { url?: string; error?: string } {
+  private conversationImage(id: string): { url?: string; error?: string; pending?: Promise<void> } {
     let image = this.conversationImages.get(id);
     if (!image) {
       image = {};
       this.conversationImages.set(id, image);
       const controller = this.controller, result = image;
-      void controller.imageDataUrl(id).then((url) => {
+      // The tail is re-posted whenever a url lands. An older slice is shipped
+      // once and never revisited, so it carries the fetch with it and waits.
+      result.pending = controller.imageDataUrl(id).then((url) => {
         if (this.disposed || this.controller !== controller) return;
-        result.url = url;
+        result.url = url; result.pending = undefined;
         this.postState();
       }, (error) => {
         if (this.disposed || this.controller !== controller) return;
-        result.error = String(error);
+        result.error = String(error); result.pending = undefined;
         this.notes.log(`saved image ${id} unavailable: ${String(error)}`);
         this.postState();
       });
@@ -252,11 +254,29 @@ export class SessionPanel {
     return image;
   }
 
+  /** How long an older slice waits for its images before shipping without them. */
+  private static readonly sliceImageSettleMs = 4000;
+
+  /** Ship one slice of older transcript, its saved images settled first. */
+  private async postPartsWindow(requestId: unknown, sessionId: string, start: number, slice: StoreView["parts"], cwd: string): Promise<void> {
+    const waiting: Promise<void>[] = [];
+    this.decorateParts(slice, cwd, waiting);
+    if (waiting.length) {
+      await Promise.race([Promise.allSettled(waiting), new Promise((resolve) => setTimeout(resolve, SessionPanel.sliceImageSettleMs))]);
+      if (this.disposed) return;
+    }
+    this.postMessage({ type: "partsWindow", requestId, sessionId, start, total: this.controller.store.view().parts.length, parts: this.decorateParts(slice, cwd) });
+  }
+
   /** Parts a fresh webview receives; the panel asks for older ones as the reader scrolls back. */
   private static readonly tailParts = 240;
 
-  private decorateParts(parts: StoreView["parts"], cwd: string): StoreView["parts"] {
-    return parts.map((part) => part.kind === "tool" ? { ...part, call: { ...part.call, imageUrl: this.toolImageUrl(part.call, cwd) } } : (part.kind === "user" || part.kind === "assistant") && part.images?.length ? { ...part, images: part.images.map((image) => ({ ...image, ...this.conversationImage(image.id) })) } : part);
+  private decorateParts(parts: StoreView["parts"], cwd: string, waiting?: Promise<void>[]): StoreView["parts"] {
+    return parts.map((part) => part.kind === "tool" ? { ...part, call: { ...part.call, imageUrl: this.toolImageUrl(part.call, cwd) } } : (part.kind === "user" || part.kind === "assistant") && part.images?.length ? { ...part, images: part.images.map((image) => {
+      const found = this.conversationImage(image.id), { pending, ...shown } = found;
+      if (waiting && pending) waiting.push(pending);
+      return { ...image, ...shown };
+    }) } : part);
   }
 
   private postState(): void {
@@ -458,12 +478,17 @@ export class SessionPanel {
           return;
         case "requestParts": {
           // Older transcript for a reader scrolling back; the panel keeps a window.
+          // A slice cut from a store that is still replaying would carry rows
+          // that are not finished being built, prepended above the tail where no
+          // later state reaches them: a completed tool pinned as running. The
+          // panel drops the request and asks again on the state that ends it.
+          if (this.controller.store.replaying) return;
           const view = this.controller.store.view();
           const limit = Math.min(400, Math.max(1, Math.floor(Number(message.limit)) || 200));
           const before = Number(message.before);
           const end = Number.isFinite(before) ? Math.max(0, Math.min(Math.floor(before), view.parts.length)) : view.parts.length;
           const from = Math.max(0, end - limit);
-          this.postMessage({ type: "partsWindow", requestId: message.requestId, sessionId: id, start: from, total: view.parts.length, parts: this.decorateParts(view.parts.slice(from, end), view.cwd) });
+          void this.postPartsWindow(message.requestId, id, from, view.parts.slice(from, end), view.cwd);
           return;
         }
         case "openThread": {
@@ -809,7 +834,7 @@ const PANEL_CSS = `
 ${ACTIVITY_CSS}
 :root{color-scheme:light dark;--bg:var(--vscode-editor-background,#171716);--fg:var(--vscode-editor-foreground,#e8e5df);--dim:var(--vscode-descriptionForeground,#99958c);--border:var(--vscode-panel-border,#373630);--surface:var(--vscode-sideBar-background,#20201d);--accent:#fa8b3e;--accentfg:#20140a;--err:var(--vscode-errorForeground,#f48771);--warn:var(--vscode-editorWarning-foreground,#cca700);--ok:var(--vscode-testing-iconPassed,#73c991)}
 *{box-sizing:border-box}html,body{height:100%;margin:0}body{background:var(--bg);color:var(--fg);font:var(--vscode-font-size,13px)/1.6 var(--vscode-font-family,system-ui,sans-serif)}button,textarea{font:inherit}button{color:inherit;cursor:pointer;background:transparent;border:1px solid transparent;border-radius:6px;padding:5px 9px;line-height:1.4}button:hover{background:var(--vscode-toolbar-hoverBackground,#ffffff10)}button:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--vscode-focusBorder,var(--accent));outline-offset:2px}button:disabled{opacity:.4;cursor:default}button.danger{color:var(--err)}button.primary{background:var(--accent);color:var(--accentfg);font-weight:650}button.primary:hover{filter:brightness(1.1)}.hidden{display:none!important}.grow{flex:1;min-width:0}.sub{font-size:11px;color:var(--dim)}#app{height:100vh;display:flex;flex-direction:column}#topbar{display:flex;align-items:center;gap:8px;min-height:34px;padding:3px 10px;border-bottom:1px solid var(--border)}.brand{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:650;letter-spacing:-.3px}.brand img{width:22px;height:22px;border-radius:4px}.title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--dim)}.btns{display:flex;gap:2px}.icon{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}.icon-btn{width:30px;height:30px;padding:6px;display:inline-flex;align-items:center;justify-content:center}#topbar .icon-btn{width:26px;height:26px;padding:4px;display:flex}#topbar .icon-btn .icon{width:14px;height:14px}#menuWrap{position:relative}#menuWrap summary{list-style:none;cursor:pointer}#menuWrap summary::-webkit-details-marker{display:none}.menu{position:absolute;right:0;top:calc(100% + 4px);z-index:4;width:205px;border:1px solid var(--border);padding:5px;border-radius:8px;background:var(--vscode-menu-background,var(--surface));box-shadow:0 8px 28px #0004}.menu button{display:block;width:100%;text-align:left;font-size:12px;padding:7px 10px}.menu hr{border:0;border-top:1px solid var(--border);margin:4px}.menu button .icon{margin-right:8px}#scroll{flex:1;min-height:0;overflow:auto;overflow-anchor:none;padding:22px 24px;scrollbar-gutter:stable}#transcript{max-width:820px;margin:0 auto}.msg{margin:0 0 22px}.msg.user{display:flex;justify-content:flex-end}.bubble{overflow-wrap:anywhere;min-width:0}.msg.user .bubble{max-width:85%;background:var(--surface);border:1px solid var(--border);border-radius:12px 12px 3px 12px;padding:10px 15px}.msg.assistant .bubble{width:100%}.speaker{display:flex;gap:7px;align-items:center;color:var(--dim);font-size:11px;font-weight:600;margin-bottom:7px}#attachments{display:flex;gap:8px;flex-wrap:wrap}.attachment{position:relative;margin:6px 0}.attachment img{width:64px;height:64px;object-fit:cover;border:1px solid var(--border);border-radius:7px}.attachment button{position:absolute;right:-6px;top:-6px;border:1px solid var(--border);border-radius:50%;background:var(--surface);font-size:12px;line-height:1;padding:3px 5px}.message-image{display:block;max-width:min(100%,480px);max-height:360px;object-fit:contain;border:1px solid var(--border);border-radius:8px;margin:8px 0}.fork-turn{font-size:10px;padding:1px 5px;color:var(--dim)}.copy-text{margin-left:auto;font-size:10px;color:var(--dim);padding:1px 5px}.reasoning summary .copy-text{float:right}.speaker img{width:20px;height:20px;border-radius:4px}.msg p{margin:8px 0}.msg p:first-child{margin-top:0}.msg p:last-child{margin-bottom:0}pre.code,pre.tool-io{background:var(--vscode-textCodeBlock-background,var(--surface));border:1px solid var(--border);border-radius:7px;padding:10px 12px;overflow:auto;font:12px/1.6 var(--vscode-editor-font-family,monospace);tab-size:2}pre.tool-io{padding:6px 8px;font-size:11px;line-height:1.5}code.inline{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 4px;font:12px var(--vscode-editor-font-family,monospace)}strong.h{font-size:15px}.li{margin-left:10px}.reasoning{border-left:2px solid var(--accent);margin:4px 0 6px;padding-left:12px;color:var(--dim)}.reasoning summary{cursor:pointer;font-size:12px;padding:3px 0}.reasoning .rbody{white-space:pre-wrap;max-height:min(calc(8 * 1.6em + 2px),var(--thought-cap,156px));overflow:auto;overflow-anchor:none;overscroll-behavior:contain;font-size:12px;padding:2px 0 0}.caret{display:inline-block;width:6px;height:14px;border-radius:2px;background:var(--accent);animation:blink 1s steps(1) infinite;vertical-align:middle}@keyframes blink{50%{opacity:0}}.tool{border:1px solid var(--border);border-radius:6px;margin:5px 0 9px;overflow:hidden}.tool-head{cursor:pointer;font:11px/1.5 var(--vscode-editor-font-family,monospace);padding:5px 9px;background:var(--surface)}.tool-head.running{color:var(--warn)}.tool-head.done{color:var(--dim)}.tool-diff{margin:8px 12px}.tool-metadata{margin:6px 9px}.tool-diff summary{cursor:pointer;font-size:12px}.tool-metadata summary{cursor:pointer;font-size:11px}.tool-head.failed{color:var(--err)}.tool-head.stopped,.tool-head.background{color:var(--warn)}.msg.voided{opacity:.7}.tool-sec{padding:6px 9px}.tool-label{text-transform:uppercase;font-size:10px;letter-spacing:.07em;color:var(--dim)}.tool-sec pre{max-height:320px;margin:4px 0}.sys{color:var(--dim);font-size:12px;text-align:center;margin:12px 0}.sys.warn{color:var(--warn)}.sys.error{color:var(--err)}.welcome{min-height:45vh;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;gap:9px;color:var(--dim)}.welcome img{width:92px;height:92px;border-radius:18px}.welcome h1{font-size:23px;letter-spacing:-.7px;color:var(--fg);margin:4px 0}.welcome p{max-width:330px;margin:0}.welcome small{font-size:11px;margin-top:8px}#procBar,#queueBar,#threadBar{display:flex;gap:4px;flex-wrap:wrap;padding:2px 12px}#procBar:empty,#queueBar:empty,#threadBar:empty{display:none}.strip-label{font-size:11px;color:var(--dim);padding:4px 3px;align-self:center}.chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:11px;max-width:100%;background:var(--surface)}.chip .cmd{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:350px}.chip button{padding:1px 4px;font-size:11px}.thread{max-width:240px;text-align:left}.thread .state{width:6px;height:6px;border-radius:50%;background:var(--dim)}.thread.running .state{background:var(--accent)}#statusLine{font-size:11px;color:var(--dim);max-width:none;margin:auto;width:100%;display:flex;justify-content:space-between;padding:4px 4px 0;min-height:21px}.connection{display:inline-flex;align-items:center;gap:5px}.connection:before{content:'';width:6px;height:6px;border-radius:50%;background:var(--ok)}.connection.offline:before{background:var(--warn)}#composerArea{padding:6px 8px 10px}#composerBar{width:100%;max-width:none;margin:auto;border:1px solid var(--border);border-radius:12px;background:var(--vscode-input-background,var(--surface));padding:10px 12px 8px}#composerBar:focus-within{border-color:var(--accent)}#composer{display:block;width:100%;resize:none;min-height:42px;max-height:180px;overflow:auto;background:transparent;color:var(--vscode-input-foreground,var(--fg));border:0;outline:0;padding:1px 2px;font:inherit}#composer::placeholder{color:var(--vscode-input-placeholderForeground,var(--dim))}.composer-actions{display:flex;align-items:center;gap:6px;margin-top:7px}.selector{font-size:11px;color:var(--dim);padding:4px 6px;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.selector .icon{width:13px;height:13px;margin-right:4px}.composer-hint{text-align:center;color:var(--dim);font-size:10px;padding-top:6px}#jumpBtn{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);border:1px solid var(--border);background:var(--surface);box-shadow:0 3px 12px #0003;font-size:11px;border-radius:20px;padding:5px 12px}#conversation{flex:1;min-height:0;display:flex;position:relative;flex-direction:column}a{color:var(--vscode-textLink-foreground,#fa8b3e)}@media(max-width:480px){#topbar{padding:3px 8px;gap:6px}.brand-name{display:none}#scroll{padding:16px 12px}#composerArea{padding:6px 8px}.composer-hint{display:none}}@media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
-#commandResult{max-height:230px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:auto}#commandBody{padding:6px 10px}.command-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px}.command-tabs [aria-pressed="true"]{background:var(--surface);border-color:var(--border)}.command-row{display:flex;gap:4px}.command-row>button:first-child{flex:1;text-align:left}.command-row .sub,.file-option .sub{display:block;font-size:11px}#runtimeBanner{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--warn);font-size:12px}#runtimeBanner>div{display:flex;gap:6px;margin-top:5px}#historyEarlier{display:block;margin:0 auto 16px;font-size:12px;color:var(--dim)}#topbar{position:relative}.title-button{display:block;max-width:100%;min-height:24px;padding:2px 0;border:0;text-align:left;color:var(--fg);font-weight:600;font-size:12px}.title-input,.session-rename-input{width:100%;min-width:0;background:var(--vscode-input-background,var(--surface));color:var(--fg);border:1px solid var(--vscode-focusBorder,var(--accent));border-radius:4px;padding:4px 6px;font:inherit}#titleInput{height:24px;padding:2px 5px;font-size:12px;line-height:1.4}.session-rename-input{flex:1}.session-rename{flex-shrink:0;width:28px;height:28px;padding:5px;color:var(--dim)}.session-rename .icon{width:14px;height:14px}#sessionPickerWrap{position:static}#sessionPicker{position:absolute;z-index:5;top:calc(100% - 4px);right:10px;width:min(320px,calc(100vw - 24px));border:1px solid var(--border);border-radius:8px;background:var(--vscode-menu-background,var(--surface));box-shadow:0 8px 28px #0004;padding:5px}.history-search{display:block;width:calc(100% - 12px);margin:3px 6px 5px;padding:6px 8px;background:var(--vscode-input-background,var(--bg));color:var(--fg);border:1px solid var(--border);border-radius:5px;font:inherit;font-size:12px}.history-search:focus{outline:1px solid var(--vscode-focusBorder,var(--accent))}.history-status{font-size:11px;color:var(--dim);padding:0 8px 4px}.session-match{white-space:normal!important;display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:3px;font-size:11px;color:var(--dim)}.picker-heading{display:flex;align-items:center;justify-content:space-between;padding:3px 7px;font-size:12px;color:var(--dim)}#sessionChoices{max-height:min(360px,50vh);overflow:auto;overscroll-behavior:contain}.session-row{display:flex;align-items:center;gap:3px}.session-choice{display:block;flex:1;min-width:0;width:100%;text-align:left;padding:8px;border-radius:5px}.session-delete{flex-shrink:0;width:28px;height:28px;padding:5px;color:var(--dim)}.session-delete:hover{color:var(--err)}.session-choice[aria-current="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.session-choice span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.session-choice .sub{margin-top:2px}.welcome #sessionPickerWrap{position:relative}.welcome #sessionPicker{top:auto;bottom:36px;right:50%;transform:translateX(50%);text-align:left}#composerBar{position:relative}#filePicker{position:fixed;top:0;left:0;width:320px;max-height:180px;overflow:auto;z-index:5;background:var(--vscode-menu-background,var(--surface));border:1px solid var(--border);border-radius:8px;padding:4px;box-shadow:0 8px 28px #0004}#optionPicker{display:flex;flex-direction:column;max-height:calc(100vh - 16px);position:fixed;width:340px;max-width:calc(100vw - 16px);z-index:6;background:var(--vscode-menu-background,var(--surface));border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 28px #0004;padding:5px}.model-role-tabs{display:flex;flex-shrink:0;border-top:1px solid var(--border);padding-top:5px;gap:3px}.model-role-tabs button{flex:1;font-size:12px}.model-role-tabs [aria-selected="true"]{background:var(--surface);color:var(--accent)}.backup-row{display:flex;gap:3px;align-items:center;padding:5px}.backup-row>span{flex:1;min-width:0;overflow-wrap:anywhere}.backup-row .sub{display:block}.backup-row button{flex-shrink:0}.backup-trigger{display:flex;gap:7px;align-items:center;padding:5px 8px}.role-default{width:100%;text-align:left;padding:7px}.role-efforts{display:flex;gap:3px;flex-wrap:wrap;padding:5px}.aux-effort-list{flex-direction:column}.aux-effort-list button{width:100%;text-align:left}.role-efforts [aria-pressed="true"]{color:var(--accent);border:1px solid var(--border)}#optionChoices{min-height:0;max-height:280px;overflow:auto;overscroll-behavior:contain}.option-note{font-size:10px;color:var(--dim);padding:7px}.option-row{display:flex;align-items:center;gap:4px}.decider-choice,.reasoning-choice{display:block;width:100%;text-align:left}.option-select{min-width:0;flex:1;text-align:left;padding:7px}.option-select span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.option-select[aria-current="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.option-star{flex-shrink:0;padding:6px}.option-star[aria-pressed="true"]{color:var(--accent)}.option-group{font-size:11px;color:var(--dim);padding:6px 8px 2px}#imagePreview{position:fixed;inset:0;z-index:20;background:#000b;display:flex;align-items:center;justify-content:center;padding:36px}#imagePreview img{max-width:100%;max-height:100%;object-fit:contain}#closeImagePreview{position:absolute;right:10px;top:10px;font-size:24px;color:white}.attachment img,.message-image{cursor:zoom-in}#textAttachments{display:flex;flex-wrap:wrap;gap:6px}.text-attachment{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);border-radius:5px;padding:3px 6px;font-size:11px;max-width:100%}.text-attachment button{padding:1px 3px}.text-attachment .text-file-open{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-attachment.failed{border-color:var(--err)}.file-option{width:100%;text-align:left;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-option[aria-selected="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.message-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}.message-file{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:11px;color:var(--dim)}#fileReferences{display:flex;flex-wrap:wrap;gap:5px}.file-reference{display:inline-flex;align-items:center;max-width:100%;gap:4px;margin:4px 0;border:1px solid var(--border);border-radius:5px;padding:2px 5px;font-size:11px}.file-reference span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-reference button{padding:0 3px}.picker-message{padding:14px 8px;color:var(--dim);font-size:12px}
+#commandResult{max-height:230px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:auto}#commandBody{padding:6px 10px}.command-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px}.command-tabs [aria-pressed="true"]{background:var(--surface);border-color:var(--border)}.command-row{display:flex;gap:4px}.command-row>button:first-child{flex:1;text-align:left}.command-row .sub,.file-option .sub{display:block;font-size:11px}#runtimeBanner{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--warn);font-size:12px}#runtimeBanner>div{display:flex;gap:6px;margin-top:5px}#historyEarlier,#historyLater{display:block;margin:0 auto 16px;font-size:12px;color:var(--dim)}#topbar{position:relative}.title-button{display:block;max-width:100%;min-height:24px;padding:2px 0;border:0;text-align:left;color:var(--fg);font-weight:600;font-size:12px}.title-input,.session-rename-input{width:100%;min-width:0;background:var(--vscode-input-background,var(--surface));color:var(--fg);border:1px solid var(--vscode-focusBorder,var(--accent));border-radius:4px;padding:4px 6px;font:inherit}#titleInput{height:24px;padding:2px 5px;font-size:12px;line-height:1.4}.session-rename-input{flex:1}.session-rename{flex-shrink:0;width:28px;height:28px;padding:5px;color:var(--dim)}.session-rename .icon{width:14px;height:14px}#sessionPickerWrap{position:static}#sessionPicker{position:absolute;z-index:5;top:calc(100% - 4px);right:10px;width:min(320px,calc(100vw - 24px));border:1px solid var(--border);border-radius:8px;background:var(--vscode-menu-background,var(--surface));box-shadow:0 8px 28px #0004;padding:5px}.history-search{display:block;width:calc(100% - 12px);margin:3px 6px 5px;padding:6px 8px;background:var(--vscode-input-background,var(--bg));color:var(--fg);border:1px solid var(--border);border-radius:5px;font:inherit;font-size:12px}.history-search:focus{outline:1px solid var(--vscode-focusBorder,var(--accent))}.history-status{font-size:11px;color:var(--dim);padding:0 8px 4px}.session-match{white-space:normal!important;display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:3px;font-size:11px;color:var(--dim)}.picker-heading{display:flex;align-items:center;justify-content:space-between;padding:3px 7px;font-size:12px;color:var(--dim)}#sessionChoices{max-height:min(360px,50vh);overflow:auto;overscroll-behavior:contain}.session-row{display:flex;align-items:center;gap:3px}.session-choice{display:block;flex:1;min-width:0;width:100%;text-align:left;padding:8px;border-radius:5px}.session-delete{flex-shrink:0;width:28px;height:28px;padding:5px;color:var(--dim)}.session-delete:hover{color:var(--err)}.session-choice[aria-current="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.session-choice span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.session-choice .sub{margin-top:2px}.welcome #sessionPickerWrap{position:relative}.welcome #sessionPicker{top:auto;bottom:36px;right:50%;transform:translateX(50%);text-align:left}#composerBar{position:relative}#filePicker{position:fixed;top:0;left:0;width:320px;max-height:180px;overflow:auto;z-index:5;background:var(--vscode-menu-background,var(--surface));border:1px solid var(--border);border-radius:8px;padding:4px;box-shadow:0 8px 28px #0004}#optionPicker{display:flex;flex-direction:column;max-height:calc(100vh - 16px);position:fixed;width:340px;max-width:calc(100vw - 16px);z-index:6;background:var(--vscode-menu-background,var(--surface));border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 28px #0004;padding:5px}.model-role-tabs{display:flex;flex-shrink:0;border-top:1px solid var(--border);padding-top:5px;gap:3px}.model-role-tabs button{flex:1;font-size:12px}.model-role-tabs [aria-selected="true"]{background:var(--surface);color:var(--accent)}.backup-row{display:flex;gap:3px;align-items:center;padding:5px}.backup-row>span{flex:1;min-width:0;overflow-wrap:anywhere}.backup-row .sub{display:block}.backup-row button{flex-shrink:0}.backup-trigger{display:flex;gap:7px;align-items:center;padding:5px 8px}.role-default{width:100%;text-align:left;padding:7px}.role-efforts{display:flex;gap:3px;flex-wrap:wrap;padding:5px}.aux-effort-list{flex-direction:column}.aux-effort-list button{width:100%;text-align:left}.role-efforts [aria-pressed="true"]{color:var(--accent);border:1px solid var(--border)}#optionChoices{min-height:0;max-height:280px;overflow:auto;overscroll-behavior:contain}.option-note{font-size:10px;color:var(--dim);padding:7px}.option-row{display:flex;align-items:center;gap:4px}.decider-choice,.reasoning-choice{display:block;width:100%;text-align:left}.option-select{min-width:0;flex:1;text-align:left;padding:7px}.option-select span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.option-select[aria-current="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.option-star{flex-shrink:0;padding:6px}.option-star[aria-pressed="true"]{color:var(--accent)}.option-group{font-size:11px;color:var(--dim);padding:6px 8px 2px}#imagePreview{position:fixed;inset:0;z-index:20;background:#000b;display:flex;align-items:center;justify-content:center;padding:36px}#imagePreview img{max-width:100%;max-height:100%;object-fit:contain}#closeImagePreview{position:absolute;right:10px;top:10px;font-size:24px;color:white}.attachment img,.message-image{cursor:zoom-in}#textAttachments{display:flex;flex-wrap:wrap;gap:6px}.text-attachment{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);border-radius:5px;padding:3px 6px;font-size:11px;max-width:100%}.text-attachment button{padding:1px 3px}.text-attachment .text-file-open{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-attachment.failed{border-color:var(--err)}.file-option{width:100%;text-align:left;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-option[aria-selected="true"]{background:var(--vscode-list-activeSelectionBackground,var(--border));color:var(--vscode-list-activeSelectionForeground,var(--fg))}.message-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}.message-file{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:11px;color:var(--dim)}#fileReferences{display:flex;flex-wrap:wrap;gap:5px}.file-reference{display:inline-flex;align-items:center;max-width:100%;gap:4px;margin:4px 0;border:1px solid var(--border);border-radius:5px;padding:2px 5px;font-size:11px}.file-reference span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-reference button{padding:0 3px}.picker-message{padding:14px 8px;color:var(--dim);font-size:12px}
 .md p {
 	margin: 0.35em 0;
 	line-height: 1.55;
@@ -999,7 +1024,7 @@ const PANEL_BODY = `
   </header>
   ${RUNTIME_MARKUP}
   <div id="procBar"></div>
-  <div id="conversation"><div id="scroll"><button id="historyEarlier" class="hidden">Load earlier messages</button><div id="transcript"></div></div><button id="jumpBtn" class="hidden">↓ Latest message</button></div>
+  <div id="conversation"><div id="scroll"><button id="historyEarlier" class="hidden">Load earlier messages</button><div id="transcript"></div><button id="historyLater" class="hidden">Load later messages</button></div><button id="jumpBtn" class="hidden">↓ Latest message</button></div>
   <div id="threadBar" aria-label="Related threads"></div>
   <div id="fileBar" aria-label="Session file changes"></div>
   <div id="queueBar" aria-label="Pending messages"></div>
@@ -1057,7 +1082,7 @@ const CLIENT_JS = String.raw`
   var visibleStart = null, loadingEarlier = false, windowReset = false;
   // The panel holds a slice of the thread: the extension ships a tail and the
   // reader's scroll back asks for the older parts when they are needed.
-  var cachedParts = [], partsStart = 0, partsTotal = 0, loadRequest = 0, autoLoads = 0, lastReclaim = 0, cacheSession = null;
+  var cachedParts = [], partsStart = 0, partsTotal = 0, tailStart = 0, loadRequest = 0, autoLoads = 0, cacheSession = null;
   var readingAnchor = null;
   var histIdx = -1;
   function E(id){ return document.getElementById(id); }
@@ -1110,15 +1135,20 @@ const CLIENT_JS = String.raw`
     if (m.type !== 'state') return;
     // The extension is alive and answering; a request whose window was lost must
     // not leave scroll back switched off, so the next gesture asks again.
+    var answerWithheld = loadingEarlier;
     loadingEarlier = false;
     var wasNearBottom = followLatest;
     state = m;
     syncParts(m.view);
     renderAll(wasNearBottom);
+    // The slice may have been withheld - the store was still replaying, or its
+    // window was lost - so ask again rather than wait for a gesture that has
+    // already happened.
+    if (answerWithheld) requestAnimationFrame(maybeLoadEarlier);
     if(!restoredTextStarted){restoredTextStarted=true;textFiles.filter(function(f){return !f.attachment&&f.text;}).forEach(stageTextFile);}
   });
   function nearBottom(){
-    return scrollBox.scrollHeight - scrollBox.scrollTop - scrollBox.clientHeight < 120;
+    return atThreadEnd() && scrollBox.scrollHeight - scrollBox.scrollTop - scrollBox.clientHeight < 120;
   }
   function esc(s){
     return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
@@ -1204,7 +1234,7 @@ const CLIENT_JS = String.raw`
       pane._userScrollIntent=true;
       if (pane === scrollBox && ev.target.closest('.rbody')) return;
       if (ev.deltaY < 0) setFollow(pane, false);
-      else if (ev.deltaY > 0 && atTail(pane, margin)) setFollow(pane, true);
+      else if (ev.deltaY > 0 && atTail(pane, margin) && canFollow(pane)) setFollow(pane, true);
     }, {passive:true});
     pane.addEventListener('keydown', function(ev){
       if (pane === scrollBox && ev.target.closest('.rbody')) return;
@@ -1218,7 +1248,7 @@ const CLIENT_JS = String.raw`
       if(pane===scrollBox&&ev.target.closest('.rbody'))return;
       pane._userScrollIntent=true;
       var nextY=ev.touches[0]&&ev.touches[0].clientY;
-      if(touchY!==undefined&&nextY!==undefined){if(nextY>touchY)setFollow(pane,false);else if(nextY<touchY&&atTail(pane,margin))setFollow(pane,true);}
+      if(touchY!==undefined&&nextY!==undefined){if(nextY>touchY)setFollow(pane,false);else if(nextY<touchY&&atTail(pane,margin)&&canFollow(pane))setFollow(pane,true);}
       touchY=nextY;
     },{passive:true});
     pane.addEventListener('scroll', function(){
@@ -1233,7 +1263,7 @@ const CLIENT_JS = String.raw`
     pane._readerMoved=Math.abs(delta)>1&&(!layoutChanged||pane._userScrollIntent||pane._interacting);
     pane._userScrollIntent=false;
     var clampedByLayout = pane._follow && !pane._interacting && atTail(pane,pane._margin) && (pane.clientHeight!==pane._lastHeight || pane.scrollHeight<pane._lastScrollHeight);
-    if (pane._readerMoved && !clampedByLayout) setFollow(pane, delta > 0 && atTail(pane, pane._margin));
+    if (pane._readerMoved && !clampedByLayout) setFollow(pane, delta > 0 && atTail(pane, pane._margin) && canFollow(pane));
     pane._lastTop = pane.scrollTop;pane._lastHeight=pane.clientHeight;pane._lastScrollHeight=pane.scrollHeight;
   }
   function updateThoughtSize(){
@@ -1301,14 +1331,31 @@ const CLIENT_JS = String.raw`
   }
   // --- transcript windowing ---
   // The panel renders a bounded slice of the thread and the extension ships a
-  // bounded tail, so opening or streaming a 2000-part conversation costs about
-  // what a short one costs. Rows the reader has scrolled past are reclaimed,
-  // and scrolling back walks the cache first and asks the extension for the
-  // parts behind it.
+  // bounded tail, so opening, streaming or reading a 2000-part conversation
+  // costs about what a short one costs. The window follows the reader both ways:
+  // scrolling back walks the cache first and asks the extension for the parts
+  // behind it, and scrolling on past the far end slides the window forward,
+  // which needs no request because the cache already runs to the tail.
   var WINDOW_ROWS = 160, WINDOW_WEIGHT = 450000, WINDOW_MIN_ROWS = 3;
   var CHUNK_ROWS = 90, CHUNK_WEIGHT = 260000, CHUNK_MIN = 20;
   var HARD_ROWS = 900, HARD_WEIGHT = 2600000;
-  var CACHE_MAX = 2400, LOAD_NEAR_PX = 1200, FETCH_PARTS = 200;
+  var LOAD_NEAR_PX = 1200, FETCH_PARTS = 200;
+
+  function atThreadEnd(){
+    if (!partsTotal) return true;
+    var last = transcript.lastElementChild;
+    return !!last && last._partIndex === partsTotal - 1;
+  }
+  // Following the latest means something only at the end of the thread. The end
+  // of a window that stops short of it is a reading position worth keeping, and
+  // the reader reaches the rest by sliding the window or jumping to the latest.
+  function canFollow(pane){ return pane !== scrollBox || atThreadEnd(); }
+  // The row the reader is looking at: the first one reaching into the box.
+  function visibleRow(){
+    var boxTop = scrollBox.getBoundingClientRect().top;
+    var node = Array.from(transcript.children).find(function(row){ return row.getBoundingClientRect().bottom > boxTop; });
+    return node ? node._partIndex : null;
+  }
 
   function partAt(index){ return cachedParts[index - partsStart]; }
 
@@ -1338,8 +1385,19 @@ const CLIENT_JS = String.raw`
   }
   function budgetStart(){ return walkBack(partsTotal, WINDOW_ROWS, WINDOW_WEIGHT, WINDOW_MIN_ROWS); }
   function chunkStart(from){ return walkBack(from, CHUNK_ROWS, CHUNK_WEIGHT, CHUNK_MIN); }
-  function hardStart(){ return Math.min(walkBack(partsTotal, HARD_ROWS, HARD_WEIGHT, 0), partsTotal - 1); }
-  function windowWeight(from){ var total = 0; for (var i = from; i < partsTotal; i++) total += partWeight(partAt(i)); return total; }
+  // One past the last index the window renders, counted forward from the reader,
+  // so the window is bounded below as well as above: reading back through a long
+  // thread cannot leave all of it on screen.
+  function walkForward(from, rows, weight){
+    var total = 0, count = 0;
+    for (var i = from; i < partsTotal; i++) {
+      var w = partWeight(partAt(i));
+      if (count > 0 && (count >= rows || total + w > weight)) return i;
+      total += w; count++;
+    }
+    return partsTotal;
+  }
+  function windowEnd(){ return visibleStart === null ? partsTotal : walkForward(visibleStart, HARD_ROWS, HARD_WEIGHT); }
 
   // A row is rebuilt only when something it shows changed. Structured values
   // are fingerprinted (lengths and sampled characters, never a full copy) and
@@ -1416,6 +1474,7 @@ const CLIENT_JS = String.raw`
     var start = view && Number.isInteger(view.partsStart) ? view.partsStart : 0;
     var total = view && Number.isInteger(view.partsTotal) ? view.partsTotal : start + incoming.length;
     var session = view ? view.sessionId : null;
+    tailStart = start;
     // The same transcript, appended to: extend the cache in place so the reader's
     // window and scroll position survive the tick. Anything else - another
     // thread, a shorter one, a window that does not line up, or a part that is no
@@ -1435,40 +1494,23 @@ const CLIENT_JS = String.raw`
     cacheSession = session; cachedParts = incoming.slice(); partsStart = start; partsTotal = total; visibleStart = null;
   }
   function boundCache(){
-    if (cachedParts.length <= CACHE_MAX) return;
-    // The cap yields to the reader: nothing at or within one chunk below them is
-    // dropped, or a fetch would be cancelled by the trim it just caused and
-    // history older than the cap could never be reached. The rows reclaimed above
-    // the reader are what make room again.
-    var room = visibleStart === null ? 0 : Math.max(0, visibleStart - CHUNK_ROWS - partsStart);
-    var drop = Math.min(cachedParts.length - CACHE_MAX, room);
+    // The cache runs from behind the reader to the end of the thread. It has to
+    // reach the tail a state message ships, or the merge witness in syncParts
+    // rejects it and throws the reader's place away; behind them it keeps one
+    // fetch of overlap, so the next step back comes from the cache rather than
+    // the bridge. The window, not the cache, bounds what a render costs.
+    if (visibleStart === null) return;
+    var front = Math.min(Math.max(0, visibleStart - FETCH_PARTS), Math.max(0, tailStart));
+    var drop = front - partsStart;
     if (drop <= 0) return;
-    cachedParts = cachedParts.slice(drop); partsStart += drop;
-  }
-
-  // Give back rows that are more than one viewport above the reader, so a long
-  // read backwards does not leave the whole thread on screen.
-  function reclaimAboveViewport(target){
-    if (target <= visibleStart || Date.now() - lastReclaim < 1000) return;
-    var boxTop = scrollBox.getBoundingClientRect().top, keep = boxTop - scrollBox.clientHeight;
-    var limit = visibleStart;
-    for (var n = 0; n < transcript.children.length; n++) {
-      var node = transcript.children[n];
-      if (!(node._partIndex < target)) break;
-      if (node.getBoundingClientRect().bottom > keep) break;
-      limit = node._partIndex + 1;
-    }
-    // Below this the churn is not worth it; above it the cap stays honest.
-    if (limit - visibleStart < 20) return;
-    lastReclaim = Date.now();
-    visibleStart = limit;
+    cachedParts = cachedParts.slice(drop); partsStart = front;
   }
 
   function renderTranscript(){
     var restoredPlace = false;
     if (!partsTotal) {
       captureDetailState(transcript);
-      visibleStart=null;E('historyEarlier').classList.add('hidden');
+      visibleStart=null;E('historyEarlier').classList.add('hidden');E('historyLater').classList.add('hidden');
       var welcome = '<div class="welcome"><img src="__MARK_URI__" alt="Nodecode axolotl"><h1>Build with nodecode.</h1><p>Your workspace, a conversation, and room to think.</p><small>Ask a question, make a change, or explore an idea.</small></div>';
       if (transcript.dataset.empty !== 'true') transcript.innerHTML = welcome;
       transcript.dataset.empty = 'true';
@@ -1486,7 +1528,7 @@ const CLIENT_JS = String.raw`
     }
     if (visibleStart < partsStart) visibleStart = Math.max(partsStart, tail);
     if (followLatest && !restoredPlace && !hasSelection(transcript) && visibleStart < tail) visibleStart = tail;
-    if (!hasSelection(transcript) && (partsTotal - visibleStart > HARD_ROWS || windowWeight(visibleStart) > HARD_WEIGHT)) reclaimAboveViewport(hardStart());
+    last = windowEnd() - 1;
     var epoch = forkEpoch(), existing = new Map(), keys = new Map(), changes = [], drop = [];
     for (var c = 0; c < transcript.children.length; c++) existing.set(transcript.children[c]._partIndex, transcript.children[c]);
     for (var i = visibleStart; i <= last; i++) {
@@ -1535,8 +1577,12 @@ const CLIENT_JS = String.raw`
       if (!hasSelection(target)) stampPart(target, changed, epoch, keys.get(index));
     }
     E('historyEarlier').classList.toggle('hidden', visibleStart === 0);
+    E('historyLater').classList.toggle('hidden', last >= partsTotal - 1);
     restoreDiffFocus(transcript, diffFocus);
-    scrollBox.scrollTop = anchor && anchor.isConnected && !followLatest ? oldTop+anchor.getBoundingClientRect().top-anchorTop : oldTop;
+    // Correct from where the box actually is, not from where the render started:
+    // rows leaving the document shrink it, and the browser clamps scrollTop on the
+    // way, so oldTop can be a position that no longer exists.
+    scrollBox.scrollTop = anchor && anchor.isConnected && !followLatest ? scrollBox.scrollTop+anchor.getBoundingClientRect().top-anchorTop : oldTop;
     scrollBox._lastTop = scrollBox.scrollTop;
   }
   function editSessionName(button, id){
@@ -1672,7 +1718,7 @@ const CLIENT_JS = String.raw`
     cancelBtn.className = view.running && replayReady && state.connection==='connected' ? 'icon-btn' : 'icon-btn hidden';
     updateSendControls();
     if (windowReset) { windowReset = false; if (historyReady) { setFollow(scrollBox, true); followPane(scrollBox); } }
-    else if (historyReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120)); }
+    else if (historyReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120) && canFollow(scrollBox)); }
     else if (historyReady && stick) followPane(scrollBox);
     if(historyReady)firstRender = false;
     rememberReadingAnchor();
@@ -1878,10 +1924,32 @@ const CLIENT_JS = String.raw`
     autoLoads++;
     loadEarlier();
   }
+  // The far end of the window is not the end of the thread. Sliding forward is
+  // free: the cache already runs to the tail, so this only moves the window and
+  // keeps the row the reader is looking at where it is on screen.
+  function loadLater(){
+    if(visibleStart===null||windowEnd()>=partsTotal)return;
+    var keep=visibleRow();
+    if(keep===null||keep<=visibleStart)return;
+    setFollow(scrollBox,false);
+    visibleStart=keep;
+    boundCache();
+    renderAll(false);saveDraft();
+    requestAnimationFrame(maybeLoadLater);
+  }
+  function maybeLoadLater(){
+    if(firstRender||visibleStart===null||autoLoads>=8||atThreadEnd())return;
+    if(scrollBox.scrollHeight-scrollBox.scrollTop-scrollBox.clientHeight>=LOAD_NEAR_PX)return;
+    if(scrollBox.scrollHeight<scrollBox.clientHeight*2)return;
+    autoLoads++;
+    loadLater();
+  }
   E('historyEarlier').addEventListener('click',function(){autoLoads=0;loadEarlier();});
+  E('historyLater').addEventListener('click',function(){autoLoads=0;loadLater();});
   scrollBox.addEventListener('scroll', function(){
     if (!firstRender) saveDraft();if(scrollBox._readerMoved){rememberReadingAnchor();autoLoads=0;}E('jumpBtn').classList.toggle('hidden',nearBottom());
     maybeLoadEarlier();
+    maybeLoadLater();
   });
   E('jumpBtn').addEventListener('click', function(){ setFollow(scrollBox, true);renderAll(true);followPane(scrollBox); });
   transcript.addEventListener('toggle', function(ev){ if (ev.target.dataset.detail) { expanded[ev.target.dataset.detail] = ev.target.open; if (ev.target.open && ev.target.classList.contains('reasoning')) followPane(ev.target.querySelector('.rbody')); saveDraft(); } }, true);

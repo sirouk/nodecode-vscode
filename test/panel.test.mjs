@@ -95,6 +95,7 @@ test('the extension ships a bounded transcript tail and answers scroll-back requ
   const posted=[];
   const parts=Array.from({length:600},(_,i)=>({kind:i%2===0?'user':'assistant',turnNumber:i,text:'part '+i}));
   const panel=Object.create(SessionPanel.prototype);
+  panel.conversationImages=new Map(); // Object.create skips field initializers
   panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts}),userPrompts:()=>[]}};
   panel.panel={webview:{postMessage:m=>posted.push(m)}};
   panel.postMessage=m=>{panel.panel.webview.postMessage(m);};
@@ -129,6 +130,44 @@ test('the extension ships a bounded transcript tail and answers scroll-back requ
   panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts:[shot].concat(parts)}),userPrompts:()=>[]}};
   await panel.onMessage({type:'requestParts',requestId:10,before:1,limit:1});
   assert.equal(posted.find(m=>m.type==='partsWindow').parts[0].call.imageUrl,'data:image/png;base64,aGVsbG8=','the older slice is decorated like the tail');
+
+  // A slice cut while the session is still replaying would freeze rows that are
+  // not finished being built above the tail, where no later state reaches them.
+  const settledController=panel.controller;
+  panel.controller={sessionId:'windowed',store:{replaying:true,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts}),userPrompts:()=>[]}};
+  posted.length=0;
+  await panel.onMessage({type:'requestParts',requestId:11,before:100,limit:50});
+  assert(!posted.some(m=>m.type==='partsWindow'),'a replaying session does not answer a slice request');
+  panel.controller=settledController;
+  await panel.onMessage({type:'requestParts',requestId:12,before:100,limit:50});
+  assert.equal(posted.find(m=>m.type==='partsWindow').requestId,12,'and answers the same request once the replay is done');
+
+  // A saved image still resolving when its slice ships would leave that row
+  // saying 'Loading image...' forever: only the tail is posted again.
+  let releaseImage;
+  const withImage={kind:'user',turnNumber:8,text:'see this',images:[{id:'pending-shot',mediaType:'image/png'}]};
+  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts:[withImage].concat(parts)}),userPrompts:()=>[]},imageDataUrl:()=>new Promise(resolve=>{releaseImage=resolve;})};
+  posted.length=0;
+  await panel.onMessage({type:'requestParts',requestId:13,before:1,limit:1});
+  await new Promise(setImmediate);
+  assert(!posted.some(m=>m.type==='partsWindow'),'the slice waits for the image it shows');
+  releaseImage('data:image/png;base64,aGVsbG8=');
+  for(let i=0;i<200&&!posted.some(m=>m.type==='partsWindow');i++)await new Promise(setImmediate);
+  assert.equal(posted.find(m=>m.type==='partsWindow').parts[0].images[0].url,'data:image/png;base64,aGVsbG8=','and carries it once it resolves');
+
+  // An image that never resolves must not wedge scroll back either: the slice
+  // ships without it after a bounded wait.
+  const neverImage={kind:'user',turnNumber:8,text:'see this',images:[{id:'never-shot',mediaType:'image/png'}]};
+  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts:[neverImage].concat(parts)}),userPrompts:()=>[]},imageDataUrl:()=>new Promise(()=>{})};
+  const realSettleMs=Object.getOwnPropertyDescriptor(SessionPanel,'sliceImageSettleMs');
+  Object.defineProperty(SessionPanel,'sliceImageSettleMs',{value:20,configurable:true});
+  posted.length=0;
+  await panel.onMessage({type:'requestParts',requestId:14,before:1,limit:1});
+  for(let i=0;i<200&&!posted.some(m=>m.type==='partsWindow');i++)await new Promise(r=>setTimeout(r,5));
+  const late=posted.find(m=>m.type==='partsWindow');
+  assert.equal(late.requestId,14,'a slice with an unresolvable image still ships');
+  assert.equal(late.parts[0].images[0].url,undefined,'without the url it never got');
+  Object.defineProperty(SessionPanel,'sliceImageSettleMs',realSettleMs);
 });
 
 

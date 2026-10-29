@@ -238,26 +238,82 @@ try{
     assert.equal(await page.evaluate(()=>document.getElementById('jumpBtn').classList.contains('hidden')),false,'the jump-to-latest affordance is offered');
     assert.deepEqual(errors,[]);await page.close();
   });
-  await check('the window reclaims rows far above the reader',async()=>{
+  await check('a long read backwards keeps the window bounded and says where it stops',async()=>{
     const {page,errors}=await open();
+    const total=await page.evaluate(()=>window.__all.length);
     let peak=0;
-    for(let i=0;i<14&&peak<905;i++){await scrollBack(page);peak=Math.max(peak,await rows(page));}
-    assert(peak>900,'the test drove the window past the hard cap ('+peak+' rows)');
-    // Move well past the top so nothing can load, then drain anything in flight.
-    await page.evaluate(()=>{const b=document.getElementById('scroll');b.scrollTop=b.clientHeight*10;b.dispatchEvent(new Event('scroll'));});
-    await page.waitForTimeout(300);
-    while(await page.evaluate(()=>window.__serve()))await page.waitForTimeout(120);
-    await page.waitForTimeout(1200);
-    const seen=await page.evaluate(()=>{const box=document.getElementById('scroll'),top=box.getBoundingClientRect().top;const row=Array.from(document.getElementById('transcript').children).find(n=>n.getBoundingClientRect().bottom>top);return{p:row._partIndex,top:Math.round(row.getBoundingClientRect().top)};});
-    const before=await rows(page);
-    await page.evaluate(()=>window.__ship());
+    for(let i=0;i<60;i++){
+      await gestureUp(page);
+      peak=Math.max(peak,await rows(page));
+      if(await firstIndex(page)===0)break;
+    }
+    const first=await firstIndex(page),shown=await rows(page);
+    assert(peak>500,'the test really filled the window ('+peak+' rows)');
+    assert(peak<=900,'the window never grows past its hard bound while the reader walks back ('+peak+' rows)');
+    assert(shown<total-first,'the thread below the reader is not all on screen ('+shown+' rows for '+(total-first)+' parts behind them)');
+    assert.equal(await lastIndex(page),first+shown-1,'the rows on screen are exactly the window');
+    assert(await nodes(page)<shown*20,'the DOM stayed proportional to the window, not to the thread');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyLater').classList.contains('hidden')),false,'the reader is told the window stops short of the newest');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyEarlier').classList.contains('hidden')),true,'nothing older is offered at the beginning');
+    // The explicit escape: one click puts the reader back on the live tail, and
+    // the window is the tail again rather than everything they walked past.
+    assert.equal(await page.evaluate(()=>document.getElementById('jumpBtn').classList.contains('hidden')),false,'a reader far from the newest is offered the jump');
+    await page.locator('#jumpBtn').click();
+    await page.waitForTimeout(80);
+    assert.equal(await lastIndex(page),total-1,'the jump lands on the newest message');
+    const back=await rows(page);
+    assert(back<=TAIL,'and leaves the walked-past history off screen ('+back+' rows)');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyLater').classList.contains('hidden')),true,'the window reaches the end again');
+    assert.equal(await page.evaluate(()=>document.getElementById('jumpBtn').classList.contains('hidden')),true,'no jump is offered at the latest');
+    assert.equal((await draft(page)).visibleStart,await firstIndex(page),'the place kept for a reopen is the one on screen');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('reading forward past the far end slides the window and holds the reader',async()=>{
+    const {page,errors}=await open();
+    for(let i=0;i<60;i++){await gestureUp(page);if(await firstIndex(page)===0)break;}
+    assert.equal(await firstIndex(page),0,'the reader reached the first message of the thread');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyLater').classList.contains('hidden')),false,'the window stops short of the newest, and offers the rest');
+    const total=await page.evaluate(()=>window.__all.length);
+    let peak=await rows(page),slides=0;
+    for(let i=0;i<14;i++){
+      if(await lastIndex(page)===total-1)break;
+      const before=await firstIndex(page);
+      // Mark the row under the reader, then make one gesture to the far end: the
+      // window has to slide onto new ground with that row still where it was.
+      const probe=await page.evaluate(()=>{
+        const b=document.getElementById('scroll');
+        b.scrollTop=b.scrollHeight;
+        const top=b.getBoundingClientRect().top;
+        const row=Array.from(document.getElementById('transcript').children).find(n=>n.getBoundingClientRect().bottom>top+b.clientHeight*0.5);
+        if(!row)return null;
+        row.dataset.probe='1';
+        const held={p:row._partIndex,top:Math.round(row.getBoundingClientRect().top)};
+        b.dispatchEvent(new Event('scroll'));
+        return held;
+      });
+      assert(probe,'there is a row under the reader to hold onto');
+      for(let k=0;k<40;k++){await page.waitForTimeout(16);if(await firstIndex(page)!==before)break;}
+      const now=await firstIndex(page);
+      assert(now>before,'one gesture at the far end slides the window forward ('+before+' -> '+now+')');
+      assert(now<=probe.p,'the window still holds the row the reader was looking at');
+      slides++;
+      peak=Math.max(peak,await rows(page));
+      const place=await page.evaluate(()=>{const row=document.querySelector('#transcript section[data-probe]');return row?Math.round(row.getBoundingClientRect().top):null;});
+      assert(place!==null,'the row under the reader survived the slide');
+      assert(Math.abs(place-probe.top)<=2,'the slide did not move it ('+probe.top+' -> '+place+')');
+    }
+    assert(slides>=2,'the reader crossed the thread in slides, not in one rebuild ('+slides+')');
+    assert(peak<=900,'sliding forward keeps the window bounded too ('+peak+' rows)');
+    // One more gesture reaches the true end: the newest content comes back, the
+    // offer to load it goes away, and following the latest is possible again.
+    await page.evaluate(()=>{const b=document.getElementById('scroll');b.scrollTop=b.scrollHeight;b.dispatchEvent(new Event('scroll'));});
+    for(let k=0;k<40;k++){await page.waitForTimeout(16);if(await lastIndex(page)===total-1)break;}
+    assert.equal(await lastIndex(page),total-1,'the newest part is back on screen');
+    assert.equal(await page.evaluate(()=>document.getElementById('historyLater').classList.contains('hidden')),true,'nothing further is offered at the end');
+    assert.equal(await page.evaluate(()=>document.getElementById('jumpBtn').classList.contains('hidden')),true,'the reader is at the latest, so no jump is offered');
+    await page.evaluate(()=>{const all=window.__all;all.push({kind:'user',text:'Prompt newest: arrived after the walk',turnNumber:9100});window.__ship();});
     await page.waitForTimeout(120);
-    const settled=await rows(page);
-    assert(settled<before,'rows above the reader were reclaimed: '+before+' -> '+settled);
-    assert(await nodes(page)<settled*17,'reclaimed rows left the DOM');
-    const still=await page.evaluate(p=>{const row=Array.from(document.getElementById('transcript').children).find(n=>n._partIndex===p);return row?Math.round(row.getBoundingClientRect().top):null;},seen.p);
-    assert(still!==null&&Math.abs(still-seen.top)<=2,'what the reader was looking at did not move ('+seen.top+' -> '+still+')');
-    assert.equal(await lastIndex(page),2499,'the newest content is still in the window');
+    assert.equal(await lastIndex(page),total,'a part that arrives at the end is followed onto the screen');
     assert.deepEqual(errors,[]);await page.close();
   });
   await check('a saved place inside the shipped tail is where the reader comes back to',async()=>{
@@ -342,11 +398,14 @@ try{
     // a few hundred messages from the beginning with 'Load earlier' still offered.
     const parts=thread(520);
     const {page,errors}=await open({},parts);
+    let peak=0;
     for(let i=0;i<60;i++){
       await gestureUp(page);
+      peak=Math.max(peak,await rows(page));
       if(await firstIndex(page)===0)break;
     }
     const first=await firstIndex(page);
+    assert(peak<=900,'the walk back never put more than the window on screen ('+peak+' rows for '+parts.length+' parts)');
     assert.equal(first,0,'the reader reaches the first message of the thread ('+first+')');
     assert.equal(await page.evaluate(()=>document.getElementById('historyEarlier').classList.contains('hidden')),true,'nothing older is offered once the beginning is on screen');
     const asked=await page.evaluate(()=>window.posted.filter(m=>m.type==='requestParts').length);

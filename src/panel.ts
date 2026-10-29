@@ -252,14 +252,25 @@ export class SessionPanel {
     return image;
   }
 
+  /** Parts a fresh webview receives; the panel asks for older ones as the reader scrolls back. */
+  private static readonly tailParts = 240;
+
+  private decorateParts(parts: StoreView["parts"], cwd: string): StoreView["parts"] {
+    return parts.map((part) => part.kind === "tool" ? { ...part, call: { ...part.call, imageUrl: this.toolImageUrl(part.call, cwd) } } : (part.kind === "user" || part.kind === "assistant") && part.images?.length ? { ...part, images: part.images.map((image) => ({ ...image, ...this.conversationImage(image.id) })) } : part);
+  }
+
   private postState(): void {
     if (this.disposed || this.controller.store.replaying) return;
     const view = this.controller.store.view();
     const title = view.title;
     if (title && !this.sidebar) this.panel.title = `Nodecode: ${title}`;
+    // Ship the tail only. The whole transcript would otherwise be serialized
+    // across the webview bridge on every streamed token: measured at 4-7 MB and
+    // 3-7 ms per tick on a 1200-turn thread, all of it re-parsed by the panel.
+    const start = Math.max(0, view.parts.length - SessionPanel.tailParts);
     this.postMessage({
       type: "state",
-      view: { ...view, parts: view.parts.map((part) => part.kind === "tool" ? { ...part, call: { ...part.call, imageUrl: this.toolImageUrl(part.call, view.cwd) } } : (part.kind === "user" || part.kind === "assistant") && part.images?.length ? { ...part, images: part.images.map((image) => ({ ...image, ...this.conversationImage(image.id) })) } : part) },
+      view: { ...view, parts: this.decorateParts(view.parts.slice(start), view.cwd), partsStart: start, partsTotal: view.parts.length },
       connection: this.connection,
       attempts: this.connectionAttempts,
       history: this.controller.store.userPrompts(),
@@ -445,6 +456,16 @@ export class SessionPanel {
           this.postState();
           if (typeof message.pendingSendId === "string") await this.resumeSend(message.pendingSendId);
           return;
+        case "requestParts": {
+          // Older transcript for a reader scrolling back; the panel keeps a window.
+          const view = this.controller.store.view();
+          const limit = Math.min(400, Math.max(1, Math.floor(Number(message.limit)) || 200));
+          const before = Number(message.before);
+          const end = Number.isFinite(before) ? Math.max(0, Math.min(Math.floor(before), view.parts.length)) : view.parts.length;
+          const from = Math.max(0, end - limit);
+          this.postMessage({ type: "partsWindow", requestId: message.requestId, sessionId: id, start: from, total: view.parts.length, parts: this.decorateParts(view.parts.slice(from, end), view.cwd) });
+          return;
+        }
         case "openThread": {
           const navigation = message.threadNavigation as Partial<ThreadNavigationState> | undefined;
           if (typeof message.sessionId === "string" && message.sessionId !== id) this.callbacks.openSession(message.sessionId,
@@ -1033,7 +1054,10 @@ const CLIENT_JS = String.raw`
   var diffScroll = saved.diffScroll || {};
   var followLatest = true;
   var firstRender = true;
-  var visibleStart = null, loadingEarlier = false, historyExpanded = saved.historyExpanded === true;
+  var visibleStart = null, loadingEarlier = false, windowReset = false;
+  // The panel holds a slice of the thread: the extension ships a tail and the
+  // reader's scroll back asks for the older parts when they are needed.
+  var cachedParts = [], partsStart = 0, partsTotal = 0, loadRequest = 0, autoLoads = 0, lastReclaim = 0, cacheSession = null;
   var readingAnchor = null;
   var histIdx = -1;
   function E(id){ return document.getElementById(id); }
@@ -1082,9 +1106,14 @@ const CLIENT_JS = String.raw`
       renderAll(nearBottom());
       return;
     }
+    if (m.type === 'partsWindow') { receivePartsWindow(m); return; }
     if (m.type !== 'state') return;
+    // The extension is alive and answering; a request whose window was lost must
+    // not leave scroll back switched off, so the next gesture asks again.
+    loadingEarlier = false;
     var wasNearBottom = followLatest;
     state = m;
+    syncParts(m.view);
     renderAll(wasNearBottom);
     if(!restoredTextStarted){restoredTextStarted=true;textFiles.filter(function(f){return !f.attachment&&f.text;}).forEach(stageTextFile);}
   });
@@ -1136,7 +1165,7 @@ const CLIENT_JS = String.raw`
   function textFileHtml(part){return (part.textFiles||[]).map(function(file){return '<button class="message-file" data-a="openTextAttachment" data-p="'+esc(file.ref)+'" title="'+esc(file.name)+' · '+file.byteLength+' bytes">'+esc(file.name)+'</button>';}).join('');}
   function fileHtml(part){return (part.files||[]).filter(function(file){return !(part.text||'').includes('@'+file);}).map(function(file){return '<span class="message-file" title="'+esc(file)+'">@'+esc(file.split(/[\\/]/).pop())+'</span>';}).join('');}
   function forkHtml(part){var saved=(state.view&&state.view.bookmarkedTurnIds||[]).includes(part.forkTurnId);return part.forkTurnId&&!(state.view&&state.view.cached)&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' aria-label="Fork from this turn" title="Fork from this turn into a new editor. Includes all recorded messages in this turn; this conversation is kept.">${icon('fork')}</button><button class="bookmark-turn '+(saved?'saved':'')+'" data-a="toggleCheckpointBookmark" data-p="'+esc(part.forkTurnId)+'" aria-pressed="'+String(saved)+'" aria-label="'+(saved?'Remove bookmark':'Bookmark checkpoint')+'" title="'+(saved?'Remove bookmark':'Bookmark this recorded checkpoint; does not create a new file snapshot')+'" '+(bookmarkingTurns[part.forkTurnId]?'disabled':'')+'>${icon('bookmark')}</button>':'';}
-  function replyCaret(part,index){return part.streaming&&part.text&&state.view&&index===state.view.parts.length-1?'<span class="caret"></span>':'';}
+  function replyCaret(part,index){return part.streaming&&part.text&&state.view&&index===partsTotal-1?'<span class="caret"></span>':'';}
   function partHtml(part, index){
     if (part.kind === 'user') return '<div class="msg user"><div class="bubble"><div class="message-actions"><button class="copy-text" data-a="copyUser" data-p="'+index+'" aria-label="Copy message" title="Copy message">${icon('copy')}</button></div>' + md(part.text,part.files) + '<div class="message-files">' + fileHtml(part) + textFileHtml(part) + '</div>' + imageHtml(part) + '</div></div>';
     if (part.kind === 'assistant') {
@@ -1152,7 +1181,7 @@ const CLIENT_JS = String.raw`
     }
     return '';
   }
-  function saveDraft(){ reconcileInlineReferences();persisted.sessions = persisted.sessions || {}; persisted.sessions[sessionId] = { pendingSend: pendingSend, draft: composer.value, inlineRefs:inlineRefs.map(function(ref){return {path:ref.path,start:ref.start,end:ref.end};}),files:files.slice(), images:attachments, textFiles:textFiles.map(function(f){return {requestId:f.requestId,name:f.name,text:f.text,byteLength:f.byteLength,attachment:f.attachment,error:f.error};}), expanded: expanded, diffScroll:diffScroll, visibleStart:visibleStart, historyExpanded:historyExpanded, scrollTop: scrollBox.scrollTop }; vscode.setState(persisted); }
+  function saveDraft(){ reconcileInlineReferences();persisted.sessions = persisted.sessions || {}; persisted.sessions[sessionId] = { pendingSend: pendingSend, draft: composer.value, inlineRefs:inlineRefs.map(function(ref){return {path:ref.path,start:ref.start,end:ref.end};}),files:files.slice(), images:attachments, textFiles:textFiles.map(function(f){return {requestId:f.requestId,name:f.name,text:f.text,byteLength:f.byteLength,attachment:f.attachment,error:f.error};}), expanded: expanded, diffScroll:diffScroll, visibleStart:visibleStart, scrollTop: scrollBox.scrollTop }; vscode.setState(persisted); }
   function hasSelection(pane){
     var selection = window.getSelection();
     if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
@@ -1270,60 +1299,213 @@ const CLIENT_JS = String.raw`
     if(Math.abs(delta)>.1)scrollBox.scrollTop+=delta;
     scrollBox._lastTop=scrollBox.scrollTop;
   }
-  function renderTranscript(parts){
-    var diffFocus = rememberDiffFocus(transcript);
-    var oldTop = scrollBox.scrollTop;
-    var anchor = Array.from(transcript.children).find(function(node){return node.getBoundingClientRect().bottom>scrollBox.getBoundingClientRect().top;});
-    var anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
-    transcript.querySelectorAll('[data-detail]').forEach(function(el){
+  // --- transcript windowing ---
+  // The panel renders a bounded slice of the thread and the extension ships a
+  // bounded tail, so opening or streaming a 2000-part conversation costs about
+  // what a short one costs. Rows the reader has scrolled past are reclaimed,
+  // and scrolling back walks the cache first and asks the extension for the
+  // parts behind it.
+  var WINDOW_ROWS = 160, WINDOW_WEIGHT = 450000, WINDOW_MIN_ROWS = 3;
+  var CHUNK_ROWS = 90, CHUNK_WEIGHT = 260000, CHUNK_MIN = 20;
+  var HARD_ROWS = 900, HARD_WEIGHT = 2600000;
+  var CACHE_MAX = 2400, LOAD_NEAR_PX = 1200, FETCH_PARTS = 200;
+
+  function partAt(index){ return cachedParts[index - partsStart]; }
+
+  function partWeight(part){
+    if (!part) return 16;
+    if (part.kind === 'assistant') return 32 + (part.text ? part.text.length : 0) + (part.reasoning ? part.reasoning.length : 0) + 800 * (part.images ? part.images.length : 0);
+    if (part.kind === 'user') return 32 + (part.text ? part.text.length : 0) + 800 * (part.images ? part.images.length : 0) + 120 * (part.textFiles ? part.textFiles.length : 0);
+    if (part.kind === 'tool') {
+      var call = part.call || {}, metadata = call.metadata || {};
+      return 64 + (call.arguments ? call.arguments.length : 0) + (call.result ? call.result.length : 0)
+        + (metadata.workspace_diff ? 6000 : 0) + (metadata.image ? 4000 : 0);
+    }
+    return 16;
+  }
+
+  // Smallest absolute index whose range up to FROM still fits the budget;
+  // MINIMUM rows always come along, so one huge tool result still leaves
+  // something on screen.
+  function walkBack(from, rows, weight, minimum){
+    var total = 0, count = 0;
+    for (var i = from - 1; i >= partsStart; i--) {
+      var w = partWeight(partAt(i));
+      if (count > 0 && (count >= rows || (count >= minimum && total + w > weight))) return i + 1;
+      total += w; count++;
+    }
+    return partsStart;
+  }
+  function budgetStart(){ return walkBack(partsTotal, WINDOW_ROWS, WINDOW_WEIGHT, WINDOW_MIN_ROWS); }
+  function chunkStart(from){ return walkBack(from, CHUNK_ROWS, CHUNK_WEIGHT, CHUNK_MIN); }
+  function hardStart(){ return Math.min(walkBack(partsTotal, HARD_ROWS, HARD_WEIGHT, 0), partsTotal - 1); }
+  function windowWeight(from){ var total = 0; for (var i = from; i < partsTotal; i++) total += partWeight(partAt(i)); return total; }
+
+  // A row is rebuilt only when something it shows changed. Structured values
+  // are fingerprinted (lengths and sampled characters, never a full copy) and
+  // the big strings are compared directly, which is exact and costs nothing
+  // while a part stands still. The store mutates parts in place, so object
+  // identity cannot stand in for this.
+  var HASH_LIMIT = 20000, hashNodes = 0;
+  function sample(text){ var n = text.length; return text.charCodeAt(0) + '.' + text.charCodeAt(n >> 2) + '.' + text.charCodeAt(n >> 1) + '.' + text.charCodeAt(n - 1); }
+  function hashValue(value){
+    if (hashNodes++ > HASH_LIMIT) return '';
+    if (value === null || value === undefined) return '0';
+    if (typeof value === 'string') return value.length <= 48 ? value : 's' + value.length + '.' + sample(value);
+    if (typeof value !== 'object') return String(value);
+    if (Array.isArray(value)) { var s = 'a' + value.length; for (var i = 0; i < value.length; i++) s += '|' + hashValue(value[i]); return s; }
+    var keys = Object.keys(value), o = 'k' + keys.length;
+    for (var j = 0; j < keys.length; j++) o += '|' + keys[j] + '=' + hashValue(value[keys[j]]);
+    return o;
+  }
+  function partKey(part, last){
+    hashNodes = 0;
+    var call = part.call;
+    return (part.kind ? part.kind.charAt(0) : '?') + '|' + (last ? 'L' : '') + '|' + (part.turnNumber === undefined ? '' : part.turnNumber)
+      + '|' + (part.streaming ? 's' : '') + (part.voided ? 'v' : '') + (part.forkTurnId || '') + '|' + (part.level || '') + '|' + (part.childSessionId || '')
+      + '|' + (part.text ? part.text.length : 0) + '|' + (part.reasoning ? part.reasoning.length : 0)
+      + '|' + hashValue(part.images) + '|' + hashValue(part.files) + '|' + hashValue(part.textFiles)
+      + '|' + (call ? [call.callId, call.name, call.status, call.done, call.failed, call.durationMs, call.sessionId, call.turnId, call.arguments ? call.arguments.length : 0, call.result ? call.result.length : 0, call.imageUrl ? call.imageUrl.length : 0].join(',') + '#' + hashValue(call.metadata) : '');
+  }
+  // forkHtml and the reply caret read these, so a change here rebuilds rows.
+  function forkEpoch(){
+    var view = (state && state.view) || {};
+    return [view.cached, view.running, view.activeTurnId, (view.bookmarkedTurnIds || []).join(','), Object.keys(forkingTurns).join(','), Object.keys(bookmarkingTurns).join(',')].join('|');
+  }
+  function sameStrings(node, part){
+    if (node._stText !== (part.text || '')) return false;
+    if (node._stReasoning !== (part.reasoning || '')) return false;
+    var call = part.call;
+    if (node._stArgs !== (call && call.arguments ? call.arguments : '')) return false;
+    if (node._stResult !== (call && call.result ? call.result : '')) return false;
+    return true;
+  }
+  function stampPart(node, part, epoch, key){
+    node._stEpoch = epoch; node._stKey = key;
+    node._stText = part.text || ''; node._stReasoning = part.reasoning || '';
+    var call = part.call;
+    node._stArgs = call && call.arguments ? call.arguments : '';
+    node._stResult = call && call.result ? call.result : '';
+  }
+  function captureDetailState(root){
+    root.querySelectorAll('[data-detail]').forEach(function(el){
       expanded[el.dataset.detail] = el.open;
       el.querySelectorAll('pre:not(.rbody)').forEach(function(pane, i){ paneScroll[el.dataset.detail + '-' + i] = [pane.scrollTop, pane.scrollLeft]; });
     });
-    if (!parts.length) {
+  }
+
+  function syncParts(view){
+    var incoming = (view && view.parts) || [];
+    var start = view && Number.isInteger(view.partsStart) ? view.partsStart : 0;
+    var total = view && Number.isInteger(view.partsTotal) ? view.partsTotal : start + incoming.length;
+    var session = view ? view.sessionId : null;
+    // The same transcript, appended to: extend the cache in place so the reader's
+    // window and scroll position survive the tick. Anything else - another
+    // thread, a shorter one, or a window that does not line up - starts over
+    // from the tail it was handed.
+    if (session === cacheSession && total >= partsTotal && start >= partsStart && start - partsStart <= cachedParts.length) {
+      cachedParts = cachedParts.slice(0, start - partsStart).concat(incoming);
+      partsTotal = total;
+      boundCache();
+      return;
+    }
+    cacheSession = session; cachedParts = incoming.slice(); partsStart = start; partsTotal = total; visibleStart = null;
+  }
+  function boundCache(){
+    if (cachedParts.length <= CACHE_MAX) return;
+    var room = visibleStart === null ? 0 : Math.max(0, visibleStart - partsStart);
+    var drop = Math.min(cachedParts.length - CACHE_MAX, room);
+    if (drop <= 0) return;
+    cachedParts = cachedParts.slice(drop); partsStart += drop;
+  }
+
+  // Give back rows that are more than one viewport above the reader, so a long
+  // read backwards does not leave the whole thread on screen.
+  function reclaimAboveViewport(target){
+    if (target <= visibleStart || Date.now() - lastReclaim < 1000) return;
+    var boxTop = scrollBox.getBoundingClientRect().top, keep = boxTop - scrollBox.clientHeight;
+    var limit = visibleStart;
+    for (var n = 0; n < transcript.children.length; n++) {
+      var node = transcript.children[n];
+      if (!(node._partIndex < target)) break;
+      if (node.getBoundingClientRect().bottom > keep) break;
+      limit = node._partIndex + 1;
+    }
+    // Below this the churn is not worth it; above it the cap stays honest.
+    if (limit - visibleStart < 20) return;
+    lastReclaim = Date.now();
+    visibleStart = limit;
+  }
+
+  function renderTranscript(){
+    if (!partsTotal) {
+      captureDetailState(transcript);
       visibleStart=null;E('historyEarlier').classList.add('hidden');
       var welcome = '<div class="welcome"><img src="__MARK_URI__" alt="Nodecode axolotl"><h1>Build with nodecode.</h1><p>Your workspace, a conversation, and room to think.</p><small>Ask a question, make a change, or explore an idea.</small></div>';
       if (transcript.dataset.empty !== 'true') transcript.innerHTML = welcome;
       transcript.dataset.empty = 'true';
       return;
     }
+    var last = partsTotal - 1, tail = budgetStart();
+    if (visibleStart === null || visibleStart > last) {
+      // A reopened thread comes back where the reader left it when that place is
+      // still on hand, and to the latest otherwise.
+      var restored = firstRender && Number.isInteger(saved.visibleStart) ? saved.visibleStart : null;
+      visibleStart = restored !== null && restored >= tail && restored >= partsStart && restored <= last ? restored : tail;
+      windowReset = restored !== null && visibleStart !== restored;
+    }
+    if (visibleStart < partsStart) visibleStart = Math.max(partsStart, tail);
+    if (followLatest && !hasSelection(transcript) && visibleStart < tail) visibleStart = tail;
+    if (!hasSelection(transcript) && (partsTotal - visibleStart > HARD_ROWS || windowWeight(visibleStart) > HARD_WEIGHT)) reclaimAboveViewport(hardStart());
+    var epoch = forkEpoch(), existing = new Map(), keys = new Map(), changes = [], drop = [];
+    for (var c = 0; c < transcript.children.length; c++) existing.set(transcript.children[c]._partIndex, transcript.children[c]);
+    for (var i = visibleStart; i <= last; i++) {
+      var part = partAt(i), node = existing.get(i), key = partKey(part, i === last);
+      keys.set(i, key);
+      if (!node || node._stEpoch !== epoch || node._stKey !== key || !sameStrings(node, part)) changes.push(i);
+    }
+    existing.forEach(function(n, index){ if (index < visibleStart || index > last) drop.push(n); });
+    if (!changes.length && !drop.length) return;
+    var diffFocus = rememberDiffFocus(transcript);
+    var oldTop = scrollBox.scrollTop;
+    var anchor = Array.from(transcript.children).find(function(n){return n.getBoundingClientRect().bottom>scrollBox.getBoundingClientRect().top;});
+    var anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
     if (transcript.dataset.empty === 'true') transcript.innerHTML = '';
     transcript.dataset.empty = 'false';
-    if(visibleStart===null)visibleStart=Number.isInteger(saved.visibleStart)?Math.max(0,Math.min(saved.visibleStart,parts.length-1)):Math.max(0,parts.length-150);
-    if(visibleStart>=parts.length)visibleStart=Math.max(0,parts.length-150);
-    if(!historyExpanded&&followLatest&&!hasSelection(transcript))visibleStart=Math.max(0,parts.length-150);
-    if(followLatest&&!hasSelection(transcript)&&parts.length-visibleStart>600)visibleStart=Math.max(0,parts.length-400);
-    E('historyEarlier').classList.toggle('hidden',visibleStart===0);
-    var existing=new Map(Array.from(transcript.children).map(function(node){return [node._partIndex,node];}));
-    parts.slice(visibleStart).forEach(function(part, offset){
-      var i=visibleStart+offset;
-      var html = partHtml(part, i);
-      var node = existing.get(i);
-      if (!node) { node = document.createElement('section');node._partIndex=i; }
-      if(transcript.children[offset]!==node)transcript.insertBefore(node,transcript.children[offset]||null);
-      if (part.kind === 'assistant' && node._kind === 'assistant') {
-        updateAssistant(node, part, i);
-      } else if (node._html !== html && !hasSelection(node)) {
-        var codePositions = Array.from(node.querySelectorAll('.codeblock pre')).map(function(pre){return [pre.scrollTop, pre.scrollLeft];});
-        node.innerHTML = html; renderMarkdownBlocks(node);
-        node.querySelectorAll('.codeblock pre').forEach(function(pre, n){var pos=codePositions[n];if(pos){pre.scrollTop=pos[0];pre.scrollLeft=pos[1];}});
-        if (part.kind === 'assistant') {
-          var thought = node.querySelector('.reasoning');
+    for (var d = 0; d < drop.length; d++) { captureDetailState(drop[d]); drop[d].remove(); }
+    for (var ci = 0; ci < changes.length; ci++) {
+      var index = changes[ci], changed = partAt(index), target = existing.get(index);
+      var html = partHtml(changed, index);
+      if (!target) { target = document.createElement('section'); target._partIndex = index; }
+      if (target.isConnected) captureDetailState(target);
+      if (transcript.children[index - visibleStart] !== target) transcript.insertBefore(target, transcript.children[index - visibleStart] || null);
+      if (changed.kind === 'assistant' && target._kind === 'assistant') {
+        updateAssistant(target, changed, index);
+      } else if (target._html !== html && !hasSelection(target)) {
+        var codePositions = Array.from(target.querySelectorAll('.codeblock pre')).map(function(pre){return [pre.scrollTop, pre.scrollLeft];});
+        target.innerHTML = html; renderMarkdownBlocks(target);
+        target.querySelectorAll('.codeblock pre').forEach(function(pre, n){var pos=codePositions[n];if(pos){pre.scrollTop=pos[0];pre.scrollLeft=pos[1];}});
+        if (changed.kind === 'assistant') {
+          var thought = target.querySelector('.reasoning');
           if (thought) {
-            thought.open = expanded[thought.dataset.detail] !== undefined ? expanded[thought.dataset.detail] : !!part.streaming;
-            updateThought(thought.querySelector('.rbody'), part.reasoning);
+            thought.open = expanded[thought.dataset.detail] !== undefined ? expanded[thought.dataset.detail] : !!changed.streaming;
+            updateThought(thought.querySelector('.rbody'), changed.reasoning);
           }
-          node._text = part.text; node._images = JSON.stringify(part.images || []);
+          target._text = changed.text; target._images = JSON.stringify(changed.images || []);
         }
-        restoreDiffState(node);
-        node._html = html; node._kind = part.kind;
+        restoreDiffState(target);
+        target._html = html; target._kind = changed.kind;
       }
-    });
-    Array.from(transcript.children).forEach(function(node){if(node._partIndex<visibleStart||node._partIndex>=parts.length)node.remove();});
-    transcript.querySelectorAll('[data-detail]:not(.reasoning)').forEach(function(el){
-      el.open = !!expanded[el.dataset.detail];
-      el.querySelectorAll('pre').forEach(function(pane, i){ var pos = paneScroll[el.dataset.detail + '-' + i]; if (pos) { pane.scrollTop = pos[0]; pane.scrollLeft = pos[1]; } });
-    });
-    restoreDiffState(transcript);restoreDiffFocus(transcript,diffFocus);
+      target.querySelectorAll('[data-detail]:not(.reasoning)').forEach(function(el){
+        el.open = !!expanded[el.dataset.detail];
+        el.querySelectorAll('pre').forEach(function(pane, pi){ var pos = paneScroll[el.dataset.detail + '-' + pi]; if (pos) { pane.scrollTop = pos[0]; pane.scrollLeft = pos[1]; } });
+      });
+      // A selection inside the row defers its update, so leave the stamp behind:
+      // the next render tries again and catches up when the selection clears.
+      if (!hasSelection(target)) stampPart(target, changed, epoch, keys.get(index));
+    }
+    E('historyEarlier').classList.toggle('hidden', visibleStart === 0);
+    restoreDiffFocus(transcript, diffFocus);
     scrollBox.scrollTop = anchor && anchor.isConnected && !followLatest ? oldTop+anchor.getBoundingClientRect().top-anchorTop : oldTop;
     scrollBox._lastTop = scrollBox.scrollTop;
   }
@@ -1425,7 +1607,6 @@ const CLIENT_JS = String.raw`
     restoreReadingAnchor();
     stick = followLatest;
     var view = state.view || {};
-    var parts = view.parts || [];
     titleEl.textContent = view.title || 'Untitled conversation';
     titleEl.title = [view.title || 'Untitled conversation', view.cwd, 'Click to rename'].filter(Boolean).join('\n');
     var line = [];
@@ -1438,7 +1619,7 @@ const CLIENT_JS = String.raw`
     E('effortLabel').textContent = view.effort || 'Effort';
     var replayReady=view.replayComplete!==false;
     var historyReady=replayReady||view.cached===true;
-    if(historyReady)renderTranscript(parts);
+    if(historyReady)renderTranscript();
     renderActivity(view);
     var q = view.queue || [];
     queueBar.innerHTML = q.map(function(p){
@@ -1460,7 +1641,8 @@ const CLIENT_JS = String.raw`
     statusLine.innerHTML = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+esc(usageTitle)+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
     cancelBtn.className = view.running && replayReady && state.connection==='connected' ? 'icon-btn' : 'icon-btn hidden';
     updateSendControls();
-    if (historyReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120)); }
+    if (windowReset) { windowReset = false; if (historyReady) { setFollow(scrollBox, true); followPane(scrollBox); } }
+    else if (historyReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120)); }
     else if (historyReady && stick) followPane(scrollBox);
     if(historyReady)firstRender = false;
     rememberReadingAnchor();
@@ -1627,13 +1809,46 @@ const CLIENT_JS = String.raw`
   window.addEventListener('blur', releasePointer);
   document.addEventListener('selectionchange', function(){ if (state.view && !hasSelection(transcript)&&!hasSelection(E('fileList'))) renderAll(followLatest); });
   function loadEarlier(){
-    if(visibleStart===null||visibleStart===0)return;
-    historyExpanded=true;setFollow(scrollBox,false);visibleStart=Math.max(0,visibleStart-100);renderAll(false);saveDraft();
+    if(visibleStart===null||visibleStart===0||loadingEarlier)return;
+    setFollow(scrollBox,false);
+    var target=chunkStart(visibleStart);
+    if(target<visibleStart){
+      visibleStart=target;renderAll(false);saveDraft();
+      requestAnimationFrame(maybeLoadEarlier);
+      return;
+    }
+    if(partsStart===0)return;
+    // The cache is exhausted behind the reader: ask for the parts before it.
+    loadingEarlier=true;
+    vscode.postMessage({type:'requestParts',requestId:++loadRequest,before:partsStart,limit:FETCH_PARTS});
   }
-  E('historyEarlier').addEventListener('click',loadEarlier);
+  function receivePartsWindow(m){
+    if(m.requestId!==loadRequest)return;
+    loadingEarlier=false;
+    // Contiguity is what matters: the answer has to end where the cache begins.
+    // The thread may have grown since the request, so its total is not checked.
+    if(m.sessionId!==sessionId||!Array.isArray(m.parts)||!m.parts.length||m.start+m.parts.length!==partsStart){renderAll(false);return;}
+    cachedParts=m.parts.concat(cachedParts);partsStart=m.start;
+    boundCache();
+    var target=chunkStart(visibleStart);
+    if(target<visibleStart)visibleStart=target;
+    renderAll(false);saveDraft();
+    requestAnimationFrame(maybeLoadEarlier);
+  }
+  // Keep the reader supplied while they scroll up, without turning one gesture
+  // into an unbounded walk through the thread.
+  function maybeLoadEarlier(){
+    // The follow flag is set by a listener that runs after this one, so gate on
+    // where the reader actually is; loadEarlier stops following by itself.
+    if(firstRender||loadingEarlier||nearBottom()||visibleStart===null||visibleStart===0||autoLoads>=8)return;
+    if(scrollBox.scrollTop>=LOAD_NEAR_PX||scrollBox.scrollHeight<scrollBox.clientHeight*2)return;
+    autoLoads++;
+    loadEarlier();
+  }
+  E('historyEarlier').addEventListener('click',function(){autoLoads=0;loadEarlier();});
   scrollBox.addEventListener('scroll', function(){
-    if (!firstRender) saveDraft();if(scrollBox._readerMoved)rememberReadingAnchor();E('jumpBtn').classList.toggle('hidden',nearBottom());
-    if(!firstRender&&scrollBox._readerMoved&&!followLatest&&scrollBox.scrollTop<300&&visibleStart>0&&!loadingEarlier){loadingEarlier=true;requestAnimationFrame(function(){loadingEarlier=false;if(!followLatest&&scrollBox.scrollTop<300)loadEarlier();});}
+    if (!firstRender) saveDraft();if(scrollBox._readerMoved){rememberReadingAnchor();autoLoads=0;}E('jumpBtn').classList.toggle('hidden',nearBottom());
+    maybeLoadEarlier();
   });
   E('jumpBtn').addEventListener('click', function(){ setFollow(scrollBox, true);renderAll(true);followPane(scrollBox); });
   transcript.addEventListener('toggle', function(ev){ if (ev.target.dataset.detail) { expanded[ev.target.dataset.detail] = ev.target.open; if (ev.target.open && ev.target.classList.contains('reasoning')) followPane(ev.target.querySelector('.rbody')); saveDraft(); } }, true);
@@ -1679,7 +1894,7 @@ const CLIENT_JS = String.raw`
     else if(action==='retryTextAttachment'){var file=textFiles.find(function(f){return f.requestId===Number(payload);});if(file)stageTextFile(file);}
     else if (action === 'removeImage') { if (!sending) { attachments.splice(Number(payload),1);renderAttachments();saveDraft();renderAll(nearBottom()); } } else if (action === 'copyReply' || action === 'copyThinking' || action === 'copyUser') {
       ev.preventDefault(); ev.stopPropagation();
-      var part = (state.view.parts || [])[Number(payload)];
+      var part = partAt(Number(payload));
       if (part) {
         var text = action==='copyUser'?part.text: action === 'copyThinking' ? part.reasoning : (part.reasoning ? 'Thought process\n' + part.reasoning + '\n\n' : '') + part.text;
         NodecodeMarkdown.copyToClipboard(text, function(){var label=action==='copyUser'?'Copy message':action==='copyThinking'?'Copy thought process':'Copy reply and thought process';el.innerHTML='${icon('check')}';el.setAttribute('aria-label','Copied');setTimeout(function(){el.innerHTML='${icon('copy')}';el.setAttribute('aria-label',label);},1200);});

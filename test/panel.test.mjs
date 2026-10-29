@@ -91,6 +91,39 @@ test('status and usage follow the complete composer before the keyboard hint', (
 });
 
 
+test('the extension ships a bounded transcript tail and answers scroll-back requests', async () => {
+  const posted=[];
+  const parts=Array.from({length:600},(_,i)=>({kind:i%2===0?'user':'assistant',turnNumber:i,text:'part '+i}));
+  const panel=Object.create(SessionPanel.prototype);
+  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts}),userPrompts:()=>[]}};
+  panel.panel={webview:{postMessage:m=>posted.push(m)}};
+  panel.postMessage=m=>{panel.panel.webview.postMessage(m);};
+  panel.postState();
+  const state=posted.find(m=>m.type==='state').view;
+  assert.equal(state.parts.length,240,'a long thread must not be serialized across the bridge on every token');
+  assert(state.parts.length<parts.length/2);
+  assert.equal(state.partsStart,360);
+  assert.equal(state.partsTotal,600,'the panel still knows how much history exists');
+  assert.equal(state.parts[0].text,'part 360');
+  posted.length=0;
+  await panel.onMessage({type:'requestParts',requestId:7,before:360,limit:200});
+  const win=posted.find(m=>m.type==='partsWindow');
+  assert.equal(win.sessionId,'windowed');
+  assert.equal(win.requestId,7);
+  assert.equal(win.start,160);
+  assert.equal(win.total,600);
+  assert.equal(win.parts.length,200);
+  assert.equal(win.parts[0].text,'part 160');
+  assert.equal(win.parts[199].text,'part 359','the answer ends where the shipped tail begins so the cache stays contiguous');
+  posted.length=0;
+  await panel.onMessage({type:'requestParts',requestId:8,before:50,limit:5000});
+  assert.deepEqual([posted[0].start,posted[0].parts.length],[0,50],'a request cannot reach before the beginning of the transcript');
+  posted.length=0;
+  await panel.onMessage({type:'requestParts',requestId:9,before:600});
+  assert.deepEqual([posted[0].start,posted[0].parts.length],[400,200]);
+});
+
+
 test('deleting the selected session clears its sidebar without reattaching it', () => {
   const received=event(), disposed=event(), visibility=event();
   const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage(){},onDidReceiveMessage:received.register}};

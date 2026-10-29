@@ -799,7 +799,7 @@ try {
   const longEmit=()=>longPage.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),longState);
   await longPage.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),{...longState,view:{...longState.view,parts:longState.view.parts.slice(0,50)}});
   await longEmit();await longPage.waitForTimeout(30);
-  assert.equal(await longPage.locator('#transcript > section').count(),150);
+  assert.equal(await longPage.locator('#transcript > section').count(),160);
   assert(await longPage.locator('#scroll').evaluate(e=>e.scrollHeight-e.scrollTop-e.clientHeight<5));
   await longPage.locator('#scroll').evaluate(e=>{e.scrollTop=150;const row=Array.from(document.querySelector('#transcript').children).find(n=>n.getBoundingClientRect().bottom>e.getBoundingClientRect().top);window.anchorRow=row;window.anchorOffset=row.getBoundingClientRect().top-e.getBoundingClientRect().top;const text=row.querySelector('p').firstChild;const range=document.createRange();range.setStart(text,0);range.setEnd(text,7);getSelection().removeAllRanges();getSelection().addRange(range);window.anchorSelection=getSelection().toString();});
   await longPage.waitForTimeout(50);
@@ -823,13 +823,20 @@ try {
   await reopened.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),{...longState,view:{...longState.view,replayComplete:false,parts:longState.view.parts.slice(0,50)}});
   assert.equal(await reopened.locator('#transcript > section').count(),0);
   await reopened.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),{...longState,view:{...longState.view,replayComplete:true}});await reopened.waitForTimeout(30);
-  assert.equal(await reopened.locator('#transcript > section').count(),251);
-  assert(Math.abs(await reopened.locator('#scroll').evaluate(e=>e.scrollTop)-savedHistory.sessions['test-session'].scrollTop)<1);
+  // Reopening a long thread shows its last bunch, not the deep place it was closed
+  // at; that place stays reachable by scrolling back, which loads it on demand.
+  assert(savedHistory.sessions['test-session'].visibleStart<1001-160,'the closed thread must have been read above the reopened window');
+  assert.equal(await reopened.locator('#transcript > section').count(),160);
+  assert(await reopened.locator('#scroll').evaluate(e=>e.scrollHeight-e.scrollTop-e.clientHeight<5));
+  assert(await reopened.evaluate(()=>document.querySelector('#transcript').firstElementChild.textContent.includes('History row 841')));
+  assert(await reopened.locator('#historyEarlier').evaluate(e=>!e.classList.contains('hidden')));
+  await reopened.locator('#scroll').evaluate(e=>{e.scrollTop=150;});await reopened.waitForTimeout(60);
+  assert.equal(await reopened.locator('#transcript > section').count(),250);
   await reopened.close();
   for(let i=0;i<6;i++){await longPage.locator('#scroll').evaluate(e=>{e.scrollTop=150;});await longPage.waitForTimeout(30);}
-  assert.equal(await longPage.locator('#transcript > section').count(),851);
+  assert.equal(await longPage.locator('#transcript > section').count(),791);
   await longPage.locator('#jumpBtn').click();await longPage.waitForTimeout(30);
-  assert.equal(await longPage.locator('#transcript > section').count(),400);
+  assert.equal(await longPage.locator('#transcript > section').count(),160);
   assert(await longPage.locator('#scroll').evaluate(e=>e.scrollHeight-e.scrollTop-e.clientHeight<5));
   await longPage.close();
   const restoredPage = await browser.newPage({viewport:{width:600,height:550}});

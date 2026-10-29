@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12]
+
 ### Changed
 
 - Keep the conversation window bounded. A reopened thread renders the newest messages, or the place the reader left when the panel still holds it, instead of rebuilding its whole history, and streaming updates ship only the tail of the transcript across the webview bridge. The window is bounded around the reader rather than ending at the newest message: scrolling up fetches the next slice of history on demand while holding the reading position, rows far above the reader are released again, and reading past the far end slides the window forward instead of growing it, with a Load later messages button for the rest. A 10,000-message thread walked back to its first message holds 900 rows and about 12,000 nodes at its peak instead of all 10,000 rows and 134,000 nodes, and a streamed update stays under half a millisecond wherever the reader is. Following the latest, the pause on deliberate scrolling and the Latest message jump all refer to the end of the thread, not the end of the rendered window.
@@ -142,7 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.12...HEAD
+[0.1.12]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.8...v0.1.9

@@ -23,6 +23,8 @@ Watch and steer live [Nodecode](https://nodecode.ai) sessions without leaving VS
 
 Open controllers are reused when switching conversations. After a completed sync, the extension saves a private local projection in VS Code’s extension storage. Reopening shows that saved history immediately, including recorded file changes, agent relationships and usage, while validating a durable event and catching up from the saved cursor. The runtime remains authoritative: changed branches, incompatible or corrupt caches, and failed validation trigger a replacement replay. Partial replays never replace the last complete checkpoint. Sending and turn controls wait for synchronization; cached process output is last observed, not proof a process is still running.
 
+Every runtime event is applied to the store; visible panels coalesce streaming display updates on a 16 ms timer. Hidden panels do not build or send display snapshots; revealing one immediately shows the current state. Command acknowledgements and connection changes bypass the streaming timer. Unchanged recorded-file, prompt-history and family projections are reused instead of rebuilding historical data per token, and the browser leaves unchanged file lists and controls alone. Controllers share overlapping roster requests, but each caller receives independent results; native roster notifications reject older snapshots and the next read after completion fetches fresh data. Unchanged checkpoints are not rebuilt for ignored RPC traffic. Recorded patch text counts toward the delivery and rendering budgets without truncating the patches or making earlier messages unavailable.
+
 Below the chat input, the status row shows work and save state, **current context** separately from **cumulative tokens**, abbreviated in K/M, and recorded cost. Hover for exact input, output, cache-read and cache-write counts. Cumulative usage and recorded cost cover this session’s currently visible branch, not child agents or work discarded by undo; cost may exclude unpriced rounds. Earlier messages remain available by scrolling upward—the cache is not a history truncation.
 
 ## Requirements
@@ -91,15 +93,16 @@ For the optional Chromium interaction checks, use an existing Playwright install
 
 ```sh
 export PLAYWRIGHT_PATH=/path/to/installed/playwright
-npm run test:browser # all five at once, or run them individually:
+npm run test:browser # all six at once, or run them individually:
 node test/browser-smoke.mjs
 node test/browser-regressions.mjs
+node test/browser-windowing.mjs
 node test/browser-diffs.mjs
 node test/browser-composition-regressions.mjs
 node test/browser-activity-regressions.mjs
 ```
 
-These cover rendering, narrow layouts, navigation, draft persistence, delayed acknowledgements, active-response steering versus explicit queuing, failure recovery, long-draft references, upload reloads, thread-family grouping and navigation, process reconnection, and recorded-diff coloring, copying, navigation and reading-state retention. No browser dependency is added to the extension.
+These cover rendering, bounded history windows, unchanged-stream work counts, narrow layouts, navigation, draft persistence, delayed acknowledgements, active-response steering versus explicit queuing, failure recovery, long-draft references, upload reloads, thread-family grouping and navigation, process reconnection, and recorded-diff coloring, copying, navigation and reading-state retention. No browser dependency is added to the extension.
 
 ## Releasing
 

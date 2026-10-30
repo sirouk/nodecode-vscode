@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Coalesce visible streaming snapshots on a fixed 16 ms timer and skip projection and delivery for hidden panels; revealing a panel catches up immediately without delaying command receipts or connection changes.
+- Reuse recorded-file, prompt-history and session-family projections until their source facts change instead of scanning historical prompts, sorting tool receipts and rebuilding the roster for every streamed update.
+- Avoid rebuilding and atomically rewriting an unchanged local checkpoint for ignored RPC traffic or when checkpoint storage is unavailable; retain same-cursor streaming updates, fixed save deadlines and failed-write retries.
+- Count recorded patch text in both transcript weight budgets so large tool diffs cannot bypass bounded delivery and rendering; earlier messages and complete patches remain available on demand.
+- Compare displayed structured message data exactly instead of sampling string positions, so same-length tool patch or result-detail updates cannot remain stale.
+- Skip browser serialization and reconciliation of unchanged recorded files while preserving updates deferred by a text selection.
+- Share overlapping session-roster HTTP requests across controllers without caching settled responses or sharing mutable results between callers; native activity and title notifications require a fresh request and reject older callbacks.
+- Retain unchanged queued-message controls, header and usage DOM during streaming, preserving keyboard focus on Withdraw and reusing locale formatters.
+- Make bare-URL trailing-parenthesis cleanup linear instead of rescanning the same URL for every unmatched closing parenthesis.
+- Leave unchanged background-process history untouched during streaming, avoiding repeated status writes and forced layout while retaining process output, scrolling and live controls.
+- Retain identical streaming carets and family headings, avoid constructing discarded reply markup, and reuse fence-scanning regexes within each Markdown code block.
+- Prevent long runs of dots, hyphens and other path-like text from freezing Markdown rendering through repeated bare-path matching.
+
 ## [0.1.12]
 
 ### Changed

@@ -105,5 +105,133 @@ try{
     assert.equal(await page.locator('#idleThreadDetails').evaluate(node=>node.open),false);
     assert.deepEqual(errors,[]);await page.close();
   });
+  await check('omitted recorded files bypass serialization and retain their DOM across streaming and action receipts',async()=>{
+    const {page,errors}=await open();
+    const state=snapshot([]),patch='@@ -1,80 +1,80 @@\n'+Array.from({length:80},(_,i)=>' '+i+' '+('recorded source '.repeat(16))).join('\n');
+    state.view.modifiedFiles=Array.from({length:100},(_,i)=>({path:'src/file-'+i+'.ts',added:1,removed:1,patch,changeCount:1}));
+    state.view.parts=[{kind:'assistant',text:'',reasoning:'Streaming thought',streaming:true}];
+    await emit(page,state);await page.locator('#fileSummary').click();await page.waitForTimeout(30);
+    const result=await page.evaluate(state=>{
+      const list=document.querySelector('#fileList'),nodes=Array.from(list.querySelectorAll(':scope > [data-file-path]')),button=nodes[5].querySelector('.diff-open');
+      list.scrollTop=80;button.focus({preventScroll:true});const top=list.scrollTop;
+      let serializations=0,characters=0;
+      const stringify=JSON.stringify,observer=new MutationObserver(()=>{});
+      JSON.stringify=function(value,...args){const text=Reflect.apply(stringify,this,[value,...args]);if(Array.isArray(value)&&value.length===100&&value[0]?.path==='src/file-0.ts'){serializations++;characters+=text.length;}return text;};
+      observer.observe(document.querySelector('#fileBar'),{subtree:true,childList:true,characterData:true,attributes:true});
+      const next=structuredClone(state);delete next.view.modifiedFiles;next.view.modifiedFilesOmitted=true;
+      const start=performance.now();
+      try{
+        for(let i=0;i<30;i++){const message=structuredClone(next);message.view.parts[0].reasoning+=' '+i;window.dispatchEvent(new MessageEvent('message',{data:message}));}
+        window.dispatchEvent(new MessageEvent('message',{data:{type:'bookmarkFinished',turnId:'completed',ids:['completed']}}));
+        window.dispatchEvent(new MessageEvent('message',{data:{type:'forkFinished',turnId:'completed'}}));
+        return {serializations,characters,elapsedMs:performance.now()-start,mutations:observer.takeRecords().length,count:nodes.length,sameNodes:nodes.every((node,i)=>node===list.children[i]),sameFocus:document.activeElement===button,top,listTop:list.scrollTop};
+      }finally{JSON.stringify=stringify;observer.disconnect();}
+    },state);
+    console.log('Recorded-file omitted ticks: '+JSON.stringify(result));
+    assert.equal(result.serializations,0,'unchanged omitted files must not be serialized again');
+    assert.equal(result.characters,0);assert.equal(result.mutations,0,'unchanged files do not recompute headings or touch rows');
+    assert.equal(result.count,100);assert(result.sameNodes);assert(result.sameFocus);assert.equal(result.listTop,result.top);
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('selected recorded-file updates apply after clearing selection on an omitted tick',async()=>{
+    const {page,errors}=await open();await page.setViewportSize({width:760,height:920});
+    const state=snapshot([]),patch='@@ -1,100 +1,100 @@\n'+Array.from({length:100},(_,i)=>' '+i+' '+('long recorded source '.repeat(18))).join('\n');
+    state.view.modifiedFiles=[{path:'src/selected.ts',added:1,removed:1,patch,changeCount:1}];
+    await emit(page,state);await page.locator('#fileSummary').click();await page.locator('#fileList .diff-summary').click();
+    await page.waitForFunction(()=>!document.querySelector('#fileList .diff-code').hasAttribute('data-diff-pending'));
+    const pane=page.locator('#fileList .diff-code');
+    const position=await pane.evaluate(node=>{node.scrollTop=150;node.scrollLeft=200;node.focus();return [node.scrollTop,node.scrollLeft];});
+    assert(position[0]>0&&position[1]>0);
+    const selected=await pane.evaluate(node=>{window.selectedActivityPane=node;const range=document.createRange();range.selectNodeContents(node.querySelectorAll('.diff-source')[4]);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);return selection.toString();});
+    const changed={...state,view:{...state.view,modifiedFiles:[{...state.view.modifiedFiles[0],added:2,patch:patch.replace('0 long recorded','0 CHANGED recorded'),changeCount:2}]}};
+    await emit(page,changed);
+    const omitted={...changed,view:{...changed.view,modifiedFilesOmitted:true}};delete omitted.view.modifiedFiles;
+    await emit(page,omitted);
+    assert.equal(await page.evaluate(()=>getSelection().toString()),selected);assert(await pane.evaluate(node=>node===window.selectedActivityPane));
+    assert.equal((await pane.textContent()).includes('CHANGED recorded'),false,'a selection keeps its original recorded patch');
+    await page.evaluate(message=>{getSelection().removeAllRanges();window.dispatchEvent(new MessageEvent('message',{data:message}));},omitted);
+    await page.waitForFunction(()=>document.querySelector('#fileList .diff-code').textContent.includes('CHANGED recorded'));
+    assert.equal(await page.locator('#fileList .diff-summary').getAttribute('aria-expanded'),'true');
+    assert.equal(await page.locator('#fileList .diff-note').textContent(),'Latest recorded change · 2 change receipts');
+    assert((await page.locator('#fileSummary').textContent()).includes('+2'));
+    assert.deepEqual(await pane.evaluate(node=>[node.scrollTop,node.scrollLeft]),position);assert(await pane.evaluate(node=>document.activeElement===node));
+    await emit(page,{...changed,view:{...changed.view,modifiedFiles:[{...changed.view.modifiedFiles[0],patch:changed.view.modifiedFiles[0].patch.replace('CHANGED recorded','LATEST recorded')}]}});
+    assert((await pane.textContent()).includes('LATEST recorded'),'a later full collection with changed patch text still updates');
+    const empty={...state,view:{...state.view,modifiedFiles:[]}};await emit(page,empty);
+    assert.equal(await page.locator('#fileList > [data-file-path]').count(),0);assert.equal(await page.locator('#fileBar').isVisible(),false);
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('streaming leaves unchanged process history untouched, expanded or collapsed',async()=>{
+    const {page,errors}=await open();
+    const state=snapshot([]);
+    state.view.processes=Array.from({length:191},(_,i)=>({id:String(i),execId:i,command:'Recorded command '+i,status:i<182?'exited':'unknown',exitCode:i<182?0:undefined,output:('Retained output '+i+'\n').repeat(60)}));
+    state.view.parts=[{kind:'assistant',text:'',reasoning:'Streaming thought',streaming:true}];
+    await emit(page,state);
+    for(const expanded of [false,true]){
+      await page.locator('#processDetails').evaluate((node,expanded)=>{node.open=expanded;node.querySelectorAll('.activity-process').forEach(row=>{row.open=expanded;});},expanded);
+      await page.waitForTimeout(30);
+      const result=await page.evaluate(state=>{
+        const list=document.querySelector('#processList'),nodes=Array.from(list.children),output=nodes.map(node=>node.querySelector('pre').textContent);
+        let layoutReads=0;
+        const height=Object.getOwnPropertyDescriptor(Element.prototype,'clientHeight');
+        nodes.forEach(node=>Object.defineProperty(node.querySelector('pre'),'clientHeight',{configurable:true,get(){layoutReads++;return height.get.call(this);}}));
+        const observer=new MutationObserver(()=>{});observer.observe(document.querySelector('#procBar'),{subtree:true,childList:true,characterData:true,attributes:true});
+        const start=performance.now();
+        for(let i=0;i<30;i++){
+          const next=structuredClone(state);next.view.parts[0].reasoning+=' '+i;
+          window.dispatchEvent(new MessageEvent('message',{data:next}));
+        }
+        const elapsedMs=performance.now()-start,mutations=observer.takeRecords().length;observer.disconnect();
+        return {layoutReads,mutations,elapsedMs,count:list.children.length,sameNodes:nodes.every((node,i)=>node===list.children[i]),sameOutput:nodes.every((node,i)=>node.querySelector('pre').textContent===output[i])};
+      },state);
+      assert.equal(result.count,191);assert(result.sameNodes);assert(result.sameOutput);
+      assert.equal(result.mutations,0,'token updates must not rewrite unchanged process history');
+      assert.equal(result.layoutReads,0,'token updates must not measure unchanged process output panes');
+    }
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('unchanged process output follows reflow without disturbing deliberate reading',async()=>{
+    const {page,errors}=await open();await page.setViewportSize({width:800,height:700});
+    const state=snapshot([]);
+    state.view.processes=[{id:'resize',execId:8,command:'Long output',status:'running',output:('A long output line that wraps in the narrow pane. '.repeat(2)+'\n').repeat(100)}];
+    await emit(page,state);
+    await page.locator('#processDetails > summary').click();await page.locator('.activity-process > summary').click();
+    const pane=page.locator('.process-output');
+    await pane.evaluate(node=>{node.scrollTop=node.scrollHeight;});await page.waitForTimeout(30);
+    await page.setViewportSize({width:360,height:700});
+    await page.waitForTimeout(100);
+    assert(await pane.evaluate(node=>node.scrollHeight-node.scrollTop-node.clientHeight<5),'following output stays at the tail after wrapping changes');
+    await pane.evaluate(node=>{node.scrollTop=60;});await page.waitForTimeout(30);
+    await page.setViewportSize({width:800,height:700});await page.waitForTimeout(100);
+    assert.equal(await pane.evaluate(node=>node.scrollTop),60,'resizing preserves deliberate upward reading');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('changed process output and controls stay live without replacing retained panes',async()=>{
+    const {page,errors}=await open();
+    const state=snapshot([]);
+    state.view.processes=[{id:'7',execId:7,command:'Build',status:'running',output:'Output\n'.repeat(80)}];
+    await emit(page,state);
+    await page.locator('#processDetails > summary').click();await page.locator('.activity-process > summary').click();
+    const pane=page.locator('.process-output');
+    await pane.evaluate(node=>{window.originalProcessPane=node;node.scrollTop=node.scrollHeight;});
+    state.view.processes[0].output+='Following new output\n'.repeat(10);await emit(page,state);
+    assert(await pane.evaluate(node=>node===window.originalProcessPane&&node.scrollHeight-node.scrollTop-node.clientHeight<5),'new output follows while the reader is at its bottom');
+    await pane.evaluate(node=>{node.scrollTop=60;});await page.waitForTimeout(20);
+    state.view.processes[0].output+='More live output\n'.repeat(10);await emit(page,state);
+    assert.equal(await pane.evaluate(node=>node.scrollTop),60,'new output preserves deliberate upward reading');
+    await page.getByRole('button',{name:'Stop',exact:true}).click();
+    assert(await page.evaluate(()=>window.posted.some(m=>m.type==='interrupt'&&Number(m.execId)===7)));
+    state.view.cached=true;await emit(page,state);assert.equal(await page.locator('.process-stop').isVisible(),false);
+    state.view.cached=false;state.view.replayComplete=false;await emit(page,state);assert.equal(await page.locator('.process-stop').isVisible(),false);
+    state.view.replayComplete=true;await emit(page,state);assert(await page.locator('.process-stop').isVisible());
+    state.view.processes[0]={...state.view.processes[0],status:'exited',exitCode:1,shellExit:2,error:'Build failed',outputTruncated:true};await emit(page,state);
+    assert.equal(await page.locator('.process-status').textContent(),'exited · exit 1 · shell 2 · Build failed · retained output tail');
+    assert.equal(await page.locator('.process-stop').isVisible(),false);
+    state.view.processes[0]={id:'7',execId:7,command:'Next build',status:'running',output:'Replacement output'};await emit(page,state);
+    assert.equal(await pane.textContent(),'Replacement output');assert.equal(await page.locator('.process-command').textContent(),'Next build');
+    assert(await pane.evaluate(node=>node===window.originalProcessPane),'a reused process ID updates the retained pane');
+    state.view.processes=[];await emit(page,state);assert.equal(await page.locator('.activity-process').count(),0);
+    assert.deepEqual(errors,[]);await page.close();
+  });
   assert.deepEqual(failures,[],'Chromium activity regressions failed');
 }finally{await browser.close();}

@@ -151,6 +151,7 @@ export class SessionPanel {
 
   dispose(): void {
     this.disposed = true;
+    this.clearStateTimer();
     this.controller.closeTextAttachments(this.attachmentSource);
     SessionPanel.instances.delete(this);
     if (SessionPanel.panels.get(this.controller.sessionId) === this) SessionPanel.panels.delete(this.controller.sessionId);
@@ -159,6 +160,7 @@ export class SessionPanel {
 
   private readonly disposables: vscode.Disposable[] = [];
   private disposed = false;
+  private stateTimer: NodeJS.Timeout | undefined;
   // What the last state message carried, so a tick that changes neither can say
   // so instead of serializing both again. Cleared for a reloaded document, which
   // has nothing to carry over, and for a different thread, whose lists are its own.
@@ -193,7 +195,7 @@ export class SessionPanel {
     if (!sidebar) SessionPanel.panels.set(controller.sessionId, this);
     panel.webview.html = this.html();
 
-    this.disposables.push(controller.store.subscribe(() => this.postState()));
+    this.disposables.push(controller.store.subscribe(() => this.scheduleState()));
     this.disposables.push(controller.subscribeConnection((state, attempts) => {
       if (state === "connected" && this.connection !== "connected") {
         for (const [id, image] of this.conversationImages) if (image.error) this.conversationImages.delete(id);
@@ -210,6 +212,7 @@ export class SessionPanel {
       panel.webview.onDidReceiveMessage((message) => void this.onMessage(message)),
       panel.onDidChangeViewState(() => {
         if (panel.visible) this.postState();
+        else this.clearStateTimer();
       }),
     );
     this.postState();
@@ -319,8 +322,21 @@ export class SessionPanel {
         && file.truncated === was.truncated && file.patch === was.patch;
     });
   }
+  private clearStateTimer(): void {
+    if (this.stateTimer !== undefined) clearTimeout(this.stateTimer);
+    this.stateTimer = undefined;
+  }
+
+  private scheduleState(): void {
+    if (this.disposed || this.panel.visible === false || this.stateTimer !== undefined) return;
+    // The store processes every event; a frame needs only the latest projection.
+    // A fixed deadline (not a debounce) keeps continuous streams moving too.
+    this.stateTimer = setTimeout(() => { this.stateTimer = undefined; this.postState(); }, 16);
+  }
+
   private postState(): void {
-    if (this.disposed || this.controller.store.replaying) return;
+    this.clearStateTimer();
+    if (this.disposed || this.panel.visible === false || this.controller.store.replaying) return;
     const view = this.controller.store.view();
     const title = view.title;
     if (title && !this.sidebar) this.panel.title = `Nodecode: ${title}`;
@@ -1382,7 +1398,7 @@ const CLIENT_JS = String.raw`
     }
     var images = JSON.stringify(part.images || []);
     if (node._images !== images) { bubble.querySelector('.reply-images').innerHTML = imageHtml(part); node._images = images; }
-    bubble.querySelector('.reply-caret').innerHTML = replyCaret(part,index);
+    var caret=bubble.querySelector('.reply-caret'),caretMarkup=replyCaret(part,index);if(caret.innerHTML!==caretMarkup)caret.innerHTML=caretMarkup;
   }
   function rememberReadingAnchor(){
     if(followLatest||firstRender){readingAnchor=null;return;}
@@ -1433,9 +1449,13 @@ const CLIENT_JS = String.raw`
     if (part.kind === 'assistant') return 32 + (part.text ? part.text.length : 0) + (part.reasoning ? part.reasoning.length : 0) + 800 * (part.images ? part.images.length : 0);
     if (part.kind === 'user') return 32 + (part.text ? part.text.length : 0) + 800 * (part.images ? part.images.length : 0) + 120 * (part.textFiles ? part.textFiles.length : 0);
     if (part.kind === 'tool') {
-      var call = part.call || {}, metadata = call.metadata || {};
+      var call = part.call || {}, metadata = call.metadata || {}, files = metadata.workspace_diff && metadata.workspace_diff.files, patches = 0;
+      if (Array.isArray(files)) for (var f = 0; f < files.length; f++) {
+        var file = files[f];
+        if (file && !Array.isArray(file) && typeof file.patch === 'string') patches += file.patch.length;
+      }
       return 64 + (call.arguments ? call.arguments.length : 0) + (call.result ? call.result.length : 0)
-        + (metadata.workspace_diff ? 6000 : 0) + (metadata.image ? 4000 : 0);
+        + (metadata.workspace_diff ? 6000 : 0) + (metadata.image ? 4000 : 0) + patches;
     }
     return 16;
   }
@@ -1468,33 +1488,27 @@ const CLIENT_JS = String.raw`
   }
   function windowEnd(){ return visibleStart === null ? partsTotal : walkForward(visibleStart, HARD_ROWS, HARD_WEIGHT); }
 
-  // A row is rebuilt only when something it shows changed. Structured values
-  // are fingerprinted (lengths and sampled characters, never a full copy) and
-  // the big strings are compared directly, which is exact and costs nothing
-  // while a part stands still. The store mutates parts in place, so object
-  // identity cannot stand in for this.
-  var HASH_LIMIT = 20000, hashNodes = 0;
-  function sample(text){ var n = text.length; return text.charCodeAt(0) + '.' + text.charCodeAt(n >> 2) + '.' + text.charCodeAt(n >> 1) + '.' + text.charCodeAt(n - 1); }
-  function hashValue(value){
-    // Past the budget, say what shape ran out rather than nothing: an empty
-    // answer is the same for every huge value, which would freeze the row.
-    if (hashNodes++ > HASH_LIMIT) return 'over' + (Array.isArray(value) ? 'a' + value.length : value && typeof value === 'object' ? 'k' + Object.keys(value).length : typeof value);
-    if (value === null || value === undefined) return '0';
-    if (typeof value === 'string') return value.length <= 48 ? value : 's' + value.length + '.' + sample(value);
-    if (typeof value !== 'object') return String(value);
-    if (Array.isArray(value)) { var s = 'a' + value.length; for (var i = 0; i < value.length; i++) s += '|' + hashValue(value[i]); return s; }
-    var keys = Object.keys(value), o = 'k' + keys.length;
-    for (var j = 0; j < keys.length; j++) o += '|' + keys[j] + '=' + hashValue(value[keys[j]]);
-    return o;
+  // Bridge messages own their structured values. Keep the last applied receipt
+  // and compare its leaves exactly: sampled strings can hide same-length edits.
+  function sameValue(a,b){
+    if (a === b) return true;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a)) {
+      if (a.length !== b.length) return false;
+      for (var n = 0; n < a.length; n++) if (!sameValue(a[n],b[n])) return false;
+      return true;
+    }
+    var keys = Object.keys(a), otherKeys = Object.keys(b);
+    if (keys.length !== otherKeys.length) return false;
+    for (var i = 0; i < keys.length; i++) if (keys[i] !== otherKeys[i] || !sameValue(a[keys[i]],b[keys[i]])) return false;
+    return true;
   }
   function partKey(part, last){
-    hashNodes = 0;
     var call = part.call;
     return (part.kind ? part.kind.charAt(0) : '?') + '|' + (last ? 'L' : '') + '|' + (part.turnNumber === undefined ? '' : part.turnNumber)
       + '|' + (part.streaming ? 's' : '') + (part.voided ? 'v' : '') + (part.forkTurnId || '') + '|' + (part.level || '') + '|' + (part.childSessionId || '')
       + '|' + (part.text ? part.text.length : 0) + '|' + (part.reasoning ? part.reasoning.length : 0)
-      + '|' + hashValue(part.images) + '|' + hashValue(part.files) + '|' + hashValue(part.textFiles)
-      + '|' + (call ? [call.callId, call.name, call.status, call.done, call.failed, call.durationMs, call.sessionId, call.turnId, call.arguments ? call.arguments.length : 0, call.result ? call.result.length : 0, call.imageUrl ? call.imageUrl.length : 0].join(',') + '#' + hashValue(call.metadata) : '');
+      + '|' + (call ? [call.callId, call.name, call.status, call.done, call.failed, call.durationMs, call.sessionId, call.turnId, call.arguments ? call.arguments.length : 0, call.result ? call.result.length : 0, call.imageUrl ? call.imageUrl.length : 0].join(',') : '');
   }
   // forkHtml and the reply caret read these, so a change here rebuilds rows.
   function forkEpoch(){
@@ -1507,7 +1521,9 @@ const CLIENT_JS = String.raw`
     var call = part.call;
     if (node._stArgs !== (call && call.arguments ? call.arguments : '')) return false;
     if (node._stResult !== (call && call.result ? call.result : '')) return false;
-    return true;
+    if (node._stImageUrl !== (call && call.imageUrl ? call.imageUrl : '')) return false;
+    return sameValue(node._stImages,part.images) && sameValue(node._stFiles,part.files)
+      && sameValue(node._stTextFiles,part.textFiles) && sameValue(node._stMetadata,call && call.metadata);
   }
   function stampPart(node, part, epoch, key){
     node._stEpoch = epoch; node._stKey = key;
@@ -1515,6 +1531,9 @@ const CLIENT_JS = String.raw`
     var call = part.call;
     node._stArgs = call && call.arguments ? call.arguments : '';
     node._stResult = call && call.result ? call.result : '';
+    node._stImageUrl = call && call.imageUrl ? call.imageUrl : '';
+    node._stImages = part.images; node._stFiles = part.files; node._stTextFiles = part.textFiles;
+    node._stMetadata = call && call.metadata;
   }
   function captureDetailState(root){
     root.querySelectorAll('[data-detail]').forEach(function(el){
@@ -1635,7 +1654,7 @@ const CLIENT_JS = String.raw`
     if (lostFocus !== null) focusSurvivor(lostFocus);
     for (var ci = 0; ci < changes.length; ci++) {
       var index = changes[ci], changed = partAt(index), target = existing.get(index);
-      var html = partHtml(changed, index);
+      var html = changed.kind === 'assistant' && target && target._kind === 'assistant' ? null : partHtml(changed, index);
       if (!target) { target = document.createElement('section'); target._partIndex = index; }
       if (target.isConnected) captureDetailState(target);
       if (transcript.children[index - visibleStart] !== target) transcript.insertBefore(target, transcript.children[index - visibleStart] || null);
@@ -1751,15 +1770,18 @@ const CLIENT_JS = String.raw`
   function updateSendControls(){
     var view=state.view||{},active=!!(view.running||view.activeTurnId),steerable=!!(view.activeTurnSteerable&&view.activeTurnId),slash=composer.value.trim().startsWith('/');
     var blocked=sending||pendingReads>0||textFiles.some(function(f){return !f.attachment||f.error;})||(!composer.value.trim()&&!attachments.length&&!files.length&&!textFiles.length)||state.connection!=='connected'||!state.view||view.replayComplete===false;
-    sendBtn.disabled=blocked||(active&&!steerable&&!slash);
-    queueBtn.disabled=blocked||slash;
-    queueBtn.className=active?'mode':'mode hidden';
+    var sendDisabled=blocked||(active&&!steerable&&!slash),queueDisabled=blocked||slash,queueClass=active?'mode':'mode hidden';
+    if(sendBtn.disabled!==sendDisabled)sendBtn.disabled=sendDisabled;
+    if(queueBtn.disabled!==queueDisabled)queueBtn.disabled=queueDisabled;
+    if(queueBtn.className!==queueClass)queueBtn.className=queueClass;
     var label=sending?'Sending…':slash?'Run command':active?(steerable?'Steer active response':'Steering unavailable; wait or use Queue'):'Send message';
-    sendBtn.title=label;
-    sendBtn.setAttribute('aria-label',label);
-    E('attachBtn').disabled=sending;
-    E('composerHint').textContent=active?(steerable?'Enter to steer · Queue for later · Shift+Enter for a new line':'Steering unavailable · Queue waits until work finishes'):'Enter to send · Shift+Enter for a new line · @ for files';
-    E('composerHint').title=active?'Steering takes effect after the current response and its tool batch finish. Queue waits for the whole turn to finish.':'';
+    if(sendBtn.title!==label)sendBtn.title=label;
+    if(sendBtn.getAttribute('aria-label')!==label)sendBtn.setAttribute('aria-label',label);
+    if(E('attachBtn').disabled!==sending)E('attachBtn').disabled=sending;
+    var hint=active?(steerable?'Enter to steer · Queue for later · Shift+Enter for a new line':'Steering unavailable · Queue waits until work finishes'):'Enter to send · Shift+Enter for a new line · @ for files';
+    if(E('composerHint').textContent!==hint)E('composerHint').textContent=hint;
+    var hintTitle=active?'Steering takes effect after the current response and its tool batch finish. Queue waits for the whole turn to finish.':'';
+    if(E('composerHint').title!==hintTitle)E('composerHint').title=hintTitle;
   }
   function renderAll(stick){
     if(firstRender&&saved.scrollTop!==undefined)setFollow(scrollBox,false);
@@ -1771,39 +1793,44 @@ const CLIENT_JS = String.raw`
     restoreReadingAnchor();
     stick = followLatest;
     var view = state.view || {};
-    titleEl.textContent = view.title || 'Untitled conversation';
-    titleEl.title = [view.title || 'Untitled conversation', view.cwd, 'Click to rename'].filter(Boolean).join('\n');
+    var title=view.title||'Untitled conversation',titleHint=[title,view.cwd,'Click to rename'].filter(Boolean).join('\n');
+    if(titleEl.textContent!==title)titleEl.textContent=title;
+    if(titleEl.title!==titleHint)titleEl.title=titleHint;
     var line = [];
     if (view.provider || view.model) line.push([view.provider, view.model].filter(Boolean).join('/'));
     if (view.effort) line.push('effort ' + view.effort);
     if (state.connection !== 'connected') line.push(state.connection === 'failed' ? 'connection failed' : 'reconnecting (' + state.attempts + ')');
-    modelEl.textContent = '';
-    modelEl.title = line.join(' · ');
-    E('modelLabel').textContent = view.model || 'Choose model';
-    E('effortLabel').textContent = view.effort || 'Effort';
+    if(modelEl.textContent)modelEl.textContent='';
+    var modelHint=line.join(' · '),modelLabel=view.model||'Choose model',effortLabel=view.effort||'Effort';
+    if(modelEl.title!==modelHint)modelEl.title=modelHint;
+    if(E('modelLabel').textContent!==modelLabel)E('modelLabel').textContent=modelLabel;
+    if(E('effortLabel').textContent!==effortLabel)E('effortLabel').textContent=effortLabel;
     var replayReady=view.replayComplete!==false;
     var historyReady=replayReady||view.cached===true;
     if(historyReady)renderTranscript();
     renderActivity(view);
     var q = view.queue || [];
-    queueBar.innerHTML = q.map(function(p){
+    var queueHtml = q.map(function(p){
       var label = (p.content || p.prompt_id || '').slice(0, 120);
       var steer=p.disposition==='steer';
       return chip((steer?'Steer pending: ':'Queued: ')+label, 'withdraw', p.prompt_id, (replayReady?'&#10005; withdraw':'syncing'), steer?'Steers at the next response/tool-batch boundary; not yet delivered.':'Runs after the current turn finishes.');
     }).join('');
+    if(queueBar._html!==queueHtml){queueBar.innerHTML=queueHtml;queueBar._html=queueHtml;}
     var sline = [];
     var t = view.totals || {}, context = view.contextUsage || {};
     var contextTokens = (context.input||0)+(context.cached||0)+(context.cacheWrite||0);
     if (contextTokens || typeof t.total==='number') sline.push('ctx ' + formatContextCount(contextTokens));
     if (typeof t.total==='number') sline.push(formatContextCount(t.total) + ' tokens');
     if (t.costKnown) sline.push('$' + (t.costUsd || 0).toFixed(4));
-    var exact=function(n){return new Intl.NumberFormat().format(n||0);};
+    var exact=function(n){return contextCountFormatter.format(n||0);};
     var usageTitle='Context: '+exact(contextTokens)+' tokens\nVisible conversation: '+exact(t.total)+' tokens\nInput: '+exact(t.input)+' · Output: '+formatContextCount(t.output||0)+' ('+exact(t.output)+')\nCache reads: '+exact(t.cached)+' · Cache writes: '+exact(t.cacheWrite)+'\nCurrent branch, this session only; excludes child-agent usage.';
     if(t.costKnown)usageTitle+='\nRecorded cost: $'+(t.costUsd||0).toFixed(4)+' (unpriced rounds may be excluded).';
     var savedState=view.standby===true?(view.parentId?'Draft fork':'Draft'):view.standby===false?'Saved':'';
     var status = view.cached ? 'Syncing saved history' : state.connection === 'connected' ? (sending ? (pendingSend&&pendingSend.mode==='steer'?'Steering…':pendingSend&&pendingSend.mode==='queue'?'Queueing…':'Sending…') : view.running ? 'Working' : 'Ready') : state.connection;
-    statusLine.innerHTML = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+esc(usageTitle)+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
-    cancelBtn.className = view.running && replayReady && state.connection==='connected' ? 'icon-btn' : 'icon-btn hidden';
+    var statusHtml = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+esc(usageTitle)+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
+    if(statusLine._html!==statusHtml){statusLine.innerHTML=statusHtml;statusLine._html=statusHtml;}
+    var cancelClass=view.running&&replayReady&&state.connection==='connected'?'icon-btn':'icon-btn hidden';
+    if(cancelBtn.className!==cancelClass)cancelBtn.className=cancelClass;
     updateSendControls();
     if (windowReset) { windowReset = false; if (historyReady) { setFollow(scrollBox, true); followPane(scrollBox); } }
     else if (historyReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120) && canFollow(scrollBox)); }

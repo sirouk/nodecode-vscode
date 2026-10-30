@@ -1,12 +1,14 @@
 // Inline model selection shares the native session target with its reasoning menu.
+const contextCountFormatter = new Intl.NumberFormat();
 export function formatContextCount(value: number): string {
-  if (value < 1000) return new Intl.NumberFormat().format(value);
+  if (value < 1000) return contextCountFormatter.format(value);
   let scale = value >= 1_000_000 ? 1_000_000 : 1000;
   let rounded = Math.round(value / scale * 10) / 10;
   if (scale === 1000 && rounded >= 1000) { scale = 1_000_000; rounded = Math.round(value / scale * 10) / 10; }
   return String(rounded) + (scale === 1_000_000 ? " M" : " K");
 }
 export const MODEL_CLIENT_JS = String.raw`
+  var contextCountFormatter = new Intl.NumberFormat();
   ${formatContextCount.toString()}
   var modelRole='main',modelAux=null,modelDecider=null,modelBackups=null,backupAdding=false,backupResults=null;
   function receiveRoleOptions(message){modelAux=message.auxiliary||null;modelDecider=message.decider||null;modelBackups=message.failover||null;}
@@ -39,7 +41,7 @@ export const MODEL_CLIENT_JS = String.raw`
     var choices=E('optionChoices'),focused=document.activeElement,starFocus=focused&&focused.dataset?{provider:focused.dataset.starProvider,model:focused.dataset.starModel}:{};
     updateRoleTabs();
     var contextLabel=typeof modelContext.limit==='number'?'Last reported context: '+(typeof modelContext.used==='number'?formatContextCount(modelContext.used)+' / ':'')+formatContextCount(modelContext.limit)+' tokens':'';
-    var exactContext=typeof modelContext.limit==='number'?'Context: '+(typeof modelContext.used==='number'?new Intl.NumberFormat().format(modelContext.used)+' / ':'')+new Intl.NumberFormat().format(modelContext.limit)+' tokens':'';
+    var exactContext=typeof modelContext.limit==='number'?'Context: '+(typeof modelContext.used==='number'?contextCountFormatter.format(modelContext.used)+' / ':'')+contextCountFormatter.format(modelContext.limit)+' tokens':'';
     E('optionStatus').title=exactContext;
     E('optionStatus').textContent=optionKind==='effort'||modelRole==='main'?contextLabel:'';
     if(contextLabel)E('modelBtn').title=exactContext+' · Choose model';
@@ -54,7 +56,7 @@ export const MODEL_CLIENT_JS = String.raw`
       var section='';choices.innerHTML=rows.map(function(item){var row=item.row,group=item.starred?'Favorites':'All models',heading=group!==section?'<div class="option-group">'+group+'</div>':'';section=group;
         var selected=modelRole==='aux'?(modelAux||{}):modelRole==='backup'?{}:modelTarget;
         var identity=[row.provider,row.model].filter(Boolean).join('/'),context=typeof row.context==='number'?formatContextCount(row.context)+' context tokens':'Context not reported';
-        return heading+'<div class="option-row"><button class="option-select" data-provider="'+esc(row.provider)+'" data-model="'+esc(row.model)+'" aria-current="'+String(row.provider===selected.provider&&row.model===selected.model)+'" title="'+esc(identity+(typeof row.context==='number'?' · '+new Intl.NumberFormat().format(row.context)+' context tokens':''))+'"><span>'+esc(row.name||row.display_name||row.model)+'</span><span class="sub">'+esc(row.provider)+' · '+esc(context)+'</span></button><button class="option-star" '+(favoritePending?'disabled':'')+' data-star-provider="'+esc(row.provider)+'" data-star-model="'+esc(row.model)+'" aria-pressed="'+String(item.starred)+'" aria-label="'+(item.starred?'Unstar ':'Star ')+esc(identity)+'">'+(item.starred?'★':'☆')+'</button></div>';
+        return heading+'<div class="option-row"><button class="option-select" data-provider="'+esc(row.provider)+'" data-model="'+esc(row.model)+'" aria-current="'+String(row.provider===selected.provider&&row.model===selected.model)+'" title="'+esc(identity+(typeof row.context==='number'?' · '+contextCountFormatter.format(row.context)+' context tokens':''))+'"><span>'+esc(row.name||row.display_name||row.model)+'</span><span class="sub">'+esc(row.provider)+' · '+esc(context)+'</span></button><button class="option-star" '+(favoritePending?'disabled':'')+' data-star-provider="'+esc(row.provider)+'" data-star-model="'+esc(row.model)+'" aria-pressed="'+String(item.starred)+'" aria-label="'+(item.starred?'Unstar ':'Star ')+esc(identity)+'">'+(item.starred?'★':'☆')+'</button></div>';
       }).join('')||'<div class="picker-message">No matching models.</div>';
       if(modelRole==='aux'){
         var aux=modelAux||{},efforts=Array.isArray(aux.efforts)?aux.efforts:[];

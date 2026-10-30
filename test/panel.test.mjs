@@ -21,7 +21,8 @@ function controller(id) {
   return {sessionId:id,store,closeTextAttachments(){},commitTextAttachments:async()=>{},releasePreparedTextAttachments:async()=>{},releaseTextAttachment:async()=>{},rpc:{connectionState:'connected',attempts:0},subscribeConnection:()=>({dispose(){}}),imageDataUrl:async()=> 'data:image/png;base64,aGVsbG8='};
 }
 
-test('sidebar switches subscriptions, queues context until ready and keeps current DOM', () => {
+test('sidebar switches subscriptions, queues context until ready and keeps current DOM', t => {
+  t.mock.timers.enable({apis:['setTimeout']});
   const received=event(), disposed=event(), visibility=event();
   const posted=[];
   const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};
@@ -41,6 +42,7 @@ test('sidebar switches subscriptions, queues context until ready and keeps curre
   first.store.applyFrame({type:'session_titled',title:'old'});
   assert.equal(posted.length,0);
   second.store.applyFrame({type:'session_titled',title:'new'});
+  t.mock.timers.tick(16);
   assert.equal(posted.at(-1).view.title,'new');
   assert.equal(view.title,'Nodecode');
   sidebar.dispose();
@@ -49,6 +51,94 @@ test('sidebar switches subscriptions, queues context until ready and keeps curre
   assert.equal(posted.length,0);
 });
 
+
+test('streamed store bursts share a bounded snapshot while control receipts remain immediate',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const received=event(),disposed=event(),visibility=event(),posted=[];
+  const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};
+  const sidebar=new SessionSidebar(uri('/extension'),{}, {log(){}}),ctl=controller('burst');
+  let connection,views=0;
+  ctl.subscribeConnection=listener=>{connection=listener;return {dispose(){}};};
+  const storeView=ctl.store.view.bind(ctl.store);ctl.store.view=()=>{views++;return storeView();};
+  try{
+    sidebar.restore(ctl);sidebar.resolveWebviewView(view);received.fire({type:'ready'});posted.length=0;views=0;
+    for(let i=0;i<60;i++)ctl.store.applyFrame({type:'session_titled',title:'Burst '+i});
+    assert.equal(posted.length,0,'an event burst does not send a snapshot for every event');
+    assert.equal(views,0,'projection work is batched too, not just webview delivery');
+    t.mock.timers.tick(16);
+    assert.equal(posted.length,1);assert.equal(views,1);assert.equal(posted[0].view.title,'Burst 59');
+    for(let i=0;i<5;i++){
+      ctl.store.applyFrame({type:'session_titled',title:'Continuous '+i});
+      t.mock.timers.tick(16);
+      assert.equal(posted.at(-1).view.title,'Continuous '+i,'continuous traffic cannot starve the scheduled snapshot');
+    }
+    ctl.store.applyFrame({type:'session_titled',title:'Connection flush'});
+    connection('disconnected',1);
+    assert.equal(posted.at(-1).connection,'disconnected','connection safety state is not delayed');
+    const afterConnection=posted.length;t.mock.timers.tick(16);assert.equal(posted.length,afterConnection,'an immediate snapshot cancels redundant scheduled work');
+    await SessionPanel.get(ctl.sessionId).onMessage({type:'ready',pendingSendId:'lost-receipt'});
+    assert.equal(posted.at(-1).type,'sendRejected','send acknowledgement recovery bypasses rendering cadence');
+    ctl.store.applyFrame({type:'session_titled',title:'Disposed'});sidebar.dispose();posted.length=0;
+    t.mock.timers.tick(32);assert.equal(posted.length,0,'disposed timers cannot write into a new document');
+  }finally{sidebar.dispose();}
+});
+
+test('hidden panels do no snapshot work and reveal the latest complete state once',t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const received=event(),disposed=event(),visibility=event(),posted=[];
+  const view={visible:false,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};
+  const sidebar=new SessionSidebar(uri('/extension'),{}, {log(){}}),ctl=controller('hidden');
+  let views=0;const storeView=ctl.store.view.bind(ctl.store);ctl.store.view=()=>{views++;return storeView();};
+  try{
+    sidebar.restore(ctl);sidebar.resolveWebviewView(view);received.fire({type:'ready'});posted.length=0;views=0;
+    for(let i=0;i<60;i++)ctl.store.applyFrame({type:'session_titled',title:'Hidden '+i});
+    t.mock.timers.tick(1000);
+    assert.equal(views,0,'hidden documents do not derive projections');assert.equal(posted.length,0,'or cross the webview bridge');
+    view.visible=true;visibility.fire();
+    assert.equal(posted.length,1);assert.equal(posted[0].view.title,'Hidden 59');
+    assert(Array.isArray(posted[0].view.modifiedFiles));assert(Array.isArray(posted[0].history),'first reveal carries its complete collections');
+    ctl.store.applyFrame({type:'session_titled',title:'Pending when hidden'});view.visible=false;visibility.fire();
+    t.mock.timers.tick(1000);assert.equal(posted.length,1,'hiding cancels pending projection work');
+    ctl.store.applyFrame({type:'session_titled',title:'Newest while hidden'});
+    received.fire({type:'ready'});
+    assert.equal(posted.length,1,'even a hidden document reload waits for visibility');
+    view.visible=true;visibility.fire();
+    assert.equal(posted.length,2);assert.equal(posted.at(-1).view.title,'Newest while hidden');
+    assert(Array.isArray(posted.at(-1).view.modifiedFiles));assert(Array.isArray(posted.at(-1).history),'reloaded hidden documents get full collections when shown');
+  }finally{sidebar.dispose();}
+});
+
+test('hidden panels keep image outcomes and control receipts and reveal current connection and collections',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const received=event(),disposed=event(),visibility=event(),posted=[];
+  const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};
+  const sidebar=new SessionSidebar(uri('/extension'),{}, {log(){}}),ctl=controller('hidden-recovery'),images=new Map();
+  let connection,views=0;
+  ctl.subscribeConnection=listener=>{connection=listener;return {dispose(){}};};
+  ctl.imageDataUrl=id=>new Promise((resolve,reject)=>images.set(id,{resolve,reject}));
+  ctl.store.applyFrame({type:'session_stream_event',session_id:ctl.sessionId,sequence:1,event:{type:'turn.input_committed',payload:{message:'Image question',metadata:{images:['success','failed'].map(id=>({id,media_type:'image/png'}))}}}});
+  const storeView=ctl.store.view.bind(ctl.store);ctl.store.view=()=>{views++;return storeView();};
+  try{
+    sidebar.restore(ctl);sidebar.resolveWebviewView(view);received.fire({type:'ready'});assert.equal(images.size,2);
+    view.visible=false;visibility.fire();posted.length=0;views=0;
+    images.get('success').resolve('data:image/png;base64,aGVsbG8=');images.get('failed').reject(new Error('Image unavailable'));
+    await new Promise(setImmediate);
+    connection('disconnected',2);
+    ctl.store.applyFrame({type:'session_stream_event',session_id:ctl.sessionId,sequence:2,event:{type:'turn.input_committed',payload:{message:'Latest hidden question'}}});
+    ctl.store.applyFrame({type:'session_stream_event',session_id:ctl.sessionId,sequence:3,event:{type:'turn.tool_result',payload:{'call-id':'hidden-edit',metadata:{workspace_diff:{files:[{path:'latest.ts',patch:'new patch'}]}}}}});
+    ctl.store.applyFrame({type:'session_titled',title:'Latest hidden title'});
+    t.mock.timers.tick(32);
+    assert.equal(views,0);assert.equal(posted.length,0,'image completion, connection, and store events cannot derive or ship hidden snapshots');
+    await SessionPanel.get(ctl.sessionId).onMessage({type:'ready',pendingSendId:'unknown-hidden-send'});
+    assert.equal(posted.at(-1).type,'sendRejected');assert.equal(posted.at(-1).outcomeUnknown,true,'a send receipt is delivered without waiting for visibility');
+    posted.length=0;view.visible=true;visibility.fire();
+    assert.equal(views,1);assert.equal(posted.length,1);
+    const latest=posted[0];assert.equal(latest.type,'state');assert.equal(latest.connection,'disconnected');assert.equal(latest.attempts,2);
+    assert.equal(latest.view.title,'Latest hidden title');assert.equal(latest.view.parts[0].images[0].url,'data:image/png;base64,aGVsbG8=');
+    assert.match(latest.view.parts[0].images[1].error,/unavailable/);
+    assert.equal(latest.view.modifiedFiles[0].path,'latest.ts');assert.equal(latest.history.at(-1),'Latest hidden question');
+  }finally{sidebar.dispose();}
+});
 
 test('thread navigation carries disclosure state through the host and waits for the target document',async()=>{
   const received=event(),disposed=event(),visibility=event(),posted=[];
@@ -617,4 +707,28 @@ test('webview reload replaces document staging ownership without losing complete
     assert.equal(fs.readFileSync(complete.path,'utf8'),'acknowledgement lost');
     assert.equal(await ctl.openTextAttachment(complete.ref,panel.attachmentSource),complete.path);
   }finally{ctl.closeTextAttachments(panel.attachmentSource);ctl.dispose();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+
+test('recorded patch metadata obeys both bridge budgets while every older row remains retrievable',async()=>{
+  const patch='@@ -1 +1 @@\n-'+('old source '.repeat(3000))+'\n+'+('new source '.repeat(3000))+'\n';
+  const parts=Array.from({length:600},(_,i)=>i%3===2?{kind:'tool',turnNumber:i,call:{callId:'edit-'+i,name:'edit',arguments:'{}',result:'Updated',done:true,metadata:{workspace_diff:{files:[{path:'file-'+i+'.ts',patch}]}}}}:{kind:'user',turnNumber:i,text:'part '+i});
+  const posted=[],panel=Object.create(SessionPanel.prototype);
+  panel.controller={sessionId:'patch-weights',store:{replaying:false,view:()=>({sessionId:'patch-weights',cwd:'/work',title:'Patch weights',parts,modifiedFiles:[]}),userPrompts:()=>[]}};
+  panel.panel={webview:{postMessage:m=>posted.push(m)}};panel.postMessage=m=>posted.push(m);
+  panel.postState();posted.length=0;panel.postState();
+  const tick=posted.pop();assert(tick.view.parts.length<25,'patch text counts toward the tail budget');
+  assert(JSON.stringify(tick).length<500000,'unchanged recorded patches do not bypass the bridge budget');
+  let before=tick.view.partsStart,requests=0;
+  while(before>0){
+    posted.length=0;await panel.onMessage({type:'requestParts',requestId:++requests,before,limit:200});
+    const slice=posted.find(m=>m.type==='partsWindow');
+    assert(slice&&slice.start<before,'each request advances to older history');
+    assert(JSON.stringify(slice).length<2700000,'patch text also counts toward an on-demand slice budget');
+    assert.equal(slice.start+slice.parts.length,before,'history remains contiguous');
+    assert.deepEqual(slice.parts.map(p=>p.turnNumber),parts.slice(slice.start,before).map(p=>p.turnNumber));
+    assert(slice.parts.filter(p=>p.kind==='tool').every(p=>p.call.metadata.workspace_diff.files[0].patch===patch),'full patches are retained');
+    before=slice.start;assert(requests<30);
+  }
+  assert.equal(before,0,'no earlier rows were discarded to achieve the smaller tail');
 });

@@ -404,6 +404,21 @@ try{
     assert.equal(await lastIndex(page),parts.length-1);
     assert.deepEqual(errors,[]);await page.close();
   });
+  await check('recorded patch metadata is weight-bounded and remains readable through the first row',async()=>{
+    const patch='@@ -1 +1 @@\n-'+('old source '.repeat(3000))+'\n+'+('new source '.repeat(3000))+'\n';
+    const parts=Array.from({length:300},(_,i)=>i%3===2?{kind:'tool',turnNumber:i,call:{callId:'edit-'+i,name:'edit',arguments:'{}',result:'Updated',done:true,metadata:{workspace_diff:{files:[{path:'file-'+i+'.ts',patch}]}}}}:{kind:'user',turnNumber:i,text:'part '+i});
+    const {page,errors}=await open({},parts);
+    assert(await rows(page)<25,'recorded patches count toward the browser window budget');
+    assert.equal(await lastIndex(page),parts.length-1);
+    for(let step=0;step<50&&await firstIndex(page)>0;step++){
+      await page.evaluate(()=>{const box=document.getElementById('scroll');box.dispatchEvent(new WheelEvent('wheel',{deltaY:-600,bubbles:true}));box.scrollTop=0;document.getElementById('historyEarlier').click();});
+      for(let settle=0;settle<8;settle++){await page.waitForTimeout(16);await page.evaluate(()=>window.__serve());}
+    }
+    assert.equal(await firstIndex(page),0,'weight-based slices never hide older history');
+    await page.locator('#jumpBtn').click();await page.waitForTimeout(120);
+    assert.equal(await lastIndex(page),parts.length-1,'Latest message returns to the real end');
+    assert(await rows(page)<25);assert.deepEqual(errors,[]);await page.close();
+  });
   // 2504 parts, so that after one fetch the cache front lands on a system line:
   // the part kind that carries no turn identity for a witness to hold onto.
   const systemFront=()=>thread(500).concat([1,2,3,4].map(i=>({kind:'system',text:'Extra line '+i,level:'info'})));

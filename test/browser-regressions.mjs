@@ -705,6 +705,37 @@ try{
     assert.equal(await chips.count(),2,'native state, not optimistic removal, confirms withdrawal');
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));await page.close();
   });
+  await check('streaming retains pending-message controls and leaves unchanged footer DOM and formatters alone',async()=>{
+    const {page,errors}=await open();
+    const fixture={...state,view:{...state.view,running:true,activeTurnId:'streaming-turn',activeTurnSteerable:true,model:'test-model',effort:'high',standby:false,queue:[{prompt_id:'later',content:'Follow up'}],totals:{total:1000000,input:800000,output:10,cached:180000,cacheWrite:10000},contextUsage:{input:10000},parts:[{kind:'assistant',text:'Reply',reasoning:'',streaming:true,turnId:'streaming-turn'}]}};
+    await emit(page,fixture);await page.locator('#composer').fill('Next steering draft');
+    await page.locator('#queueBar [data-p="later"]').focus();
+    const work=await page.evaluate(fixture=>{
+      const control=document.activeElement,targets=['title','modelLine','modelLabel','effortLabel','queueBar','statusLine','composerHint','sendBtn','queueBtn','attachBtn','cancelBtn'];
+      const observer=new MutationObserver(()=>{});targets.forEach(id=>observer.observe(document.getElementById(id),{subtree:true,childList:true,characterData:true,attributes:true}));
+      const original=Intl.NumberFormat;let formatters=0;
+      Intl.NumberFormat=new Proxy(original,{construct(target,args,newTarget){formatters++;return Reflect.construct(target,args,newTarget);}});
+      try{
+        for(let i=0;i<30;i++)window.dispatchEvent(new MessageEvent('message',{data:{...fixture,view:{...fixture.view,parts:[{...fixture.view.parts[0],text:'Reply '+i}]}}}));
+        return {sameControl:control===document.querySelector('#queueBar [data-p="later"]'),focused:document.activeElement===control,mutations:observer.takeRecords().length,formatters};
+      }finally{observer.disconnect();Intl.NumberFormat=original;}
+    },fixture);
+    assert.equal(work.sameControl,true,'an unchanged pending chip keeps its Withdraw control');
+    assert.equal(work.focused,true,'keyboard focus survives the stream');
+    assert.equal(work.mutations,0,'unchanged header, queue, status and composer controls do not mutate');
+    assert.equal(work.formatters,0,'streaming does not recreate locale formatters');
+    await page.keyboard.press('Enter');assert.equal((await posted(page,'withdraw')).promptId,'later','the retained control still acts on its native identity');
+    await emit(page,{...fixture,view:{...fixture.view,queue:[],running:false,activeTurnId:null,totals:{...fixture.view.totals,total:2000000},contextUsage:{input:20000}}});
+    assert.equal(await page.locator('#queueBar .chip').count(),0,'a real queue change is reconciled');
+    assert.equal(await page.locator('#statusLine .connection').textContent(),'Ready');
+    assert((await page.locator('#statusLine').textContent()).includes('ctx 20 K · 2 M tokens'),'new usage is not cached away');
+    assert.equal(await page.locator('#queueBtn').isVisible(),false);assert.equal(await page.locator('#cancelBtn').isVisible(),false);
+    assert.equal(await page.locator('#sendBtn').getAttribute('aria-label'),'Send message');
+    await emit(page,{...fixture,connection:'disconnected'});
+    assert.equal(await page.locator('#sendBtn').isDisabled(),true);assert.equal(await page.locator('#queueBtn').isDisabled(),true);
+    assert.equal(await page.locator('#statusLine .connection').textContent(),'disconnected');
+    assert.deepEqual(errors,[]);await page.close();
+  });
   await check('authenticated saved images decode in cached history and the full-size preview',async()=>{
     const {NodecodeApi}=require('../out/api.js'),{SessionController}=require('../out/manager.js'),{SessionStore}=require('../out/store.js');
     const requests=[],server=http.createServer((req,res)=>{
@@ -960,6 +991,26 @@ try{
       assert(await page.locator('#composer').isVisible());
     }
     assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('streaming retains identical caret and family headings without building discarded reply markup',async()=>{
+    const {page,errors}=await open();
+    const result=await page.evaluate(message=>{
+      const view={...message.view,parts:[{kind:'assistant',text:'Reply to retain',reasoning:'',streaming:true}],descendants:[]};
+      const emit=()=>window.dispatchEvent(new MessageEvent('message',{data:{...message,view}}));emit();
+      const caret=document.querySelector('.reply-caret .caret');
+      const observer=new MutationObserver(()=>{});
+      observer.observe(document.querySelector('.reply-caret'),{childList:true,subtree:true});
+      observer.observe(document.getElementById('threadSummary'),{childList:true,characterData:true,subtree:true});
+      const replace=String.prototype.replace,sentinel='reply-markup-is-not-used '.repeat(100);let placeholderEscapes=0;
+      String.prototype.replace=function(search,...args){if(search instanceof RegExp&&search.source.includes('&<')&&String(this).includes(sentinel))placeholderEscapes++;return replace.call(this,search,...args);};
+      try{for(let i=0;i<30;i++){view.parts=[{...view.parts[0],text:sentinel+i}];emit();}}
+      finally{String.prototype.replace=replace;}
+      const mutations=observer.takeRecords().length;observer.disconnect();
+      return {mutations,placeholderEscapes,sameCaret:caret===document.querySelector('.reply-caret .caret'),text:document.querySelector('.reply-text').textContent};
+    },state);
+    assert.equal(result.mutations,0,'unchanged caret and family headings must not be replaced per token');
+    assert.equal(result.placeholderEscapes,30,'reply source is escaped by Markdown once, not again for discarded placeholder markup');
+    assert(result.sameCaret);assert(result.text.endsWith('29'));assert.deepEqual(errors,[]);await page.close();
   });
   await check('composer uses available panel width with small balanced gutters at every size',async()=>{
     const {page,errors}=await open();

@@ -99,6 +99,54 @@ try{
   assert.equal(await page.locator('.tool > summary').nth(2).count(),1);assert((await toolDiff.nth(2).textContent()).includes('+?'));
   console.log('PASS tool diffs: shared renderer, malformed records skipped, repeated call IDs isolated across turns and focus restored');
 
+  const exact=await open(),exactPage=exact.page;
+  const originalPatch='@@ -0,0 +1,120 @@\n'+Array.from({length:120},(_,i)=>'+source line '+String(i).padStart(3,'0')+' DATA').join('\n');
+  const updatedPatch=originalPatch.replace('DATA','EDIT');assert.equal(updatedPatch.length,originalPatch.length);
+  const originalTool=tool('same-length',1,'exact.ts');originalTool.call.metadata={workspace_diff:{files:[{path:'exact.ts',patch:originalPatch}]},snippet:{note:'A'.repeat(96)}};
+  const exactState={...state,view:{...state.view,parts:[originalTool],modifiedFiles:[]}};
+  await emit(exactPage,exactState);await exactPage.locator('.tool > summary').click();await exactPage.locator('.tool-diff summary').click();
+  await exactPage.waitForFunction(()=>!document.querySelector('.tool-diff .diff-code').hasAttribute('data-diff-pending'));
+  const exactPane=exactPage.locator('.tool-diff .diff-code');await exactPane.focus();
+  const editedTool={...originalTool,call:{...originalTool.call,metadata:{...originalTool.call.metadata,workspace_diff:{files:[{path:'exact.ts',patch:updatedPatch}]}}}};
+  const editedState={...exactState,view:{...exactState.view,parts:[editedTool]}};
+  await emit(exactPage,editedState);assert.equal(await exactPane.textContent(),updatedPatch,'same-length patch edits between sampled positions must render');
+  assert(await exactPane.evaluate(pane=>document.activeElement===pane),'exact metadata invalidation retains diff focus');
+  const selectedPatch=await exactPane.evaluate(pane=>{const range=document.createRange();range.selectNodeContents(pane.querySelectorAll('.diff-source')[2]);getSelection().removeAllRanges();getSelection().addRange(range);return getSelection().toString();});
+  const deferredPatch=updatedPatch.replace('EDIT','NEXT'),deferredTool={...editedTool,call:{...editedTool.call,metadata:{...editedTool.call.metadata,workspace_diff:{files:[{path:'exact.ts',patch:deferredPatch}]}}}};
+  await emit(exactPage,{...editedState,view:{...editedState.view,parts:[deferredTool]}});
+  assert.equal(await exactPage.evaluate(()=>getSelection().toString()),selectedPatch,'a selected row is not replaced by metadata invalidation');
+  assert.equal(await exactPane.textContent(),updatedPatch);
+  await exactPage.evaluate(()=>getSelection().removeAllRanges());await exactPage.waitForFunction(()=>document.querySelector('.tool-diff .diff-code').textContent.includes('NEXT'));
+  await exactPane.evaluate(pane=>window.retainedExactPane=pane);
+  await emit(exactPage,{...editedState,view:{...editedState.view,parts:[deferredTool]}});
+  assert(await exactPane.evaluate(pane=>pane===window.retainedExactPane),'equal structured metadata does not rebuild the row');
+  const note='A'.repeat(11)+'B'+'A'.repeat(84),noteTool={...deferredTool,call:{...deferredTool.call,metadata:{...deferredTool.call.metadata,snippet:{note}}}};
+  await emit(exactPage,{...editedState,view:{...editedState.view,parts:[noteTool]}});
+  assert((await exactPage.locator('.tool').textContent()).includes(note),'same-length non-diff metadata is compared exactly too');
+  assert.deepEqual(exact.errors,[]);await exactPage.close();console.log('PASS tool metadata: exact same-length patches and details, deferred selections and retained equal DOM');
+
+  const arrays=await open(),arrayPage=arrays.page;
+  const arrayTool=tool('large-array',1);arrayTool.call.metadata={samples:Array.from({length:30000},(_,i)=>i),nested:[[1,null,'two'],[]]};
+  const arrayState={...state,view:{...state.view,modifiedFiles:[],parts:[arrayTool,{kind:'assistant',text:'Live',reasoning:'',streaming:true}]}};
+  await emit(arrayPage,arrayState);
+  const arrayWork=await arrayPage.evaluate(message=>{
+    const original=document.querySelector('.tool'),observer=new MutationObserver(()=>{});observer.observe(original,{subtree:true,childList:true,characterData:true,attributes:true});
+    const keys=Object.keys;let arrayKeyCalls=0;
+    Object.keys=function(value){if(Array.isArray(value)&&value.length===30000)arrayKeyCalls++;return keys(value);};
+    try{
+      for(let i=0;i<30;i++){const next=structuredClone(message);next.view.parts[1].text='Live '+i;window.dispatchEvent(new MessageEvent('message',{data:next}));}
+      return {arrayKeyCalls,mutations:observer.takeRecords().length,retained:document.querySelector('.tool')===original};
+    }finally{Object.keys=keys;observer.disconnect();}
+  },arrayState);
+  assert.deepEqual(arrayWork,{arrayKeyCalls:0,mutations:0,retained:true},'equal metadata arrays are compared exactly without allocating their numeric keys');
+  const lateArray=structuredClone(arrayState);lateArray.view.parts[0].call.metadata.samples[29998]='changed';await emit(arrayPage,lateArray);
+  assert((await arrayPage.locator('.tool-metadata pre').textContent()).includes('"changed"'),'late array elements are never skipped');
+  const longerArray=structuredClone(lateArray);longerArray.view.parts[0].call.metadata.samples.push('appended');await emit(arrayPage,longerArray);
+  assert((await arrayPage.locator('.tool-metadata pre').textContent()).includes('"appended"'),'array length changes invalidate the row');
+  const nestedArray=structuredClone(longerArray);nestedArray.view.parts[0].call.metadata.nested[0][1]=false;nestedArray.view.parts[0].call.metadata.samples=[];await emit(arrayPage,nestedArray);
+  assert.deepEqual(JSON.parse(await arrayPage.locator('.tool-metadata pre').textContent()),nestedArray.view.parts[0].call.metadata,'nested arrays, nulls and removal retain exact value semantics');
+  assert.deepEqual(arrays.errors,[]);await arrayPage.close();console.log('PASS tool metadata arrays: no key enumeration on unchanged ticks, exact late edits, length and nested values');
+
   const transition=await open(),transitionPage=transition.page;
   const pairState={...state,view:{...state.view,modifiedFiles:rows.slice(0,2)}};
   await emit(transitionPage,pairState);await transitionPage.locator('#fileSummary').click();

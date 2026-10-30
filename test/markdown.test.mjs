@@ -36,6 +36,39 @@ test('native fences accept matching long markers, tilde and heading levels',()=>
   assert.equal(all(root,'button')[0].textContent,'');
 });
 
+test('fenced code preserves marker, closing length, whitespace and unclosed content',()=>{
+  for(const marker of ['`','~'])for(const length of [3,4,6])for(const indent of ['', ' ', '   ', '\t']){
+    const other=marker==='`'?'~':'`';
+    for(const [closing,closed] of [[marker.repeat(length-1),false],[marker.repeat(length),true],[marker.repeat(length+2),true],[marker.repeat(length)+' extra',false],[other.repeat(length+2),false],[marker.repeat(length)+'\t',true]]){
+      const body=' const value = "<literal> & `code`";';
+      const markdown=indent+marker.repeat(length)+'{.typescript}\n'+indent+body+'\n'+indent+closing+'\nAfter';
+      const root=render(markdown),codes=all(root,'code');
+      assert.equal(codes.length,1,JSON.stringify(markdown));
+      assert.equal(codes[0].className,'language-typescript');
+      assert.equal(codes[0].textContent,closed?body:body+'\n'+closing+'\nAfter',JSON.stringify(markdown));
+      assert.deepEqual(all(root,'p').map(node=>node.textContent),closed?['After']:[]);
+    }
+  }
+  const root=render('1. Install:\r\n   ```sh\r\n   echo ready\r\n   ```\r\n\r\nAfter');
+  assert.equal(all(root,'ol')[0].textContent,'Install:');
+  assert.equal(all(root,'code')[0].textContent,'echo ready');
+  assert.equal(all(root,'code')[0].className,'language-sh');
+  assert.deepEqual(all(root,'p').map(node=>node.textContent),['After']);
+});
+
+test('long fenced code constructs matching and indentation regexes once per fence',()=>{
+  let constructions=0;
+  const countedContext=vm.createContext({URL,RegExp:new Proxy(RegExp,{construct(target,args){constructions++;return Reflect.construct(target,args);}}),document:{createElement:tag=>new Element(tag),createTextNode:text=>new Element('#text',text)}});
+  vm.runInContext(readFileSync(new URL('../out/markdown.js',import.meta.url),'utf8'),countedContext);
+  const body=Array.from({length:1500},(_,index)=>'  const row'+index+' = transform(value'+index+');').join('\n');
+  const markdown='```typescript\n'+body+'\n```';
+  for(let index=0;index<30;index++){
+    const root=new Element('div');countedContext.NodecodeMarkdown.renderMarkdown(markdown,root,{external(){},file(){}});
+    assert.equal(all(root,'code')[0].textContent,body,'every source line remains available for display and copy');
+  }
+  assert.equal(constructions,60,'each fence needs two regexes, independent of its line count');
+});
+
 test('native table splitting keeps code and escaped pipes and column alignment',()=>{
   const root=render('A | B\n--- | :---:\n`a|b` | c\\|d');
   assert.equal(all(root,'table').length,1);
@@ -78,10 +111,46 @@ test('quoted URLs stop at quotation marks and safe source paths link from prose 
   assert.equal(all(render('`console.log(1)`'),'a').length,0);
 });
 
+test('bare URLs trim only excess trailing parentheses and preserve surrounding punctuation',()=>{
+  const urls=['https://example.com/a(b(c))','https://example.com/a(b(c))))','https://example.com/a(b','https://example.com/a)b)','https://example.com/x)).'];
+  const root=render(urls.join(' '));
+  assert.deepEqual(all(root,'a').map(n=>n.title),['https://example.com/a(b(c))','https://example.com/a(b(c))','https://example.com/a(b','https://example.com/a)b','https://example.com/x']);
+  assert.equal(root.textContent,urls.join(' '));
+});
+
+test('bare URL cleanup does not recount the entire URL for every trailing parenthesis',()=>{
+  const text=('https://example.com/a(b)'+')'.repeat(1900)+' ').repeat(80);
+  const root=new Element('div');context.urlRegressionText=text;context.urlRegressionRoot=root;
+  try{
+    vm.runInContext('NodecodeMarkdown.renderInline(urlRegressionText,urlRegressionRoot,{external(){},file(){}})',context,{timeout:1000});
+    assert.equal(root.textContent,text);
+    assert.equal(all(root,'a').length,80);
+    assert(all(root,'a').every(anchor=>anchor.title==='https://example.com/a(b)'));
+  }finally{delete context.urlRegressionText;delete context.urlRegressionRoot;}
+});
+
 test('bare prose distinguishes paths from words, dates and fractions',()=>{
   const root=render('and/or on 2026/10/26 and 1/2 with src/panel.ts then `src/components`');
   assert.deepEqual(all(root,'a').map(n=>n.title), ['src/panel.ts','src/components']);
   assert.match(root.textContent,/and\/or on 2026\/10\/26 and 1\/2/);
+});
+
+test('bare source paths retain dot and hyphen segments and explicit relative roots',()=>{
+  const paths=['src/file-name.test.ts','.config/settings.json','./src/main.ts','../src/panel.ts','/tmp/my-project/.cache/index.ts','-drafts/chapter-one.md','docs.v2/setup-guide.md'];
+  const root=render(paths.join(' '));
+  assert.deepEqual(all(root,'a').map(n=>n.title),paths);
+  assert.equal(root.textContent,paths.join(' '));
+});
+
+test('bare path matching does not rescan long path-like tokens',()=>{
+  for(const text of ['.'.repeat(80000),'-'.repeat(80000),'.-'.repeat(40000),'a0_'.repeat(26666),'a-/'.repeat(26666),'a/'.repeat(40000),'/'.repeat(80000)]){
+    const root=new Element('div');context.pathRegressionText=text;context.pathRegressionRoot=root;
+    try{
+      vm.runInContext('NodecodeMarkdown.renderInline(pathRegressionText,pathRegressionRoot,{external(){},file(){}})',context,{timeout:1000});
+      assert.equal(root.textContent,text);
+      assert.equal(all(root,'a').length,0);
+    }finally{delete context.pathRegressionText;delete context.pathRegressionRoot;}
+  }
 });
 
 test('explicit angle-wrapped destinations preserve spaces and reject unsafe schemes',()=>{

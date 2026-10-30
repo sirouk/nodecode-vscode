@@ -62,9 +62,17 @@ function sanitizeHref(href: string): string {
 }
 
 function bareHref(raw: string): string {
-	let href = raw.replace(/[.,:;!?'\]]+$/, "");
-	while (href.endsWith(")") && (href.match(/\)/g)?.length ?? 0) > (href.match(/\(/g)?.length ?? 0)) href = href.slice(0, -1);
-	return href;
+	const href = raw.replace(/[.,:;!?'\]]+$/, "");
+	if (!href.endsWith(")")) return href;
+	// Count once: rescanning the URL after every removed parenthesis is quadratic.
+	let excess = 0;
+	for (const char of href) {
+		if (char === ")") excess++;
+		else if (char === "(") excess--;
+	}
+	let end = href.length;
+	while (excess > 0 && href[end - 1] === ")") { end--; excess--; }
+	return href.slice(0, end);
 }
 
 function fileAnchor(label: HTMLElement, raw: string, links: LinkHandlers): HTMLElement {
@@ -145,7 +153,7 @@ export function parseFileLink(raw: string): { path: string; startLine?: number; 
 /** Render inline markdown (code spans, bold, italic, links) into parent. */
 export function renderInline(text: string, parent: HTMLElement, links: LinkHandlers, depth = 0): void {
 	// Tokenize with a single pass regex; code spans win over emphasis.
-	// Every alternative is newline-bounded AND length-bounded. With open-ended
+	// Delimiter alternatives are newline-bounded AND length-bounded. With open-ended
 	// classes an unmatched delimiter ("[", "**", a stray backtick) rescanned to
 	// the end of the message from every position — quadratic per pass, and the
 	// transcript re-runs this on every streaming delta, so one long reply
@@ -158,9 +166,11 @@ export function renderInline(text: string, parent: HTMLElement, links: LinkHandl
 	//    CommonMark: `tests/test_foo_bar.py` and `MAX_RETRY_COUNT` stay literal.
 	//  - a single `*` must not touch whitespace or another `*` on its inner side nor a
 	//    word character on its outer side, so `src/**/*.ts` and `2*3*4` stay literal.
+	// Bare paths only start at a token boundary: restarting inside a long dot or
+	// hyphen run would rescan the rest of that token at every character.
 	// Lookbehind keeps the capture-group numbering the branches below rely on.
 	const pattern =
-		/(`+)([^`\n]|`(?!`)){0,1000}?\1|\*\*([^*\n]{1,1000})\*\*|(?<!\w)__(?!\s)([^_\n]{1,1000})__(?!\w)|(?<![\w*])\*(?![\s*])([^*\n]{1,1000})(?<![\s*])\*(?![\w*])|(?<!\w)_(?!\s)([^_\n]{1,1000})(?<!\s)_(?!\w)|!?\[([^\]\n]{1,500})\]\(((?:<[^>\n]{1,2000}>|[^)\s\n]{1,2000}))\)|\\([!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~])|\*\*\*([^*\n]{1,1000})\*\*\*|~~([^~\n]{1,1000})~~|(?<!\w)(https?:\/\/[^\s<>"`]{1,2000})|<span style=["']color:\s*(#[0-9a-fA-F]{6});?["']>([^\n]{1,1000}?)<\/span>|(?<![\w/])((?:\.{1,2}\/|\/)?(?:[\w.-]+\/)+[\w.-]+(?::\d+(?:-\d+|:\d+)?)?)/g;
+		/(`+)([^`\n]|`(?!`)){0,1000}?\1|\*\*([^*\n]{1,1000})\*\*|(?<!\w)__(?!\s)([^_\n]{1,1000})__(?!\w)|(?<![\w*])\*(?![\s*])([^*\n]{1,1000})(?<![\s*])\*(?![\w*])|(?<!\w)_(?!\s)([^_\n]{1,1000})(?<!\s)_(?!\w)|!?\[([^\]\n]{1,500})\]\(((?:<[^>\n]{1,2000}>|[^)\s\n]{1,2000}))\)|\\([!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~])|\*\*\*([^*\n]{1,1000})\*\*\*|~~([^~\n]{1,1000})~~|(?<!\w)(https?:\/\/[^\s<>"`]{1,2000})|<span style=["']color:\s*(#[0-9a-fA-F]{6});?["']>([^\n]{1,1000}?)<\/span>|(?<![\w/.-])((?:\.{1,2}\/|\/)?(?:[\w.-]+\/)+[\w.-]+(?::\d+(?:-\d+|:\d+)?)?)/g;
 	let last = 0;
 	let match: RegExpExecArray | null;
 	while ((match = pattern.exec(text)) !== null) {
@@ -276,9 +286,11 @@ function renderBlocks(markdown: string, container: HTMLElement, links: LinkHandl
 			const marker = fence[2][0], length = fence[2].length;
 			const lang = fence[3].trim().replace(/^(?:\{[^.]*\.|\.)/, "").split(/[\s,}\[\]]/, 1)[0];
 			const body: string[] = [];
+			const closeFence = new RegExp(`^\\s*${marker === "`" ? "`" : "~"}{${length},}\\s*$`);
+			const trimIndent = new RegExp(`^\\s{0,${indent}}`);
 			i++;
-			while (i < lines.length && !new RegExp(`^\\s*${marker === "`" ? "`" : "~"}{${length},}\\s*$`).test(lines[i])) {
-				body.push(lines[i].replace(new RegExp(`^\\s{0,${indent}}`), ""));
+			while (i < lines.length && !closeFence.test(lines[i])) {
+				body.push(lines[i].replace(trimIndent, ""));
 				i++;
 			}
 			i++; // skip closing fence

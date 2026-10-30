@@ -103,6 +103,15 @@ test('a history fork is its own conversation: one origin link, no siblings, no n
   assert.deepEqual(ids(forkShown.descendants),['agent']);
 });
 
+test('a parent cycle among descendants cannot hang the thread strip',()=>{
+  vm.runInContext(THREAD_ORDER_JS,context);
+  const view={sessionId:'current',parentId:null,currentThread:{id:'current',title:'Current',kind:'thread',relativeDepth:0},ancestors:[],siblings:[],
+    descendants:[{id:'a',title:'A',kind:'thread',parentId:'b',relativeDepth:1},{id:'b',title:'B',kind:'thread',parentId:'a',relativeDepth:1}]};
+  assert.deepEqual(ids(context.threadPresentation(view).descendants),['a','b'],'history rows can hold a cycle without a root; they still render');
+  const forked={...view,descendants:[...view.descendants,{id:'fork',title:'New chat',kind:'history-fork',parentId:'current',relativeDepth:1}]};
+  assert.deepEqual(ids(context.threadPresentation(forked).descendants),['a','b'],'the cycle is neither hidden nor walked forever beside a fork');
+});
+
 test('parent-scoped grouping preserves missing-parent and single-level ordering contracts',()=>{
   vm.runInContext(THREAD_ORDER_JS,context);
   assert.equal(typeof context.threadFamilyGroups,'function');

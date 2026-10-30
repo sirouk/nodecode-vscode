@@ -582,7 +582,7 @@ try{
     }
     assert.deepEqual(errors,[]);await page.close();
   });
-  await check('stop cancels the live turn once and cannot stick after a rejection',async()=>{
+  await check('stop names the live turn, ignores a double click, stays retryable and recovers after a rejection',async()=>{
     const {page,errors}=await open();
     const active={...state,view:{...state.view,running:true,activeTurnId:'turn-live',activeTurnSteerable:true}};
     await emit(page,active);
@@ -590,15 +590,27 @@ try{
     await page.locator('#cancelBtn').click();
     assert.deepEqual(await posted(page,'cancel'),{type:'cancel',turnId:'turn-live'});
     assert.equal(await page.locator('#statusLine .connection').textContent(),'Stopping…');
-    assert.equal(await page.locator('#cancelBtn').isDisabled(),true);
-    await page.locator('#cancelBtn').click({force:true});
-    assert.equal(await page.evaluate(()=>window.posted.filter(m=>m.type==='cancel').length),1,'a second click cannot send another cancel');
+    assert.equal(await page.locator('#cancelBtn').isDisabled(),false,'a stopping turn keeps Stop reachable so a stuck cancel can be asked again');
+    await page.locator('#cancelBtn').click();
+    assert.equal(await page.evaluate(()=>window.posted.filter(m=>m.type==='cancel').length),1,'a second click inside the same second cannot send another cancel');
+    await new Promise(done=>setTimeout(done,1100));
+    await page.locator('#cancelBtn').click();
+    assert.equal(await page.evaluate(()=>window.posted.filter(m=>m.type==='cancel').length),2,'a stop that never lands can be asked for again');
     await emit(page,{type:'cancelFailed',turnId:'turn-live',message:'turn_id is not the active turn'});
     assert.equal(await page.locator('#statusLine .connection').textContent(),'Working');
     assert.equal(await page.locator('#cancelBtn').isDisabled(),false);
     assert.equal(await page.locator('#attachmentError').textContent(),'turn_id is not the active turn');
     await emit(page,{...active,view:{...active.view,activeTurnId:null}});
     assert.equal(await page.locator('#cancelBtn').isVisible(),false,'a turn without a confirmed id exposes no stop target');
+    await emit(page,active);
+    await page.locator('#cancelBtn').click();
+    assert.equal(await page.locator('#statusLine .connection').textContent(),'Stopping…');
+    await emit(page,{...active,connection:'reconnecting',attempts:1});
+    assert.equal(await page.locator('#cancelBtn').isVisible(),false,'a dropped connection hides the stop target');
+    await emit(page,{...active,connection:'connected',attempts:0});
+    assert.equal(await page.locator('#cancelBtn').isVisible(),true);
+    assert.equal(await page.locator('#cancelBtn').isDisabled(),false,'a reconnect leaves Stop usable instead of stuck on Stopping…');
+    assert.equal(await page.locator('#statusLine .connection').textContent(),'Working');
     assert.deepEqual(errors,[]);await page.close();
   });
   await check('a continued chat is a top-level conversation, not a child thread',async()=>{

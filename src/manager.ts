@@ -386,9 +386,13 @@ export class SessionController {
   cancelActive(turnId?: string | null): SentCommand | undefined {
     this.assertSynchronized();
     if (this.rpc.connectionState !== "connected" || !this.store.replayComplete) throw new Error("Wait for the session to finish synchronizing before cancelling a turn.");
-    // A surface's Stop names no turn: the one running now is the one it means.
-    const target = turnId || this.store.currentTurnId;
+    // A surface's Stop names the turn it drew: the one running now. A name that
+    // has already ended must not be forwarded — the engine accepts a cancel for
+    // any turn id, so the live turn would keep running and the click would look
+    // like a dead button.
+    const target = this.store.currentTurnId;
     if (!target) throw new Error("Session has no active turn to cancel.");
+    if (turnId && turnId !== target) throw new Error("That turn has already ended.");
     return this.rpc.sendCommand({ type: "cancel_turn", turn_id: target });
   }
 

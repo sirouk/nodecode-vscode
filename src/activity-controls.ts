@@ -31,8 +31,10 @@ export const THREAD_ORDER_JS = String.raw`
     }
     var byId=new Map(descendants.map(function(row){return [row.id,row];}));
     var hidden=new Set(descendants.filter(function(row){return row.kind==='history-fork';}).map(function(row){return row.id;}));
-    function underHidden(row){var parent=row.parentId;while(parent){if(hidden.has(parent))return true;var up=byId.get(parent);parent=up&&up.parentId;}return false;}
-    return {historyFork:historyFork,parents:parents,siblings:historyFork?[]:siblings,descendants:descendants.filter(function(row){return !hidden.has(row.id)&&!underHidden(row);})};
+    // Walk up to a hidden ancestor; a missing row ends the walk and so does a
+    // parent cycle, which history rows can hold even though it has no root.
+    function underHidden(row){var parent=row.parentId,seen=new Set();while(parent&&!seen.has(parent)){if(hidden.has(parent))return true;seen.add(parent);var up=byId.get(parent);parent=up&&up.parentId;}return false;}
+    return {historyFork:historyFork,parents:parents,siblings:historyFork?[]:siblings,descendants:hidden.size?descendants.filter(function(row){return !hidden.has(row.id)&&!underHidden(row);}):descendants};
   }
 `;
 

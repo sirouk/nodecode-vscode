@@ -17,6 +17,7 @@ test('the stop control resolves the confirmed live turn and never sends a missin
     controller.cancelActive();
     controller.cancelActive(null);
     controller.cancelActive('live-turn');
+    assert.throws(()=>controller.cancelActive('ended-turn'),/already ended/,'a surface one frame behind names a turn the engine would only ignore');
     assert.deepEqual(commands,[
       {type:'cancel_turn',turn_id:'live-turn'},
       {type:'cancel_turn',turn_id:'live-turn'},

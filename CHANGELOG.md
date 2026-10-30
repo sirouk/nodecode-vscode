@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Make the Stop button cancel the running turn. The panel now sends the confirmed active turn id, and the controller resolves the live turn when a surface names none instead of refusing every stop; the button shows `Stopping…`, sends once, and recovers when a cancellation is rejected.
+- Make the Stop button cancel the running turn. The panel now sends the confirmed active turn id, and the controller resolves the live turn when a surface names none instead of refusing every stop; a surface that names a turn which has already ended is refused rather than sending a cancel the engine would accept and ignore. The button shows `Stopping…`, ignores a second click in the same second, stays reachable so a stop that never lands can be asked again, and clears when the turn ends, a cancellation is rejected, or the connection drops.
+- Keep the thread strip responsive on unusual lineage: it no longer walks a cyclic parent chain forever, and it skips the ancestor walk entirely when the session has no continuation to hide.
 - Continue a conversation in a new chat from a picked message. The fork still carries the origin's history through that answer, but opens as a top-level conversation: the origin's thread strip and session list no longer draw it as a child, the new chat keeps one `Started from` link back, and deleting the origin warns that every chat started from it goes too.
 
 ## [0.1.13]

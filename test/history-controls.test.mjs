@@ -30,6 +30,22 @@ test('lineage keeps delegated threads nested while a manual history fork begins 
   assert.deepEqual(Array.from(context.historyTree(rows,'recent'),e=>e.row.id),rows.map(r=>r.id));
 });
 
+test('the injected tree and the session family agree on what a manual fork is',()=>{
+  const {isHistoryFork}=require('../out/session-family.js');
+  for(const relation of ['inherited','detached',null,undefined])for(const source of ['fork','gateway',null,undefined]){
+    const row={relation,source};
+    assert.equal(context.historyFork(row),isHistoryFork(row),`relation=${relation} source=${source}`);
+  }
+});
+
+test('the injected tree and the session family agree on what a manual fork is',()=>{
+  const {isHistoryFork}=require('../out/session-family.js');
+  for(const relation of ['inherited','detached',null,undefined])for(const source of ['fork','gateway',null,undefined]){
+    const row={relation,source};
+    assert.equal(context.historyFork(row),isHistoryFork(row),`relation=${relation} source=${source}`);
+  }
+});
+
 test('a manual fork with no title on its origin still reads as a conversation',()=>{
   const tree=context.historyTree([{id:'origin'},{id:'fork',parent_id:'origin',relation:'inherited'}],'lineage');
   assert.deepEqual(Array.from(tree,e=>[e.row.id,e.depth]),[['origin',0],['fork',0]]);

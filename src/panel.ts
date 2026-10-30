@@ -8,6 +8,7 @@ import * as fs from "fs";
 import { INLINE_REFERENCE_JS } from "./inline-references";
 import { ATTACHMENT_MENU, ATTACHMENT_CSS, ATTACHMENT_CLIENT_JS } from "./attachment-controls";
 import { MODEL_CLIENT_JS } from "./model-controls";
+import { STOP_CONTROLS_JS } from "./turn-controls";
 import { HISTORY_MODES, HISTORY_CSS, HISTORY_TREE_JS } from "./history-controls";
 import { RUNTIME_MARKUP, RUNTIME_CLIENT_JS } from "./runtime-controls";
 import { SLASH_MARKUP, SLASH_CLIENT_JS } from "./slash-controls";
@@ -1139,7 +1140,7 @@ const CLIENT_JS = String.raw`
   var state = { view: null, connection: 'connecting', attempts: 0, history: [] };
   var attachments = [],pendingReads=0;
   var forkingTurns={},bookmarkingTurns={};
-  var sending = false, stopping = null;
+  var sending = false, stopping = null, stoppingAt = 0;
   var sessionId = __SESSION_ID__;
   var persisted = vscode.getState() || {};
   var saved = (persisted.sessions || {})[sessionId] || {};
@@ -1829,14 +1830,14 @@ const CLIENT_JS = String.raw`
     var usageTitle='Context: '+exact(contextTokens)+' tokens\nVisible conversation: '+exact(t.total)+' tokens\nInput: '+exact(t.input)+' · Output: '+formatContextCount(t.output||0)+' ('+exact(t.output)+')\nCache reads: '+exact(t.cached)+' · Cache writes: '+exact(t.cacheWrite)+'\nCurrent branch, this session only; excludes child-agent usage.';
     if(t.costKnown)usageTitle+='\nRecorded cost: $'+(t.costUsd||0).toFixed(4)+' (unpriced rounds may be excluded).';
     var savedState=view.standby===true?'Draft':view.standby===false?'Saved':'';
-    if(stopping&&(!view.running||view.activeTurnId!==stopping))stopping=null;
-    var stoppingNow=!!(stopping&&view.activeTurnId===stopping);
+    if(stopping&&(state.connection!=='connected'||!view.running||view.activeTurnId!==stopping))stopping=null;
+    var stoppingNow=stopPending(stopping,view.activeTurnId);
     var status = view.cached ? 'Syncing saved history' : state.connection === 'connected' ? (sending ? (pendingSend&&pendingSend.mode==='steer'?'Steering…':pendingSend&&pendingSend.mode==='queue'?'Queueing…':'Sending…') : stoppingNow ? 'Stopping…' : view.running ? 'Working' : 'Ready') : state.connection;
     var statusHtml = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+esc(usageTitle)+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
     if(statusLine._html!==statusHtml){statusLine.innerHTML=statusHtml;statusLine._html=statusHtml;}
-    var cancelClass=view.running&&view.activeTurnId&&replayReady&&state.connection==='connected'?'icon-btn':'icon-btn hidden';
+    var cancelClass=stopTarget(view,replayReady,state.connection)?'icon-btn':'icon-btn hidden';
     if(cancelBtn.className!==cancelClass)cancelBtn.className=cancelClass;
-    if(cancelBtn.disabled!==stoppingNow)cancelBtn.disabled=stoppingNow;
+    if(cancelBtn.disabled)cancelBtn.disabled=false;
     var cancelLabel=stoppingNow?'Stopping…':'Stop active turn';
     if(cancelBtn.getAttribute('aria-label')!==cancelLabel){cancelBtn.setAttribute('aria-label',cancelLabel);cancelBtn.title=cancelLabel;}
     updateSendControls();
@@ -1872,8 +1873,11 @@ const CLIENT_JS = String.raw`
     composer.style.height = Math.min(180, composer.scrollHeight) + 'px';
   }
   sendBtn.addEventListener('click', function(ev){ev.stopPropagation();closeSessions(false);send();});
-  cancelBtn.addEventListener('click', function(){ var view=state.view||{};if(stopping||!view.activeTurnId||view.cached||state.connection!=='connected')return;stopping=view.activeTurnId;renderAll(followLatest);vscode.postMessage({type:'cancel',turnId:view.activeTurnId}); });
+  // Stop names the turn on screen; a click inside the same second cannot send
+  // twice, but a stuck stop stays clickable so the operator can ask again.
+  cancelBtn.addEventListener('click', function(){var target=stopTarget(state.view,state.view&&state.view.replayComplete!==false,state.connection);if(!target)return;if(stopPending(stopping,target)&&Date.now()-stoppingAt<1000)return;stopping=target;stoppingAt=Date.now();renderAll(followLatest);vscode.postMessage({type:'cancel',turnId:target});});
   queueBtn.addEventListener('click', function(ev){ev.stopPropagation();closeSessions(false);send('queue');});
+  ${STOP_CONTROLS_JS}
   ${MODEL_CLIENT_JS}
   var caretMirror=document.createElement('div');caretMirror.id='composerCaretMirror';caretMirror.setAttribute('aria-hidden','true');document.body.appendChild(caretMirror);
   function positionFilePicker(){

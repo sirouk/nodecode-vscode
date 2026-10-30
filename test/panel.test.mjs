@@ -446,6 +446,19 @@ test('control actions report disconnected and rejected command results',async t=
   }
 });
 
+test('the panel forwards the stop to the turn it was told about and reports a refusal back',async()=>{
+  const panel=Object.create(SessionPanel.prototype),posted=[],named=[];
+  panel.notes={log(){}};panel.panel={webview:{postMessage:m=>posted.push(m)}};
+  panel.controller={...controller('session'),store:{view:()=>({cached:false})},cancelActive:turnId=>{named.push(turnId);return {done:Promise.resolve({status:'accepted'})};}};
+  await panel.onMessage({type:'cancel',turnId:'turn-live'});
+  await panel.onMessage({type:'cancel'});
+  assert.deepEqual(named,['turn-live',undefined],'the webview names its turn; a surface that names none still reaches the controller');
+  panel.controller.cancelActive=turnId=>{throw new Error(`turn ${turnId} has already ended`);};
+  await panel.onMessage({type:'cancel',turnId:'turn-old'});
+  assert.equal(posted.length,1,'a refused stop must answer the click that made it');
+  assert.equal(posted[0].type,'cancelFailed');assert.equal(posted[0].turnId,'turn-old');assert.match(posted[0].message,/already ended/);
+});
+
 test('pending send acknowledgement follows its original session across sidebar recreation without resubmitting',async()=>{
   const received=event(),disposed=event(),visibility=event(),posted=[];
   const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};

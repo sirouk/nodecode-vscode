@@ -140,6 +140,8 @@ export interface FailoverUpdate { chain?: ModelIdentity[]; on?: string[] }
 export interface FailoverTestResult { results: Array<ModelIdentity & {ok: boolean; reason: string | null; seconds: number}> }
 
 export class NodecodeApi {
+  private sessionsRequest: { endpoint: GatewayEndpoint; startedAt: bigint; promise: Promise<string> } | undefined;
+
   constructor(
     private readonly discovery: NodecodeDiscovery,
     private readonly notes: Notifications,
@@ -151,7 +153,7 @@ export class NodecodeApi {
     return ep;
   }
 
-  private request<T>(method: string, path: string, body?: unknown, timeoutMs = 15000): Promise<T> {
+  private request<T>(method: string, path: string, body?: unknown, timeoutMs = 15000, rawText = false): Promise<T> {
     let ep: GatewayEndpoint;
     try {
       ep = this.endpoint();
@@ -184,15 +186,7 @@ export class NodecodeApi {
               reject(new Error(`gateway ${method} ${path} -> ${status}: ${text.slice(0, 200)}`));
               return;
             }
-            if (!text.trim()) {
-              resolve(undefined as unknown as T);
-              return;
-            }
-            try {
-              resolve(JSON.parse(text) as T);
-            } catch {
-              resolve(text as unknown as T);
-            }
+            resolve(rawText ? text as unknown as T : this.decodeResponse<T>(text));
           });
         },
       );
@@ -203,8 +197,25 @@ export class NodecodeApi {
     });
   }
 
-  sessions(): Promise<SessionRow[]> {
-    return this.request<SessionRow[]>("GET", "/api/gateway/sessions");
+  private decodeResponse<T>(text: string): T {
+    if (!text.trim()) return undefined as unknown as T;
+    try { return JSON.parse(text) as T; }
+    catch { return text as unknown as T; }
+  }
+
+  async sessions(notBefore: bigint = 0n): Promise<SessionRow[]> {
+    const endpoint = this.endpoint();
+    let pending = this.sessionsRequest;
+    if (!pending || pending.startedAt < notBefore || pending.endpoint.baseUrl !== endpoint.baseUrl || pending.endpoint.token !== endpoint.token || pending.endpoint.pid !== endpoint.pid) {
+      pending = { endpoint, startedAt: process.hrtime.bigint(), promise: this.request<string>("GET", "/api/gateway/sessions", undefined, 15000, true) };
+      this.sessionsRequest = pending;
+      const request = pending;
+      const clear = (): void => { if (this.sessionsRequest === request) this.sessionsRequest = undefined; };
+      void request.promise.then(clear, clear);
+    }
+    // Native facts require transport started after their observation, not a TTL.
+    // Callers sort and retain the roster; share transport, not mutable rows.
+    return this.decodeResponse<SessionRow[]>(await pending.promise);
   }
 
   async slashCommands(): Promise<SlashCommand[]> {
@@ -299,15 +310,18 @@ export class NodecodeApi {
   }
 
   createSession(body: { cwd?: string; parent?: string; anchor_turn_id?: string }): Promise<{ session_id?: string; id?: string }> {
-    return this.request("POST", "/api/gateway/sessions", { session_id: `session-${randomUUID()}`, ...body });
+    return this.request<{ session_id?: string; id?: string }>("POST", "/api/gateway/sessions", { session_id: `session-${randomUUID()}`, ...body })
+      .finally(() => { this.sessionsRequest = undefined; });
   }
 
   deleteSession(sessionId: string): Promise<{ sessions: string[] }> {
-    return this.request("DELETE", `/api/gateway/sessions/${encodeURIComponent(sessionId)}`);
+    return this.request<{ sessions: string[] }>("DELETE", `/api/gateway/sessions/${encodeURIComponent(sessionId)}`)
+      .finally(() => { this.sessionsRequest = undefined; });
   }
 
   setTitle(sessionId: string, title: string): Promise<{ session_id: string; title: string | false }> {
-    return this.request("POST", `/api/gateway/sessions/${encodeURIComponent(sessionId)}/title`, { title });
+    return this.request<{ session_id: string; title: string | false }>("POST", `/api/gateway/sessions/${encodeURIComponent(sessionId)}/title`, { title })
+      .finally(() => { this.sessionsRequest = undefined; });
   }
 
   setModel(sessionId: string, provider: string | null, model: string | null): Promise<unknown> {

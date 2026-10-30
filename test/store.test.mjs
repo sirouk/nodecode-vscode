@@ -607,3 +607,144 @@ test('projection cache retains complete history, accounting, file attribution an
   assert.equal(restored.view().processes[0].output,'€');assert.deepEqual(restored.view().bookmarkedTurnIds,['first']);
   assert.equal(restored.view().cached,false);assert.equal(restored.userPrompts().length,2);
 });
+
+test('streaming and unrelated metadata do not revisit recorded diffs or rebuild the thread roster',()=>{
+  const store=new SessionStore();let diffReads=0,rosterReads=0,sequence=0;
+  const rows=Array.from({length:300},(_,index)=>({
+    get id(){rosterReads++;return index?'child-'+index:'own';},
+    parent_id:index?'own':undefined,title:'Thread '+index,
+  }));
+  store.setThreads(rows,'own');
+  for(let index=0;index<300;index++){
+    const metadata={get workspace_diff(){diffReads++;return {files:[{path:'file-'+(index%3)+'.ts',patch:'change '+index}]};}};
+    store.applyFrame({...event(++sequence,'turn.tool_result',{'call-id':'edit-'+index,metadata}),session_id:'own',turn_id:'recorded'});
+  }
+  const before=structuredClone(store.view());diffReads=0;rosterReads=0;
+  for(let index=0;index<30;index++){
+    store.applyFrame({type:'item_delta',delta:{type:index%2?'text':'reasoning',text:'next'}});
+    store.view();
+  }
+  for(const frame of [
+    {type:'session_titled',title:'Updated title'},
+    {type:'model_changed',model:'model',provider:'provider'},
+    {type:'session_input_queue_snapshot_updated',snapshot:{pending_prompts:[]}},
+    {type:'session_background_process_updated',session_id:'own',process:{exec_id:1,status:'running',output:'process output'}},
+    {type:'organism.notice',text:'A notice',level:'warn'},
+    {...event(++sequence,'turn.usage',{'input-tokens':10}),session_id:'own'},
+  ]){store.applyFrame(frame);store.view();}
+  assert.equal(diffReads,0,'unchanged recorded patches must not be re-extracted for each token or process update');
+  assert.equal(rosterReads,0,'unchanged lineage must not be rebuilt for each token or process update');
+  const after=store.view();assert.deepEqual(after.modifiedFiles,before.modifiedFiles);assert.deepEqual(after.descendants,before.descendants);
+  assert.equal(after.parts.at(-1).kind,'system');assert.equal(after.title,'Updated title');
+});
+
+test('derived file and family projections invalidate at their owning event boundaries',()=>{
+  const store=new SessionStore();let sequence=0;
+  const apply=(type,payload={},turn_id='one',session_id='own')=>store.applyFrame({...event(++sequence,type,payload),turn_id,session_id});
+  const diff=patch=>({workspace_diff:{files:[{path:'a.ts',patch}]}});
+  store.setThreads([{id:'own',title:'Own'},{id:'child',parent_id:'own',title:'Child'}],'own');
+  apply('turn.tool_result',{'call-id':'edit',metadata:diff('first')});
+  const first=store.view();assert.equal(first.modifiedFiles[0].patch,'first');assert.equal(first.threads[0].status,'unknown');
+  apply('turn.tool_result',{'call-id':'edit',metadata:diff('replacement')});
+  assert.equal(store.view().modifiedFiles[0].patch,'replacement');assert.equal(first.modifiedFiles[0].patch,'first','published projections stay stable');
+  apply('turn.tool_result',{'call-id':'edit',metadata:{}});assert.deepEqual(store.view().modifiedFiles,[]);
+  apply('turn.tool_result',{'call-id':'edit',metadata:diff('second turn')},'two');assert.equal(store.view().modifiedFiles[0].patch,'second turn');
+  store.applyFrame({type:'organism.activity',sessions:[{id:'child',started_at:'2026-10-29T01:00:00Z'}]});
+  assert.equal(store.view().threads[0].status,'running');assert.equal(store.view().threads[0].startedAt,'2026-10-29T01:00:00Z');
+  store.setThreads([{id:'own',title:'Own'},{id:'child',parent_id:'own',title:'Renamed'}],'own');
+  assert.equal(store.view().threads[0].title,'Renamed');assert.equal(store.view().threads[0].status,'running');
+  store.applyFrame({type:'session_stream_resumed',session_id:'own',replay_chunk_final:true,accumulated_frames:[]});
+  assert.deepEqual(store.view().modifiedFiles,[],'replacement replay drops old recorded file attribution');
+  store.setThreads([{id:'own',title:'Own'},{id:'other',title:'Other'}],'other');
+  assert.equal(store.view().currentThread.id,'other');assert.deepEqual(store.view().threads,[]);
+
+  const cached=new SessionStore();cached.setThreads([{id:'own',title:'Cached'},{id:'new-child',parent_id:'own',title:'New child'}],'own');
+  cached.applyFrame({type:'session_stream_resumed',session_id:'own',replay_chunk_final:true,accumulated_frames:[
+    {...event(1,'turn.tool_result',{'call-id':'cached-edit',metadata:diff('cached patch')}),session_id:'own',turn_id:'cached-turn'},
+  ]});
+  store.restoreProjection(JSON.parse(JSON.stringify(cached.snapshotProjection())),'own');
+  assert.equal(store.view().modifiedFiles[0].patch,'cached patch');assert.equal(store.view().currentThread.title,'Cached');assert.equal(store.view().threads[0].id,'new-child');
+  store.applyFrame({type:'session_stream_resumed',session_id:'own',resumed_after:1,replay_chunk_final:true,accumulated_frames:[
+    {...event(2,'turn.tool_result',{'call-id':'cached-edit',metadata:diff('caught up')}),session_id:'own',turn_id:'cached-turn'},
+  ]});
+  assert.equal(store.view().modifiedFiles[0].patch,'caught up');assert.equal(store.view().threads[0].id,'new-child');
+  store.setThreads([{id:'foreign',title:'Foreign'}],'foreign');assert.deepEqual(store.view().modifiedFiles,[],'session ownership changes must not retain another session’s files');
+
+  const unbound=new SessionStore();unbound.applyFrame({...event(1,'turn.tool_result',{'call-id':'edit',metadata:diff('own file')}),session_id:'own'});
+  assert.equal(unbound.view().modifiedFiles.length,1);
+  unbound.applyFrame({...event(2,'session.created',{id:'foreign'}),session_id:'foreign'});
+  assert.deepEqual(unbound.view().modifiedFiles,[],'initial creation binds previously unscoped file attribution');
+
+  const reset=new SessionStore();reset.applyFrame({type:'item_delta',delta:{type:'tool_call',index:0,name:'edit',arguments:'{}'}});
+  reset.applyFrame(event(1,'turn.tool_result',{'call-id':'stream-0-0',metadata:diff('transient patch')}));assert.equal(reset.view().modifiedFiles.length,1);
+  reset.applyFrame({type:'item_delta',delta:{type:'stream_reset'}});assert.deepEqual(reset.view().modifiedFiles,[],'provider retry removes patches belonging to the discarded streaming overlay');
+});
+
+
+test('unchanged prompt history is not re-extracted during streaming and callers own their returned arrays',()=>{
+  const store=new SessionStore();let sequence=0,promptReads=0;
+  for(let index=0;index<300;index++){
+    store.applyFrame(event(++sequence,'turn.input_committed',{message:'Prompt '+index}));
+    store.applyFrame(event(++sequence,'turn.assistant_message_completed',{message:{content:'Answer '+index}}));
+  }
+  for(const part of store.view().parts)if(part.kind==='user'){
+    const text=part.text;Object.defineProperty(part,'text',{get(){promptReads++;return text;}});
+  }
+  const expected=Array.from({length:300},(_,index)=>'Prompt '+index);
+  const first=store.userPrompts();assert.deepEqual(first,expected);promptReads=0;
+  first[0]='caller replacement';first.push('caller addition');
+  for(let index=0;index<30;index++){
+    store.applyFrame({type:'item_delta',delta:{type:index%2?'text':'reasoning',text:'next'}});
+    assert.deepEqual(store.userPrompts(),expected);
+  }
+  store.applyFrame({type:'model_changed',model:'another model'});
+  assert.deepEqual(store.userPrompts(),expected);
+  assert.equal(promptReads,0,'unchanged history must not revisit old user text per token');
+});
+
+test('prompt history follows committed user inputs, restoration and authoritative replay replacement',()=>{
+  const store=new SessionStore();assert.deepEqual(store.userPrompts(),[]);
+  store.applyFrame(event(1,'turn.input_committed',{role:'system',message:'System input'}));
+  store.applyFrame(event(2,'turn.input_committed',{message:'Queued',disposition:'follow-up','prompt-id':'queued'}));
+  store.applyFrame(event(3,'turn.input_committed',{message:''}));
+  assert.deepEqual(store.userPrompts(),[]);
+  store.applyFrame(event(4,'turn.input_committed',{message:'First'}));
+  const first=store.userPrompts();assert.deepEqual(first,['First']);
+  store.applyFrame(event(5,'turn.input_committed',{message:{content:[]},metadata:{images:[{id:'image',media_type:'image/png'}]}}));
+  assert.deepEqual(store.userPrompts(),['First','']);
+  const promoted=event(6,'turn.input_committed',{message:'Queued',disposition:'started','prompt-id':'queued'});
+  store.applyFrame(promoted);store.applyFrame(promoted);
+  assert.deepEqual(store.userPrompts(),['First','','Queued']);assert.deepEqual(first,['First']);
+  store.applyFrame({type:'item_delta',delta:{type:'stream_reset'}});
+  assert.deepEqual(store.userPrompts(),['First','','Queued']);
+  const replay={type:'session_stream_resumed',session_id:'own',replay_chunk_final:true,accumulated_frames:[
+    event(1,'turn.input_committed',{message:'Replacement'}),
+  ]};
+  store.applyFrame(replay);assert.deepEqual(store.userPrompts(),['Replacement']);
+  const restored=new SessionStore();restored.applyFrame(event(1,'turn.input_committed',{message:'Stale'}));
+  assert.deepEqual(restored.userPrompts(),['Stale']);
+  restored.restoreProjection(JSON.parse(JSON.stringify(store.snapshotProjection())),'own');
+  assert.deepEqual(restored.userPrompts(),['Replacement']);
+  restored.applyFrame({type:'session_stream_resumed',session_id:'own',resumed_after:1,replay_chunk_final:true,accumulated_frames:[
+    event(2,'turn.input_committed',{message:'Caught up'}),
+  ]});
+  assert.deepEqual(restored.userPrompts(),['Replacement','Caught up']);
+  restored.applyFrame({type:'session_stream_resumed',session_id:'own',replay_chunk_index:0,accumulated_frames:[]});
+  assert.deepEqual(restored.userPrompts(),[]);
+  restored.applyFrame({type:'session_stream_resumed',session_id:'own',replay_chunk_index:1,replay_chunk_final:true,accumulated_frames:[
+    event(1,'turn.input_committed',{message:'New branch'}),
+  ]});
+  assert.deepEqual(restored.userPrompts(),['New branch']);
+});
+
+
+test('transcript weight includes every recorded patch without parsing or copying its contents',()=>{
+  const {partWeight}=require('../out/store.js');
+  const part={kind:'tool',turnNumber:1,call:{callId:'edit',name:'edit',arguments:'{}',result:'Updated',done:true}};
+  const base=partWeight(part),large='x'.repeat(66016),small='y'.repeat(1024);
+  const metadata={workspace_diff:{files:[{path:'a.ts',patch:large},null,[],{path:'b.ts',patch:small},{path:'binary.png',binary:true},{path:'bad.ts',patch:42}]}};
+  assert.equal(partWeight({...part,call:{...part.call,metadata}}),base+6000+large.length+small.length);
+  for(const workspace_diff of [true,'invalid',[],{files:null},{files:'invalid'}]){
+    assert.equal(partWeight({...part,call:{...part.call,metadata:{workspace_diff}}}),base+6000);
+  }
+});

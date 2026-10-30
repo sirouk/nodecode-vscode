@@ -61,8 +61,14 @@ export function partWeight(part: ChatPart): number {
   if (part.kind === "user") return 32 + (part.text?.length ?? 0) + 800 * (part.images?.length ?? 0) + 120 * (part.textFiles?.length ?? 0);
   if (part.kind === "tool") {
     const metadata = part.call?.metadata;
+    const files = asRecord(metadata?.workspace_diff).files;
+    let patches = 0;
+    if (Array.isArray(files)) for (const file of files) {
+      const patch = asRecord(file).patch;
+      if (typeof patch === "string") patches += patch.length;
+    }
     return 64 + (part.call?.arguments?.length ?? 0) + (part.call?.result?.length ?? 0)
-      + (metadata?.workspace_diff ? 6000 : 0) + (metadata?.image ? 4000 : 0);
+      + (metadata?.workspace_diff ? 6000 : 0) + (metadata?.image ? 4000 : 0) + patches;
   }
   return 16;
 }
@@ -257,6 +263,10 @@ export class SessionStore {
   private noticeCountValue = 0;
   private revision = 0;
   private threadRows: SessionRow[] = [];
+  // Streaming text and process output do not change these whole-session projections.
+  private modifiedFilesValue: RecordedFileChange[] | undefined;
+  private userPromptsValue: string[] | undefined;
+  private familyValue: ReturnType<typeof sessionFamily> | undefined;
   private activeSessions: Map<string, string | undefined> | undefined;
   private seenChildIds: Set<string> | undefined;
   private readonly pendingSpawnIds = new Set<string>();
@@ -323,6 +333,8 @@ export class SessionStore {
         (state.queueSnapshot !== null && (typeof state.queueSnapshot !== "object" || (state.queueSnapshot.pending_prompts !== undefined && (!Array.isArray(state.queueSnapshot.pending_prompts) || !state.queueSnapshot.pending_prompts.every(prompt => prompt && typeof prompt.prompt_id === "string")))))) {
       throw new Error("Invalid session projection");
     }
+    this.modifiedFilesValue = undefined; this.familyValue = undefined;
+    this.userPromptsValue = undefined;
     this.sessionIdValue=sessionId; this.parts=state.parts; this.queueSnapshot=state.queueSnapshot;
     this.startedPromptIds.clear(); for (const id of state.startedPromptIds) this.startedPromptIds.add(id);
     this.lastSequence=state.lastSequence; this.diffOrder=state.diffOrder; this.replayFactSessionId=state.replayFactSessionId;
@@ -379,6 +391,7 @@ export class SessionStore {
         break;
       }
       case "organism.activity":
+        this.familyValue = undefined;
         this.activeSessions = new Map(((frame as OrganismFrame).sessions ?? []).filter((row) => typeof row.id === "string").map((row) => [row.id as string, typeof row.started_at === "string" ? row.started_at : undefined]));
         break;
       case "organism.notice":
@@ -394,6 +407,7 @@ export class SessionStore {
   private applyResumed(frame: SessionStreamResumedFrame): void {
     this.reducingReplay = true;
     this.replayInProgress = true;
+    this.modifiedFilesValue = undefined; this.familyValue = undefined;
     // A full replay can arrive in chunks; only its first chunk replaces state.
     if (frame.resumed_after == null && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) this.reset();
     else if (!frame.replay_tail && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) {
@@ -427,6 +441,7 @@ export class SessionStore {
   private reset(): void {
     this.replayCompleteValue = false;
     this.parts = [];
+    this.userPromptsValue = undefined;
     this.turnNumber = 0;
     this.queueSnapshot = null;
     this.startedPromptIds.clear();
@@ -471,7 +486,10 @@ export class SessionStore {
     const turnId = typeof frame.turn_id === "string" ? frame.turn_id : undefined;
     switch (event.type) {
       case "session.created": {
-        if (createdId && !this.sessionIdValue) this.sessionIdValue = createdId;
+        if (createdId && !this.sessionIdValue) {
+          this.sessionIdValue = createdId;
+          this.modifiedFilesValue = undefined; this.familyValue = undefined;
+        }
         if (eventSessionId === this.sessionIdValue) {
           this.standbyValue = false;
           const cwd = asString(payload.cwd);
@@ -492,6 +510,7 @@ export class SessionStore {
         const images = messageImages(payload);
         if (text || images.length) {
           if (role === "user") {
+            this.userPromptsValue = undefined;
             const referenced = splitFileReferences(text);
             const attached = splitTextFileReferences(referenced.text);
             this.parts.push({
@@ -547,6 +566,7 @@ export class SessionStore {
         break;
       }
       case "turn.tool_call_started": {
+        this.modifiedFilesValue = undefined;
         const callId = asString(payload["call-id"]);
         const name = asString(payload["tool-name"]) || "tool";
         const args = asString(payload.arguments);
@@ -569,6 +589,7 @@ export class SessionStore {
         break;
       }
       case "turn.tool_result": {
+        this.modifiedFilesValue = undefined;
         const callId = asString(payload["call-id"]);
         const failed = payload.failed === true;
         const result = asString(payload.result);
@@ -737,6 +758,7 @@ export class SessionStore {
       part.reasoning += delta.text ?? "";
       this.bump();
     } else if (delta.type === "stream_reset") {
+      this.modifiedFilesValue = undefined;
       for (const part of this.parts) if (part.kind === "assistant" && part.streaming) { part.text = ""; part.reasoning = ""; }
       this.parts = this.parts.filter((part) => !(part.kind === "tool" && part.call.streamIndex !== undefined));
       this.bump();
@@ -833,6 +855,8 @@ export class SessionStore {
   }
 
   setThreads(rows: SessionRow[], sessionId: string): void {
+    if (this.sessionIdValue !== sessionId) this.modifiedFilesValue = undefined;
+    this.familyValue = undefined;
     const children = rows.filter((row)=>row.parent_id===sessionId);
     if (!this.seenChildIds || this.sessionIdValue !== sessionId) {
       this.seenChildIds = new Set(children.map((row)=>row.id));
@@ -853,9 +877,11 @@ export class SessionStore {
   }
 
   userPrompts(): string[] {
-    const out: string[] = [];
-    for (const part of this.parts) if (part.kind === "user") out.push(part.text);
-    return out;
+    if (!this.userPromptsValue) {
+      this.userPromptsValue = [];
+      for (const part of this.parts) if (part.kind === "user") this.userPromptsValue.push(part.text);
+    }
+    return this.userPromptsValue.slice();
   }
 
   view(): StoreView {
@@ -870,8 +896,8 @@ export class SessionStore {
     return {
       replayComplete: this.replayCompleteValue,
       cached: this.cachedValue,
-      ...sessionFamily(this.threadRows, this.sessionIdValue, this.activeSessions),
-      modifiedFiles: recordedFileChanges(this.parts, this.sessionIdValue),
+      ...(this.familyValue ??= sessionFamily(this.threadRows, this.sessionIdValue, this.activeSessions)),
+      modifiedFiles: this.modifiedFilesValue ??= recordedFileChanges(this.parts, this.sessionIdValue),
       title: this.titleValue,
       cwd: this.cwdValue,
       sessionId: this.sessionIdValue,

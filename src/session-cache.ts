@@ -28,6 +28,8 @@ export class SessionCache {
     }
   }
 
+  get enabled(): boolean { return this.file !== undefined; }
+
   load(): SessionCheckpoint | undefined {
     if (!this.file) return;
     try {
@@ -46,17 +48,19 @@ export class SessionCache {
     }
   }
 
-  save(cursor: number, witness: HistoryWitness | undefined, projection: StoreProjection): void {
-    if (!this.file) return;
+  save(cursor: number, witness: HistoryWitness | undefined, projection: StoreProjection): boolean {
+    if (!this.file) return false;
     const temporary = `${this.file}.${randomUUID()}.tmp`;
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
       const checkpoint: SessionCheckpoint = { version:1, sessionId:this.sessionId, home:this.home, cursor, witness, projection };
       fs.writeFileSync(temporary, JSON.stringify(checkpoint), { mode:0o600, flag:"wx" });
       fs.renameSync(temporary, this.file);
+      return true;
     } catch (error) {
       this.log(`session cache write failed: ${String(error)}`);
       try { fs.unlinkSync(temporary); } catch { /* No completed checkpoint was replaced. */ }
+      return false;
     }
   }
 

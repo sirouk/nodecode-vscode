@@ -43,6 +43,7 @@ export class SessionController {
   private witness: HistoryWitness | undefined;
   private cacheTimer: NodeJS.Timeout | undefined;
   private cacheRemoved = false;
+  private cacheDirty = false;
   private connecting: Promise<void> | undefined;
   private headerTimer: NodeJS.Timeout | undefined;
   private threadsTimer: NodeJS.Timeout | undefined;
@@ -50,6 +51,7 @@ export class SessionController {
   private headerRevision = 0;
   private targetRevision = 0;
   private threadsRevision = 0;
+  private threadsNotBefore = 0n;
   private readonly textAttachments: TextAttachmentStore;
   private readonly browsedFiles = new WeakMap<object, Set<string>>();
   private readonly imageSources = new Map<string, Promise<string>>();
@@ -75,7 +77,7 @@ export class SessionController {
         this.notes.log(`restored session cache for ${sessionId} at ${saved.cursor}`);
       } catch (error) { this.notes.log(`session projection ignored: ${String(error)}`); }
     }
-    this.store.subscribe(() => this.scheduleCache());
+    this.store.subscribe(() => { this.cacheDirty = true; this.scheduleCache(); });
     this.rpc.onFrame = (frame: RpcFrame) => {
       if (this.disposed) return;
       if (frame.type === "session_stream_resumed" && frame.resumed_after == null && (frame.replay_chunk_index == null || frame.replay_chunk_index === 0)) {
@@ -141,22 +143,23 @@ export class SessionController {
       const event = fact.event as {metadata?:{event_id?:unknown}};
       if (Number.isSafeInteger(fact.sequence) && fact.sequence > 0 &&
           typeof event?.metadata?.event_id === "string" && fact.sequence >= (this.witness?.sequence ?? 0)) {
+        if (this.witness?.sequence !== fact.sequence || this.witness.eventId !== event.metadata.event_id) this.cacheDirty = true;
         this.witness = {sequence:fact.sequence, eventId:event.metadata.event_id};
       }
     }
   }
 
   private scheduleCache(): void {
-    if (this.disposed || this.cacheRemoved || this.cacheTimer || !this.store.replayComplete || this.rpc.connectionState !== "connected") return;
+    if (this.disposed || this.cacheRemoved || !this.cache.enabled || !this.cacheDirty || this.cacheTimer || !this.store.replayComplete || this.rpc.connectionState !== "connected") return;
     this.cacheTimer = setTimeout(() => { this.cacheTimer = undefined; this.saveCache(); }, 750);
     this.cacheTimer.unref();
   }
 
   private saveCache(): void {
     const cursor = this.rpc.checkpointCursor;
-    if (this.cacheRemoved || !this.store.replayComplete || this.rpc.connectionState !== "connected" || cursor === undefined) return;
+    if (this.cacheRemoved || !this.cache.enabled || !this.cacheDirty || !this.store.replayComplete || this.rpc.connectionState !== "connected" || cursor === undefined) return;
     const witness = this.witness && this.witness.sequence <= cursor ? this.witness : undefined;
-    this.cache.save(cursor, witness, this.store.snapshotProjection());
+    if (this.cache.save(cursor, witness, this.store.snapshotProjection())) this.cacheDirty = false;
   }
 
   removeCache(): void {
@@ -205,6 +208,8 @@ export class SessionController {
 
   private scheduleThreadsRefresh(): void {
     if (this.disposed) return;
+    this.threadsNotBefore = process.hrtime.bigint();
+    this.threadsRevision++;
     if (this.threadsTimer) clearTimeout(this.threadsTimer);
     this.threadsTimer = setTimeout(() => { this.threadsTimer = undefined; this.refreshThreads(); }, 200);
   }
@@ -212,7 +217,7 @@ export class SessionController {
   refreshThreads(): void {
     if (this.disposed) return;
     const revision = ++this.threadsRevision;
-    this.api.sessions().then((rows) => { if (!this.disposed && revision === this.threadsRevision) this.store.setThreads(rows, this.sessionId); })
+    this.api.sessions(this.threadsNotBefore).then((rows) => { if (!this.disposed && revision === this.threadsRevision) this.store.setThreads(rows, this.sessionId); })
       .catch((error) => this.notes.log(`threads refresh failed: ${String(error)}`));
   }
 

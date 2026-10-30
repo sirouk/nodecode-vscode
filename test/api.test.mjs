@@ -36,6 +36,115 @@ test('gateway requests preserve session target and assign new session identity',
 });
 
 
+test('overlapping roster reads share one HTTP request without sharing mutable results or retaining a settled snapshot',async()=>{
+  const rows=[{id:'root',title:'Root',prompt:''},{id:'child',title:'Child',prompt:'',parent_id:'root',waits:{why:'asked'},lanes:[{id:'lane'}]}];
+  let requests=0,release;const gate=new Promise(resolve=>{release=resolve;});
+  const server=http.createServer(async(req,res)=>{requests++;await gate;res.setHeader('Content-Type','application/json');res.end(JSON.stringify(rows));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  try{
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'test'})},{log(){}});
+    const reads=Array.from({length:40},()=>api.sessions());release();
+    const results=await Promise.all(reads);
+    assert.equal(requests,1,'a simultaneous controller refresh fetches the full roster once');
+    assert.deepEqual(results[0],rows);assert.notEqual(results[0],results[1]);assert.notEqual(results[0][1],results[1][1]);
+    results[0].reverse();results[0][0].title='Edited by one caller';results[0][0].waits.why='failed';results[0][0].lanes[0].id='other';
+    assert.deepEqual(results[1],rows,'picker sorting and nested row edits remain private to their caller');
+    const {SessionStore}=require('../out/store.js'),root=new SessionStore(),child=new SessionStore();
+    root.setThreads(results[1],'root');child.setThreads(results[2],'child');
+    assert.deepEqual(root.view().descendants.map(row=>row.id),['child']);assert.deepEqual(child.view().ancestors.map(row=>row.id),['root']);
+    assert.equal(root.view().threads[0].status,'waiting');assert.equal(child.view().currentThread.id,'child');
+    await api.sessions();assert.equal(requests,2,'a completed response is never reused as a TTL cache');
+  }finally{release();server.close();await once(server,'close');}
+});
+
+test('coalescing preserves the existing empty and non-JSON response handling',async()=>{
+  let requests=0;
+  const server=http.createServer((req,res)=>{res.end(requests++?'not JSON':'');});
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  try{
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'test'})},{log(){}});
+    assert.deepEqual(await Promise.all([api.sessions(),api.sessions()]),[undefined,undefined]);
+    assert.deepEqual(await Promise.all([api.sessions(),api.sessions()]),['not JSON','not JSON']);assert.equal(requests,2);
+  }finally{server.close();await once(server,'close');}
+});
+
+test('a shared roster failure rejects every reader and the next request retries normally',async()=>{
+  let requests=0;
+  const server=http.createServer((req,res)=>{requests++;res.setHeader('Content-Type','application/json');res.statusCode=requests===1?503:200;res.end(JSON.stringify(requests===1?{error:'unavailable'}:[{id:'recovered',title:'Recovered',prompt:''}]));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  try{
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'test'})},{log(){}});
+    const results=await Promise.allSettled(Array.from({length:40},()=>api.sessions()));
+    assert.equal(requests,1);assert(results.every(result=>result.status==='rejected'&&/503/.test(String(result.reason))));
+    assert.equal((await api.sessions())[0].id,'recovered');assert.equal(requests,2);
+  }finally{server.close();await once(server,'close');}
+});
+
+test('in-flight rosters stay scoped to endpoint and authorization, and old completion cannot discard newer work',async t=>{
+  for(const field of ['baseUrl','token','pid'])await t.test(field,async()=>{
+    const requests=[],responses=[];let received;const firstReceived=new Promise(resolve=>{received=resolve;});
+    const serve=(req,res)=>{requests.push(req.headers.authorization);if(requests.length>2){res.end(JSON.stringify([{id:'new',title:'New',prompt:''}]));return;}responses.push(res);received();};
+    const firstServer=http.createServer(serve),secondServer=http.createServer(serve);
+    firstServer.listen(0,'127.0.0.1');secondServer.listen(0,'127.0.0.1');await Promise.all([once(firstServer,'listening'),once(secondServer,'listening')]);
+    let endpoint={baseUrl:`http://127.0.0.1:${firstServer.address().port}`,token:'first',pid:1};
+    const api=new NodecodeApi({current:()=>endpoint},{log(){}});
+    try{
+      const first=api.sessions();await firstReceived;
+      let secondReceived;const nextReceived=new Promise(resolve=>{secondReceived=resolve;});received=secondReceived;
+      endpoint={...endpoint,[field]:field==='baseUrl'?`http://127.0.0.1:${secondServer.address().port}`:field==='token'?'second':2};
+      const second=api.sessions();await nextReceived;
+      responses[0].end(JSON.stringify([{id:'old',title:'Old',prompt:''}]));await first;
+      const joined=api.sessions();
+      endpoint=null;await assert.rejects(api.sessions(),/not reachable/);
+      responses[1].end(JSON.stringify([{id:'new',title:'New',prompt:''}]));
+      assert.deepEqual(await second,await joined);assert.equal(requests.length,2);
+      assert.deepEqual(requests,field==='token'?['Bearer first','Bearer second']:['Bearer first','Bearer first']);
+    }finally{for(const response of responses)response.end('[]');firstServer.close();secondServer.close();await Promise.all([once(firstServer,'close'),once(secondServer,'close')]);}
+  });
+});
+
+test('native roster freshness separates old requests while subsequent peers still coalesce',async()=>{
+  const requests=[];
+  const api=new NodecodeApi({current:()=>({baseUrl:'http://synthetic.local',token:'test'})},{log(){}});
+  api.request=()=>new Promise(resolve=>requests.push(resolve));
+  const old=api.sessions(),notBefore=process.hrtime.bigint();
+  const fresh=Array.from({length:40},()=>api.sessions(notBefore));
+  assert.equal(requests.length,2,'controllers refreshing after one native event share its new request');
+  requests[0](JSON.stringify([{id:'old',title:'Old',prompt:''}]));await old;
+  const joined=api.sessions();
+  requests[1](JSON.stringify([{id:'new',title:'New',prompt:''}]));
+  const results=await Promise.all([...fresh,joined]);
+  assert.equal(requests.length,2,'old completion cannot clear the newer request');
+  assert(results.every(rows=>rows[0].id==='new'));assert.notEqual(results[0],results[1]);
+});
+
+test('roster reads after session mutations cannot join a pre-mutation request',async t=>{
+  for(const [name,mutate] of [
+    ['create',api=>api.createSession({cwd:'/workspace'})],
+    ['delete',api=>api.deleteSession('changed')],
+    ['rename',api=>api.setTitle('changed','New title')],
+  ])await t.test(name,async()=>{
+    let requests=0,oldResponse,firstReceived;const received=new Promise(resolve=>{firstReceived=resolve;});
+    const server=http.createServer((req,res)=>{
+      res.setHeader('Content-Type','application/json');
+      if(req.method==='GET'&&req.url==='/api/gateway/sessions'){
+        requests++;
+        if(requests===1){oldResponse=res;firstReceived();return;}
+        res.end(JSON.stringify([{id:'changed',title:'After mutation',prompt:''}]));return;
+      }
+      res.end(JSON.stringify({session_id:'changed',sessions:['changed'],title:'New title'}));
+    });
+    server.listen(0,'127.0.0.1');await once(server,'listening');
+    try{
+      const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'test'})},{log(){}});
+      const stale=api.sessions();await received;await mutate(api);
+      const fresh=api.sessions();
+      oldResponse.end(JSON.stringify([{id:'changed',title:'Before mutation',prompt:''}]));await stale;
+      assert.equal((await fresh)[0].title,'After mutation');assert.equal(requests,2);
+    }finally{oldResponse?.end('[]');server.close();await once(server,'close');}
+  });
+});
+
 test('history search combines title matches with deduplicated native content hits', async () => {
   const requests=[];
   const server=http.createServer(async(req,res)=>{

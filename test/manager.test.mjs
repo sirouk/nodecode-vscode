@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import {once} from 'node:events';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
 const {SessionController}=require('../out/manager.js');
@@ -69,4 +71,80 @@ test('automatic steering preserves native image content instead of sending a que
     assert.equal(command.type,'steer_turn');assert.equal(command.expected_turn_id,'image-turn');
     assert.equal(command.content[1].source.data,image.data);
   }finally{ctl.dispose();}
+});
+
+
+test('native activity and title refreshes cannot join a roster snapshot started before their notification',async t=>{
+  for(const type of ['organism.activity','session_titled'])await t.test(type,async t=>{
+    t.mock.timers.enable({apis:['setTimeout']});
+    const {NodecodeApi}=require('../out/api.js');
+    const received=[],responses=[];let gets=0;
+    let rows=[{id:'root',title:'Root',prompt:''}];
+    const server=http.createServer((req,res)=>{gets++;responses.push({res,body:JSON.stringify(rows)});received.shift()?.();});
+    server.listen(0,'127.0.0.1');await once(server,'listening');
+    const waitForRequest=()=>new Promise(resolve=>received.push(resolve));
+    const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'test'})},{log(){}});
+    const ctl=new SessionController({},{log(){}},api,'/workspace','root');
+    try{
+      ctl.store.setThreads(rows,'root');
+      const oldReceived=waitForRequest();ctl.refreshThreads();await oldReceived;
+      rows=type==='organism.activity'?[...rows,{id:'new-child',title:'Child',prompt:'',parent_id:'root',source:'fork'}]:[{...rows[0],title:'Renamed'}];
+      const frame=type==='organism.activity'?{type,sessions:[{id:'new-child',started_at:'2026-10-29T23:00:00Z'}]}:{type,session_id:'root',title:'Renamed'};
+      ctl.rpc.onFrame(frame);
+      const applied=deferred(),setThreads=ctl.store.setThreads.bind(ctl.store);
+      ctl.store.setThreads=(...args)=>{setThreads(...args);applied.resolve();};
+      received.push(()=>responses.at(-1).res.end(responses.at(-1).body));
+      t.mock.timers.tick(200);responses[0].res.end(responses[0].body);
+      await applied.promise;
+      const view=ctl.store.view();
+      if(type==='organism.activity'){
+        assert.deepEqual(view.descendants.map(row=>row.id),['new-child']);
+        assert.deepEqual(view.parts.filter(part=>part.childSessionId).map(part=>part.childSessionId),['new-child']);
+      }else assert.equal(view.currentThread.title,'Renamed');
+      assert.equal(gets,2);
+    }finally{ctl.dispose();for(const {res} of responses)res.end('[]');server.close();await once(server,'close');}
+  });
+});
+
+
+test('a native roster notification invalidates pending callbacks before the delayed refresh starts',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const old=deferred(),current=deferred();let requests=0;
+  const ctl=new SessionController({},{log(){}},{sessions:()=>++requests===1?old.promise:current.promise},'/workspace','root');
+  try{
+    ctl.store.setThreads([{id:'root',title:'Root',prompt:''}],'root');ctl.refreshThreads();
+    ctl.rpc.onFrame({type:'session_titled',session_id:'root',title:'Renamed'});
+    old.resolve([{id:'root',title:'Stale',prompt:''}]);await new Promise(setImmediate);
+    assert.equal(ctl.store.view().currentThread.title,'Root','old HTTP must not apply while the native refresh waits');
+    t.mock.timers.tick(200);current.resolve([{id:'root',title:'Renamed',prompt:''}]);await new Promise(setImmediate);
+    assert.equal(ctl.store.view().currentThread.title,'Renamed');
+  }finally{ctl.dispose();}
+});
+
+
+test('controllers observing the same native activity share one post-notification roster request',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {NodecodeApi}=require('../out/api.js');
+  const received=[],responses=[];let gets=0;
+  let rows=[{id:'root',title:'Root',prompt:''},{id:'other',title:'Other',prompt:''}];
+  const server=http.createServer((req,res)=>{gets++;responses.push({res,body:JSON.stringify(rows)});received.shift()?.();});
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  const api=new NodecodeApi({current:()=>({baseUrl:`http://127.0.0.1:${server.address().port}`,token:'test'})},{log(){}});
+  const controllers=['root','other'].map(id=>new SessionController({},{log(){}},api,'/workspace',id));
+  try{
+    controllers.forEach(ctl=>ctl.store.setThreads(rows,ctl.sessionId));
+    const oldReceived=new Promise(resolve=>received.push(resolve));controllers.forEach(ctl=>ctl.refreshThreads());await oldReceived;
+    rows=[...rows,{id:'new-child',title:'Child',prompt:'',parent_id:'root',source:'fork'}];
+    controllers.forEach(ctl=>ctl.rpc.onFrame({type:'organism.activity',sessions:[{id:'new-child',started_at:'2026-10-29T23:00:00Z'}]}));
+    const applied=controllers.map(ctl=>{
+      const done=deferred(),setThreads=ctl.store.setThreads.bind(ctl.store);
+      ctl.store.setThreads=(...args)=>{setThreads(...args);done.resolve();};return done.promise;
+    });
+    received.push(()=>responses.at(-1).res.end(responses.at(-1).body));
+    t.mock.timers.tick(200);responses[0].res.end(responses[0].body);await Promise.all(applied);
+    assert.equal(gets,2,'both controllers join the single post-broadcast HTTP request');
+    assert.deepEqual(controllers[0].store.view().descendants.map(row=>row.id),['new-child']);
+    assert.deepEqual(controllers[1].store.view().descendants,[]);
+    assert.deepEqual(controllers[0].store.view().parts.filter(part=>part.childSessionId).map(part=>part.childSessionId),['new-child']);
+  }finally{controllers.forEach(ctl=>ctl.dispose());for(const {res} of responses)res.end('[]');server.close();await once(server,'close');}
 });

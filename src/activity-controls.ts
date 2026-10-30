@@ -16,6 +16,24 @@ export const THREAD_ORDER_JS = String.raw`
     levels.forEach(function(level){var group=threadGroups(level);active=active.concat(group.active);idle=idle.concat(group.idle);});
     return {active:active,idle:idle};
   }
+  // A manual history fork is its own conversation: it keeps one link back to
+  // where it began, hides siblings, and never appears as a child of its origin.
+  function threadPresentation(view){
+    var current=view.currentThread,ancestors=view.ancestors||[],siblings=view.siblings||[],descendants=view.descendants||view.threads||[];
+    var historyFork=!!(current&&current.kind==='history-fork');
+    var parents;
+    if(historyFork){
+      parents=ancestors.length?[Object.assign({},ancestors[ancestors.length-1],{familyRole:'Started from',indent:0})]
+        :(view.parentId?[{id:view.parentId,title:'Previous chat',status:'unknown',kind:'thread',familyRole:'Started from',indent:0}]:[]);
+    } else {
+      parents=ancestors.map(function(row,index){return Object.assign({},row,{familyRole:'Parent',indent:index});});
+      if(!parents.length&&view.parentId)parents.push({id:view.parentId,title:'Parent session',status:'unknown',kind:'thread',familyRole:'Parent',indent:0});
+    }
+    var byId=new Map(descendants.map(function(row){return [row.id,row];}));
+    var hidden=new Set(descendants.filter(function(row){return row.kind==='history-fork';}).map(function(row){return row.id;}));
+    function underHidden(row){var parent=row.parentId;while(parent){if(hidden.has(parent))return true;var up=byId.get(parent);parent=up&&up.parentId;}return false;}
+    return {historyFork:historyFork,parents:parents,siblings:historyFork?[]:siblings,descendants:descendants.filter(function(row){return !hidden.has(row.id)&&!underHidden(row);})};
+  }
 `;
 
 export const ACTIVITY_CLIENT_JS = String.raw`
@@ -52,7 +70,7 @@ export const ACTIVITY_CLIENT_JS = String.raw`
   function agentColor(id){var hash=2166136261;for(var i=0;i<id.length;i++){hash^=id.charCodeAt(i);hash=Math.imul(hash,16777619);}return 'hsl('+(Math.abs(hash)%360)+' 65% 65%)';}
   function threadRow(row){
     var kind=row.kind||'thread',status=row.status||'unknown',name=row.title||'Untitled '+kind,current=row.id===sessionId,context=current?'Current thread':row.familyRole;
-    return '<button class="activity-link" data-a="openThread" data-p="'+esc(row.id)+'"'+(current?' aria-current="true"':'')+' style="--thread-depth:'+Math.min(row.indent,4)+'" title="'+esc(name+' · '+context+' · '+kind+' · '+status+' · '+row.id)+'"><span class="agent-dot" style="background:'+agentColor(row.id)+'"></span><span class="activity-name">'+esc(name)+'</span><span class="activity-kind">'+esc(current?'current':row.familyRole==='Parent'?'parent':kind)+' · '+esc(status)+'</span></button>';
+    return '<button class="activity-link" data-a="openThread" data-p="'+esc(row.id)+'"'+(current?' aria-current="true"':'')+' style="--thread-depth:'+Math.min(row.indent,4)+'" title="'+esc(name+' · '+context+' · '+kind+' · '+status+' · '+row.id)+'"><span class="agent-dot" style="background:'+agentColor(row.id)+'"></span><span class="activity-name">'+esc(name)+'</span><span class="activity-kind">'+esc(current?'current':row.familyRole==='Parent'?'parent':row.familyRole==='Started from'?'previous chat':kind)+' · '+esc(status)+'</span></button>';
   }
   // Sort within each level, keeping native parent/child edges together.
   function threadHierarchy(rows){
@@ -78,14 +96,15 @@ export const ACTIVITY_CLIENT_JS = String.raw`
     positions.forEach(function(saved){var file=Array.from(box.querySelectorAll('[data-file-path]')).find(function(el){return el.dataset.filePath===saved.path;});if(file)file.querySelectorAll('pre').forEach(function(pre,i){if(saved.panes[i]){pre.scrollTop=saved.panes[i][0];pre.scrollLeft=saved.panes[i][1];}});});
   }
   function renderActivity(view){
-    var ancestors=view.ancestors||[],siblings=view.siblings||[],descendants=view.descendants||view.threads||[],current=view.currentThread,threadSignature=JSON.stringify([view.sessionId,view.parentId,current,ancestors,siblings,descendants]);
-    function related(rows,role){return rows.map(function(row){return Object.assign({},row,{familyRole:role,indent:Math.max(0,ancestors.length+(row.relativeDepth||0))});});}
-    var parents=ancestors.map(function(row,index){return Object.assign({},row,{familyRole:'Parent',indent:index});});
-    if(!ancestors.length&&view.parentId)parents.push({id:view.parentId,title:'Parent session',status:'unknown',kind:'thread',familyRole:'Parent',indent:0});
+    var ancestors=view.ancestors||[],current=view.currentThread,presentation=threadPresentation(view);
+    var siblings=presentation.siblings,descendants=presentation.descendants,parents=presentation.parents;
+    var baseDepth=presentation.historyFork?0:ancestors.length;
+    var threadSignature=JSON.stringify([view.sessionId,view.parentId,current,parents,siblings,descendants]);
+    function related(rows,role){return rows.map(function(row){return Object.assign({},row,{familyRole:role,indent:Math.max(0,baseDepth+(row.relativeDepth||0))});});}
     var hasFamily=parents.length||siblings.length||descendants.length;
     var parentIds=new Set(parents.map(function(row){return row.id;}));
     var all=related(siblings,'Sibling').concat(current&&hasFamily?related([current],'Current'):[],related(descendants,'Child')).filter(function(row){return !parentIds.has(row.id);});
-    if(!ancestors.length&&parents.length)all.forEach(function(row){row.indent++;});
+    if(!presentation.historyFork&&!ancestors.length&&parents.length)all.forEach(function(row){row.indent++;});
     E('threadBar').classList.toggle('hidden',!hasFamily);
     var threadHeading='Agents & threads · '+descendants.length+(descendants.some(function(t){return t.status==='running';})?' · '+descendants.filter(function(t){return t.status==='running';}).length+' running':'');
     if(E('threadSummary').textContent!==threadHeading)E('threadSummary').textContent=threadHeading;

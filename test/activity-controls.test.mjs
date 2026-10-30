@@ -75,6 +75,34 @@ test('each native parent retains its own newest idle thread instead of sharing a
   assert.equal(new Set(ids(result.active).concat(ids(result.idle))).size,rows.length,'each thread appears once');
 });
 
+test('a history fork is its own conversation: one origin link, no siblings, no nested forks',()=>{
+  vm.runInContext(THREAD_ORDER_JS,context);
+  assert.equal(typeof context.threadPresentation,'function');
+  const current={id:'current',title:'Current',kind:'thread',parentId:null,relativeDepth:0};
+  const view={
+    sessionId:'current',parentId:null,currentThread:current,ancestors:[],siblings:[],
+    descendants:[
+      {id:'agent',title:'Agent',kind:'subagent',parentId:'current',relativeDepth:1},
+      {id:'fork',title:'New chat',kind:'history-fork',parentId:'current',relativeDepth:1},
+      {id:'fork-agent',title:'Fork agent',kind:'subagent',parentId:'fork',relativeDepth:2},
+    ],
+  };
+  const before=structuredClone(view),shown=context.threadPresentation(view);
+  assert.deepEqual(ids(shown.descendants),['agent'],'a manual fork and everything under it leave the origin thread');
+  assert.equal(shown.parents.length,0);assert.equal(shown.siblings.length,0);assert.equal(shown.historyFork,false);
+  assert.deepEqual(view,before,'projection must not mutate the authoritative family');
+
+  const previous={id:'parent',title:'Parent',kind:'thread',parentId:'root',relativeDepth:-1};
+  const forkView={sessionId:'fork',parentId:'parent',currentThread:{id:'fork',title:'New chat',kind:'history-fork',parentId:'parent',relativeDepth:0},
+    ancestors:[{id:'root',title:'Root',kind:'thread',relativeDepth:-2},previous],siblings:[{id:'sibling',title:'Other fork',kind:'history-fork',parentId:'parent',relativeDepth:0}],
+    descendants:[{id:'agent',title:'Agent',kind:'subagent',parentId:'fork',relativeDepth:1},{id:'nested',title:'Nested chat',kind:'history-fork',parentId:'fork',relativeDepth:1},{id:'nested-agent',title:'Nested agent',kind:'subagent',parentId:'nested',relativeDepth:2}]};
+  const forkShown=context.threadPresentation(forkView);
+  assert.equal(forkShown.historyFork,true);
+  assert.deepEqual(Array.from(forkShown.parents,row=>[row.id,row.familyRole]),[['parent','Started from']]);
+  assert.equal(forkShown.siblings.length,0,'other conversations from the same origin are not siblings in this chat');
+  assert.deepEqual(ids(forkShown.descendants),['agent']);
+});
+
 test('parent-scoped grouping preserves missing-parent and single-level ordering contracts',()=>{
   vm.runInContext(THREAD_ORDER_JS,context);
   assert.equal(typeof context.threadFamilyGroups,'function');

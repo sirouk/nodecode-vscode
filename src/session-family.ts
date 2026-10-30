@@ -24,6 +24,16 @@ export interface SessionFamily {
   parentId?: string;
 }
 
+/** Only source=fork proves delegated work; a manual fork is another conversation. */
+export function isDelegatedFork(row: Pick<SessionRow, "source">): boolean {
+  return row.source === "fork";
+}
+
+/** An inherited session a person started, not a delegated subagent. */
+export function isHistoryFork(row: Pick<SessionRow, "relation" | "source">): boolean {
+  return row.relation === "inherited" && !isDelegatedFork(row);
+}
+
 /** Native parent edges describe lineage; only source=fork proves delegated work. */
 export function sessionFamily(
   rows: SessionRow[], sessionId: string | undefined,
@@ -36,7 +46,7 @@ export function sessionFamily(
     const waits = row.waits && typeof row.waits === "object" ? row.waits as {why?: unknown} : undefined;
     return {
       id: row.id, title: row.semanticTitle || row.title || row.prompt || row.id,
-      kind: row.source === "fork" ? "subagent" : row.relation === "inherited" ? "history-fork" : "thread",
+      kind: isDelegatedFork(row) ? "subagent" : isHistoryFork(row) ? "history-fork" : "thread",
       status: activity?.has(row.id) ? "running" : waits?.why === "failed" ? "failed"
         : waits?.why === "asked" ? "waiting" : activity ? "idle" : "unknown",
       parentId: typeof row.parent_id === "string" ? row.parent_id : undefined,

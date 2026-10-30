@@ -386,8 +386,10 @@ export class SessionController {
   cancelActive(turnId?: string | null): SentCommand | undefined {
     this.assertSynchronized();
     if (this.rpc.connectionState !== "connected" || !this.store.replayComplete) throw new Error("Wait for the session to finish synchronizing before cancelling a turn.");
-    if (!turnId) throw new Error("Session has no active turn to cancel.");
-    return this.rpc.sendCommand({ type: "cancel_turn", turn_id: turnId });
+    // A surface's Stop names no turn: the one running now is the one it means.
+    const target = turnId || this.store.currentTurnId;
+    if (!target) throw new Error("Session has no active turn to cancel.");
+    return this.rpc.sendCommand({ type: "cancel_turn", turn_id: target });
   }
 
   steer(expectedTurnId: string, text: string, images: ImageAttachment[] = []): SentCommand | undefined {

@@ -2,7 +2,7 @@
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
   "description": "Nodecode in VS Code: live conversations, thinking, tools, child threads, checkpoints and model controls.",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -111,7 +111,7 @@
       },
       {
         "command": "nodecode.forkSession",
-        "title": "Fork Session",
+        "title": "Continue in New Chat",
         "category": "Nodecode",
         "icon": "$(git-branch)"
       },

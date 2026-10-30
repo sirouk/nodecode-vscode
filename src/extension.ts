@@ -256,7 +256,7 @@ export function activate(context: vscode.ExtensionContext): void {
       SessionPanel.createOrShow(context.extensionUri, controllerFor(forked, {connect:true}), panelCallbacks, notes);
     },
     forkSession: async (sid) => {
-      const forked = await api.forkSession(sid, undefined, bootCwd);
+      const forked = await api.forkSession(sid, undefined);
       if (forked) {
         openPanel(forked);
       } else {
@@ -285,7 +285,7 @@ export function activate(context: vscode.ExtensionContext): void {
     revealTerminal: (sid) => revealTerminal(sid),
     deleteSession: async (sid) => {
       const choice = await vscode.window.showWarningMessage(
-        `Delete session ${sid} and its child threads? This cannot be undone.`,
+        `Delete session ${sid} and every chat started from it? This cannot be undone.`,
         { modal: true },
         "Delete",
       );

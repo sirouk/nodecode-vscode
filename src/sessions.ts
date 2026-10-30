@@ -161,7 +161,7 @@ export function registerSessions(deps: CommandDeps): void {
   cmd("nodecode.forkSession", async (arg: unknown) => {
     const sid = await sessionIdOf(deps, arg);
     if (!sid) return;
-    const forked = await retry("fork", () => deps.api.forkSession(sid, undefined, deps.workspaceRoot()));
+    const forked = await retry("fork", () => deps.api.forkSession(sid, undefined));
     if (forked) {
       deps.openPanel(forked);
     }

@@ -281,6 +281,8 @@ export class SessionStore {
   }
 
   get replayComplete(): boolean { return this.replayCompleteValue; }
+  /** The turn running now, read without deriving the rest of the view. */
+  get currentTurnId(): string | null { return this.activeTurnId; }
   get cached(): boolean { return this.cachedValue; }
   get replaying(): boolean { return this.replayInProgress; }
 

@@ -739,6 +739,7 @@ export class SessionPanel {
     } catch (error) {
       if(message.type==="toggleCheckpointBookmark")this.postMessage({type:"bookmarkFinished",turnId:message.turnId,error:String(error)});
       if(message.type==="forkAtMessage")this.postMessage({type:"forkFinished",turnId:message.turnId,error:String(error)});
+      if(message.type==="cancel")this.postMessage({type:"cancelFailed",turnId:message.turnId,message:String(error)});
       if(message.type==="runtimeMetadata"){this.postMessage({type:"runtimeMetadata",error:String(error),requestId:message.requestId});return;}
       if(message.type==="browseRuntimeFiles"){this.postMessage({type:"runtimeFiles",error:String(error),requestId:message.requestId});return;}
       if(message.type==="attachRuntimeFiles"||message.type==="attachComputerFiles"){this.postMessage({type:"attachmentsSelected",error:String(error),requestId:message.requestId});return;}
@@ -839,7 +840,7 @@ export class SessionSidebar implements vscode.WebviewViewProvider, vscode.Dispos
       document.addEventListener('click',e=>{if(!e.composedPath().includes(document.getElementById('sessionPickerWrap')))close();});
       function render(rows){lastRows=rows;choices.replaceChildren();for(const entry of historyTree(rows,historyMode)){const row=entry.row;
         const group=document.createElement('div');group.className='session-row';if(historyMode==='lineage'){group.dataset.depth=entry.depth;group.style.setProperty('--history-depth',entry.depth);}
-        const item=document.createElement('button');item.className='session-choice';const original=row.title||row.semanticTitle||'Untitled conversation';item.textContent=original;item.onclick=()=>{saveHistory();vscode.postMessage({type:'openThread',sessionId:row.id});};if(historyMode==='lineage'){const label=document.createElement('span');label.className='session-lineage';label.textContent=(entry.orphan||entry.cycle?'':'Level '+entry.depth+' · ')+historyKind(entry);item.appendChild(label);}
+        const item=document.createElement('button');item.className='session-choice';const original=row.title||row.semanticTitle||(historyFork(row)?'New chat':'Untitled conversation');item.textContent=original;item.onclick=()=>{saveHistory();vscode.postMessage({type:'openThread',sessionId:row.id});};if(historyMode==='lineage'){const label=document.createElement('span');label.className='session-lineage';label.textContent=(entry.orphan||entry.cycle?'':(entry.depth?'Level '+entry.depth+' · ':''))+historyKind(entry);item.appendChild(label);}
         const rename=document.createElement('button');rename.className='session-rename';rename.setAttribute('aria-label','Rename '+item.textContent);rename.title='Rename conversation';rename.innerHTML='${icon("edit")}';
         rename.onclick=()=>{if(group.querySelector('input'))return;const input=document.createElement('input');input.className='session-rename-input';input.setAttribute('aria-label','Session name');input.value=original;let finished=false;function finish(commit){if(finished)return;finished=true;input.replaceWith(item);if(commit&&input.value.trim()&&input.value.trim()!==original)vscode.postMessage({type:'renameSession',sessionId:row.id,name:input.value.trim()});item.focus();}input.onkeydown=ev=>{if(ev.key==='Enter'||ev.key==='Escape'){ev.preventDefault();ev.stopPropagation();finish(ev.key==='Enter');}};input.onblur=()=>finish(false);item.replaceWith(input);input.focus();input.select();};
         const del=document.createElement('button');del.className='session-delete';del.textContent='×';del.setAttribute('aria-label','Delete '+item.textContent);del.title='Delete conversation';del.onclick=()=>vscode.postMessage({type:'deleteSession',sessionId:row.id});
@@ -1083,7 +1084,7 @@ const PANEL_BODY = `
           ${HISTORY_MODES}<input id="sessionSearch" class="history-search" type="search" aria-label="Search sessions" placeholder="Search names or messages…" autocomplete="off"><div id="sessionSearchStatus" class="history-status" role="status"></div><div id="sessionChoices"></div>
         </div>
       </div>
-      ${actionButton("forkBtn", "Fork session", "fork")}
+      ${actionButton("forkBtn", "Continue in a new chat", "fork")}
       <details id="menuWrap"><summary class="icon-btn" title="Session actions" aria-label="Session actions">${icon("menu")}</summary><div class="menu">
         <button id="editorBtn">${icon("terminal")}Open in editor</button>
         <button id="termBtn">${icon("terminal")}Reveal terminal</button>
@@ -1138,7 +1139,7 @@ const CLIENT_JS = String.raw`
   var state = { view: null, connection: 'connecting', attempts: 0, history: [] };
   var attachments = [],pendingReads=0;
   var forkingTurns={},bookmarkingTurns={};
-  var sending = false;
+  var sending = false, stopping = null;
   var sessionId = __SESSION_ID__;
   var persisted = vscode.getState() || {};
   var saved = (persisted.sessions || {})[sessionId] || {};
@@ -1164,6 +1165,7 @@ const CLIENT_JS = String.raw`
   var readingAnchor = null;
   var histIdx = -1;
   function E(id){ return document.getElementById(id); }
+  function showPanelError(message){E('attachmentError').textContent=String(message||'');E('attachmentError').classList.remove('hidden');}
   var transcript = E('transcript'), scrollBox = E('scroll'), composer = E('composer'),
       sendBtn = E('sendBtn'), cancelBtn = E('cancelBtn'), queueBtn = E('queueBtn'),
       statusLine = E('statusLine'), titleEl = E('title'), modelEl = E('modelLine'),
@@ -1172,7 +1174,8 @@ const CLIENT_JS = String.raw`
     var m = ev.data;
     if (!m) return;
     if(m.type==='bookmarkFinished'){delete bookmarkingTurns[m.turnId];if(Array.isArray(m.ids)&&state.view)state.view.bookmarkedTurnIds=m.ids;renderAll(followLatest);return;}
-    if(m.type==='forkFinished'){delete forkingTurns[m.turnId];renderAll(followLatest);return;}
+    if(m.type==='forkFinished'){delete forkingTurns[m.turnId];if(m.error)showPanelError(m.error);renderAll(followLatest);return;}
+    if(m.type==='cancelFailed'){stopping=null;if(m.message)showPanelError(m.message);renderAll(followLatest);return;}
     if(m.type==='textAttachmentChunk'){receiveTextChunk(m);return;}
     if(m.type==='modelOptions'){if(m.requestId===optionRequest&&optionKind){modelRows=m.models||[];modelFavorites=m.favorites||[];modelTarget=m.target||{};modelContext=m.context||{};receiveRoleOptions(m);renderOptions();}return;}
     if(m.type==='modelFavorites'){if(m.requestId!==undefined&&m.requestId!==favoriteRequest)return;favoritePending=false;modelFavorites=m.favorites||[];if(optionKind==='model'&&!optionApplying)renderOptions();return;}
@@ -1277,7 +1280,7 @@ const CLIENT_JS = String.raw`
   function imageHtml(part){ return (part.images || []).map(function(image){return image.url?'<img class="message-image" src="' + esc(image.url) + '" alt="Conversation image" loading="lazy">':'<span class="sub message-image-status" role="status"'+(image.error?' title="'+esc(image.error)+'"':'')+'>'+(image.error?'Image unavailable: '+esc(image.error):'Loading image…')+'</span>';}).join(''); }
   function textFileHtml(part){return (part.textFiles||[]).map(function(file){return '<button class="message-file" data-a="openTextAttachment" data-p="'+esc(file.ref)+'" title="'+esc(file.name)+' · '+file.byteLength+' bytes">'+esc(file.name)+'</button>';}).join('');}
   function fileHtml(part){return (part.files||[]).filter(function(file){return !(part.text||'').includes('@'+file);}).map(function(file){return '<span class="message-file" title="'+esc(file)+'">@'+esc(file.split(/[\\/]/).pop())+'</span>';}).join('');}
-  function forkHtml(part){var saved=(state.view&&state.view.bookmarkedTurnIds||[]).includes(part.forkTurnId);return part.forkTurnId&&!(state.view&&state.view.cached)&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' aria-label="Fork from this turn" title="Fork from this turn into a new editor. Includes all recorded messages in this turn; this conversation is kept.">${icon('fork')}</button><button class="bookmark-turn '+(saved?'saved':'')+'" data-a="toggleCheckpointBookmark" data-p="'+esc(part.forkTurnId)+'" aria-pressed="'+String(saved)+'" aria-label="'+(saved?'Remove bookmark':'Bookmark checkpoint')+'" title="'+(saved?'Remove bookmark':'Bookmark this recorded checkpoint; does not create a new file snapshot')+'" '+(bookmarkingTurns[part.forkTurnId]?'disabled':'')+'>${icon('bookmark')}</button>':'';}
+  function forkHtml(part){var saved=(state.view&&state.view.bookmarkedTurnIds||[]).includes(part.forkTurnId);return part.forkTurnId&&!(state.view&&state.view.cached)&&!part.streaming&&!part.voided&&!(state.view&&state.view.running&&state.view.activeTurnId===part.forkTurnId)?'<button class="fork-turn" data-a="forkAtMessage" data-p="'+esc(part.forkTurnId)+'" '+(forkingTurns[part.forkTurnId]?'disabled':'')+' aria-label="Start a new chat from this message" title="Start a new chat from this message. Everything through this reply is carried over; this conversation stays as it is.">${icon('fork')}</button><button class="bookmark-turn '+(saved?'saved':'')+'" data-a="toggleCheckpointBookmark" data-p="'+esc(part.forkTurnId)+'" aria-pressed="'+String(saved)+'" aria-label="'+(saved?'Remove bookmark':'Bookmark checkpoint')+'" title="'+(saved?'Remove bookmark':'Bookmark this recorded checkpoint; does not create a new file snapshot')+'" '+(bookmarkingTurns[part.forkTurnId]?'disabled':'')+'>${icon('bookmark')}</button>':'';}
   function replyCaret(part,index){return part.streaming&&part.text&&state.view&&index===partsTotal-1?'<span class="caret"></span>':'';}
   function partHtml(part, index){
     if (part.kind === 'user') return '<div class="msg user"><div class="bubble"><div class="message-actions"><button class="copy-text" data-a="copyUser" data-p="'+index+'" aria-label="Copy message" title="Copy message">${icon('copy')}</button></div>' + md(part.text,part.files) + '<div class="message-files">' + fileHtml(part) + textFileHtml(part) + '</div>' + imageHtml(part) + '</div></div>';
@@ -1735,9 +1738,9 @@ const CLIENT_JS = String.raw`
     if(!message.query)historyRows=rows;
     E('sessionSearchStatus').textContent=message.query ? rows.length+' conversations · content results capped at 60 matches' : '';
     box.innerHTML = rows.length ? historyTree(rows,historyMode).map(function(entry){var row=entry.row;
-      var title = row.semanticTitle || (row.semantic_summary || {}).title || row.title || (row.prompt || '').replace(/\s+/g, ' ').slice(0,60) || 'Untitled conversation';
+      var title = row.semanticTitle || (row.semantic_summary || {}).title || row.title || (row.prompt || '').replace(/\s+/g, ' ').slice(0,60) || (historyFork(row)?'New chat':'Untitled conversation');
       var detail = row.working_directory || (historyMode==='lineage'?'':historyKind(entry));
-      return '<div class="session-row"'+(historyMode==='lineage'?' data-depth="'+entry.depth+'" style="--history-depth:'+entry.depth+'"':'')+'><button class="session-choice" data-a="chooseSession" data-p="'+esc(row.id)+'" aria-current="'+String(row.id===sessionId)+'" title="'+esc(title)+'"><span>'+esc(title)+'</span>'+(historyMode==='lineage'?'<span class="session-lineage">'+(entry.orphan||entry.cycle?'':'Level '+entry.depth+' · ')+esc(historyKind(entry))+'</span>':'')+'<span class="sub">'+esc(detail)+'</span>'+(row.matchSnippet?'<span class="session-match">'+esc(row.matchSnippet)+'</span>':'')+'</button><button class="session-rename" data-a="renameSession" data-p="'+esc(row.id)+'" aria-label="Rename '+esc(title)+'" title="Rename conversation">${icon('edit')}</button><button class="session-delete" data-a="deleteSession" data-p="'+esc(row.id)+'" aria-label="Delete '+esc(title)+'" title="Delete conversation">×</button></div>';
+      return '<div class="session-row"'+(historyMode==='lineage'?' data-depth="'+entry.depth+'" style="--history-depth:'+entry.depth+'"':'')+'><button class="session-choice" data-a="chooseSession" data-p="'+esc(row.id)+'" aria-current="'+String(row.id===sessionId)+'" title="'+esc(title)+'"><span>'+esc(title)+'</span>'+(historyMode==='lineage'?'<span class="session-lineage">'+(entry.orphan||entry.cycle?'':(entry.depth?'Level '+entry.depth+' · ':''))+esc(historyKind(entry))+'</span>':'')+'<span class="sub">'+esc(detail)+'</span>'+(row.matchSnippet?'<span class="session-match">'+esc(row.matchSnippet)+'</span>':'')+'</button><button class="session-rename" data-a="renameSession" data-p="'+esc(row.id)+'" aria-label="Rename '+esc(title)+'" title="Rename conversation">${icon('edit')}</button><button class="session-delete" data-a="deleteSession" data-p="'+esc(row.id)+'" aria-label="Delete '+esc(title)+'" title="Delete conversation">×</button></div>';
     }).join('') : '<div class="picker-message">'+(E('sessionSearch').value.trim()?'No matching conversations.':'No conversations yet.')+'</div>';
     if(historyRestoreScroll){box.scrollTop=historyRestoreScroll;historyRestoreScroll=0;}
     saveHistoryBrowser();
@@ -1825,12 +1828,17 @@ const CLIENT_JS = String.raw`
     var exact=function(n){return contextCountFormatter.format(n||0);};
     var usageTitle='Context: '+exact(contextTokens)+' tokens\nVisible conversation: '+exact(t.total)+' tokens\nInput: '+exact(t.input)+' · Output: '+formatContextCount(t.output||0)+' ('+exact(t.output)+')\nCache reads: '+exact(t.cached)+' · Cache writes: '+exact(t.cacheWrite)+'\nCurrent branch, this session only; excludes child-agent usage.';
     if(t.costKnown)usageTitle+='\nRecorded cost: $'+(t.costUsd||0).toFixed(4)+' (unpriced rounds may be excluded).';
-    var savedState=view.standby===true?(view.parentId?'Draft fork':'Draft'):view.standby===false?'Saved':'';
-    var status = view.cached ? 'Syncing saved history' : state.connection === 'connected' ? (sending ? (pendingSend&&pendingSend.mode==='steer'?'Steering…':pendingSend&&pendingSend.mode==='queue'?'Queueing…':'Sending…') : view.running ? 'Working' : 'Ready') : state.connection;
+    var savedState=view.standby===true?'Draft':view.standby===false?'Saved':'';
+    if(stopping&&(!view.running||view.activeTurnId!==stopping))stopping=null;
+    var stoppingNow=!!(stopping&&view.activeTurnId===stopping);
+    var status = view.cached ? 'Syncing saved history' : state.connection === 'connected' ? (sending ? (pendingSend&&pendingSend.mode==='steer'?'Steering…':pendingSend&&pendingSend.mode==='queue'?'Queueing…':'Sending…') : stoppingNow ? 'Stopping…' : view.running ? 'Working' : 'Ready') : state.connection;
     var statusHtml = '<span class="connection ' + (state.connection === 'connected' ? '' : 'offline') + '"' + (view.activeTurnId ? ' title="Turn ID: ' + esc(view.activeTurnId) + '"' : '') + '>' + esc(status) + '</span><span title="'+esc(usageTitle)+'">' + (savedState?'<span class="save-state" title="'+(view.standby?'Waiting for the first durable content; draft state is kept separately.':'Conversation history is recorded by Nodecode.')+'">'+savedState+'</span>'+ (sline.length?' · ':''):'') + esc(sline.join(' · ')) + '</span>';
     if(statusLine._html!==statusHtml){statusLine.innerHTML=statusHtml;statusLine._html=statusHtml;}
-    var cancelClass=view.running&&replayReady&&state.connection==='connected'?'icon-btn':'icon-btn hidden';
+    var cancelClass=view.running&&view.activeTurnId&&replayReady&&state.connection==='connected'?'icon-btn':'icon-btn hidden';
     if(cancelBtn.className!==cancelClass)cancelBtn.className=cancelClass;
+    if(cancelBtn.disabled!==stoppingNow)cancelBtn.disabled=stoppingNow;
+    var cancelLabel=stoppingNow?'Stopping…':'Stop active turn';
+    if(cancelBtn.getAttribute('aria-label')!==cancelLabel){cancelBtn.setAttribute('aria-label',cancelLabel);cancelBtn.title=cancelLabel;}
     updateSendControls();
     if (windowReset) { windowReset = false; if (historyReady) { setFollow(scrollBox, true); followPane(scrollBox); } }
     else if (historyReady && firstRender && saved.scrollTop !== undefined) { scrollBox.scrollTop = saved.scrollTop; scrollBox._lastTop = scrollBox.scrollTop; setFollow(scrollBox, atTail(scrollBox, 120) && canFollow(scrollBox)); }
@@ -1864,7 +1872,7 @@ const CLIENT_JS = String.raw`
     composer.style.height = Math.min(180, composer.scrollHeight) + 'px';
   }
   sendBtn.addEventListener('click', function(ev){ev.stopPropagation();closeSessions(false);send();});
-  cancelBtn.addEventListener('click', function(){ vscode.postMessage({ type: 'cancel' }); });
+  cancelBtn.addEventListener('click', function(){ var view=state.view||{};if(stopping||!view.activeTurnId||view.cached||state.connection!=='connected')return;stopping=view.activeTurnId;renderAll(followLatest);vscode.postMessage({type:'cancel',turnId:view.activeTurnId}); });
   queueBtn.addEventListener('click', function(ev){ev.stopPropagation();closeSessions(false);send('queue');});
   ${MODEL_CLIENT_JS}
   var caretMirror=document.createElement('div');caretMirror.id='composerCaretMirror';caretMirror.setAttribute('aria-hidden','true');document.body.appendChild(caretMirror);

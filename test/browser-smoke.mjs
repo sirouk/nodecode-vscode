@@ -282,7 +282,7 @@ try {
   await emit(cosmetic);await page.locator('#composer').focus();await page.mouse.move(0,0);
   assert.equal(await page.locator('.speaker').count(),0);
   assert(!(await page.locator('.msg.assistant').textContent()).includes('Nodecode'));
-  assert.equal(await page.locator('.save-state').textContent(),'Draft fork');
+  assert.equal(await page.locator('.save-state').textContent(),'Draft');
   const avatar=await page.locator('.message-avatar').boundingBox(),content=await page.locator('.assistant-content').boundingBox();
   assert.equal(avatar.width,15);assert(Math.abs(avatar.y-content.y)<=2);
   await emit({...cosmetic,view:{...cosmetic.view,parts:[{kind:'user',text:'A longer user message '.repeat(100)},cosmetic.view.parts[1]]}});
@@ -384,7 +384,8 @@ try {
   const lineage=[{id:'root',title:'Root'},{id:'fork',title:'Fork',parent_id:'root',relation:'inherited'},{id:'agent',title:'Agent',parent_id:'fork',source:'fork'},{id:'orphan',title:'Orphan',parent_id:'missing'},{id:'cycle-a',title:'Cycle A',parent_id:'cycle-b'},{id:'cycle-b',title:'Cycle B',parent_id:'cycle-a'}];
   await emit({type:'sessions',sessions:lineage});
   if(process.env.NODECODE_LINEAGE_SCREENSHOT)await page.screenshot({path:process.env.NODECODE_LINEAGE_SCREENSHOT});
-  assert.deepEqual(await page.locator('.session-row').evaluateAll(rows=>rows.map(row=>Number(row.dataset.depth))),[0,1,2,0,0,1]);
+  assert.deepEqual(await page.locator('.session-row').evaluateAll(rows=>rows.map(row=>Number(row.dataset.depth))),[0,0,1,0,0,1]);
+  assert.equal(await page.locator('button[data-p="fork"] .session-lineage').textContent(),'Started from Root');
   assert((await page.locator('.session-choice').filter({hasText:'Agent'}).textContent()).includes('Subagent'));
   assert((await page.locator('.session-choice').filter({hasText:'Orphan'}).textContent()).includes('Parent not in results'));
   await page.locator('[data-history-mode="recent"]').click();
@@ -615,7 +616,7 @@ try {
   assert.equal(await page.locator('.message-file').getAttribute('title'),'src/store.ts');
   await emit({...state,view:{...state.view,running:false,parts:[{kind:'assistant',text:'Recorded answer',reasoning:'',streaming:false,durable:true,forkTurnId:'turn-recorded'},{kind:'assistant',text:'Still writing',reasoning:'',streaming:true,durable:false}]}});
   assert.equal(await page.locator('[data-a="forkAtMessage"]').count(),1);
-  assert((await page.locator('[data-a="forkAtMessage"]').getAttribute('title')).includes('all recorded messages in this turn'));
+  assert((await page.locator('[data-a="forkAtMessage"]').getAttribute('title')).includes('Everything through this reply is carried over'));
   await page.locator('.msg.assistant').first().hover();
   await page.locator('[data-a="forkAtMessage"]').click();
   assert(await page.evaluate(()=>window.posted.some(m=>m.type==='forkAtMessage'&&m.turnId==='turn-recorded')));

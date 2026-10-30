@@ -438,7 +438,7 @@ test('control actions report disconnected and rejected command results',async t=
     for(const result of [undefined,{status:'rejected',message:'Runtime refused control'}])await t.test(`${action} ${result?'rejected':'disconnected'}`,async()=>{
       const panel=Object.create(SessionPanel.prototype),logs=[];warnings.length=0;
       panel.controller={...controller('session'),[method]:()=>method==='navigateCheckpoint'?Promise.resolve(result):result&&{done:Promise.resolve(result)}};
-      panel.notes={log:m=>logs.push(m)};
+      panel.notes={log:m=>logs.push(m)};panel.panel={webview:{postMessage(){}}};
       await panel.onMessage({type:action,promptId:'queued',execId:1});
       assert.equal(warnings.length,1);assert.equal(logs.length,1);
       assert.match(warnings[0],result?/Runtime refused control/:/not connected/i);

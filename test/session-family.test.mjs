@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
-const {sessionFamily}=require('../out/session-family.js');
+const {sessionFamily,isHistoryFork,isDelegatedFork}=require('../out/session-family.js');
 const {SessionStore}=require('../out/store.js');
 const {SessionController}=require('../out/manager.js');
 const rows=[
@@ -13,6 +13,16 @@ const rows=[
   {id:'manual',title:'Manual fork',parent_id:'parent',source:'rpc',relation:'inherited'},
   {id:'separate',title:'Separate root'},
 ];
+
+test('only a delegated source makes a child thread; a manual fork is a conversation',()=>{
+  assert.equal(isDelegatedFork({source:'fork'}),true);
+  assert.equal(isDelegatedFork({source:'gateway'}),false);
+  assert.equal(isHistoryFork({source:'fork',relation:'inherited'}),false,'model work stays a delegated child');
+  assert.equal(isHistoryFork({source:'gateway',relation:'inherited'}),true);
+  assert.equal(isHistoryFork({source:null,relation:'inherited'}),true);
+  assert.equal(isHistoryFork({source:'gateway',relation:'detached'}),false);
+  assert.equal(isHistoryFork({source:'gateway'}),false);
+});
 
 test('native hierarchy preserves ancestors, siblings, descendants and source-defined delegation',()=>{
   const family=sessionFamily(rows,'child',new Map([['grandchild','2026-10-26T12:00:00Z']]));

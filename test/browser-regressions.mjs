@@ -563,7 +563,7 @@ try{
     for(const viewport of [{width:1108,height:650},{width:360,height:700},{width:320,height:500}]){
       await page.setViewportSize(viewport);
       for(const running of [true,false]){
-        await emit(page,{...state,view:{...view,running}});
+        await emit(page,{...state,view:{...view,running,...(running?{activeTurnId:'turn-status'}:{})}});
         await page.locator('#composer').fill(running?'A draft\nwith multiple lines\nand more room to type.':'A short draft');
         const metrics=await page.evaluate(()=>{
           const box=id=>document.getElementById(id).getBoundingClientRect(),bar=box('composerBar'),status=box('statusLine'),hint=box('composerHint');
@@ -580,6 +580,55 @@ try{
         assert.equal(await page.locator('#cancelBtn').isVisible(),running);
       }
     }
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('stop cancels the live turn once and cannot stick after a rejection',async()=>{
+    const {page,errors}=await open();
+    const active={...state,view:{...state.view,running:true,activeTurnId:'turn-live',activeTurnSteerable:true}};
+    await emit(page,active);
+    assert.equal(await page.locator('#cancelBtn').isVisible(),true);
+    await page.locator('#cancelBtn').click();
+    assert.deepEqual(await posted(page,'cancel'),{type:'cancel',turnId:'turn-live'});
+    assert.equal(await page.locator('#statusLine .connection').textContent(),'Stopping…');
+    assert.equal(await page.locator('#cancelBtn').isDisabled(),true);
+    await page.locator('#cancelBtn').click({force:true});
+    assert.equal(await page.evaluate(()=>window.posted.filter(m=>m.type==='cancel').length),1,'a second click cannot send another cancel');
+    await emit(page,{type:'cancelFailed',turnId:'turn-live',message:'turn_id is not the active turn'});
+    assert.equal(await page.locator('#statusLine .connection').textContent(),'Working');
+    assert.equal(await page.locator('#cancelBtn').isDisabled(),false);
+    assert.equal(await page.locator('#attachmentError').textContent(),'turn_id is not the active turn');
+    await emit(page,{...active,view:{...active.view,activeTurnId:null}});
+    assert.equal(await page.locator('#cancelBtn').isVisible(),false,'a turn without a confirmed id exposes no stop target');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('a continued chat is a top-level conversation, not a child thread',async()=>{
+    const {sessionFamily}=require('../out/session-family.js');
+    const rows=[
+      {id:'parent',title:'Parent'},
+      {id:'forked',title:'Continued chat',parent_id:'parent',source:'gateway',relation:'inherited'},
+      {id:'agent',title:'Delegated agent',parent_id:'parent',source:'fork',relation:'inherited'},
+      {id:'fork-agent',title:'Fork agent',parent_id:'forked',source:'fork',relation:'inherited'},
+    ];
+    const {page,errors}=await open();
+    await emit(page,{...state,view:{...state.view,sessionId:'parent',...sessionFamily(rows,'parent',new Map())}});
+    const originThreads=await page.evaluate(()=>Array.from(document.querySelectorAll('#threadList [data-p]'),node=>node.dataset.p));
+    assert(originThreads.includes('agent'));
+    assert(!originThreads.includes('forked'),'the continued chat is not a child of its origin');
+    assert(!originThreads.includes('fork-agent'),'nor is work inside it');
+    assert((await page.locator('#threadSummary').textContent()).includes('· 1'));
+    await page.locator('#sessBtn').click();
+    const request=await posted(page,'requestSessions');
+    await emit(page,{type:'sessions',sessions:rows,query:'',requestId:request.requestId});
+    const picker=await page.evaluate(()=>Array.from(document.querySelectorAll('#sessionChoices .session-row'),node=>({id:node.querySelector('[data-a=chooseSession]').dataset.p,depth:node.dataset.depth,text:node.textContent})));
+    assert.deepEqual(picker.map(row=>[row.id,row.depth]),[['parent','0'],['agent','1'],['forked','0'],['fork-agent','1']]);
+    const continued=picker.find(row=>row.id==='forked');
+    assert(continued.text.includes('Started from Parent'));assert(!continued.text.includes('Level 0'));
+    await emit(page,{...state,view:{...state.view,sessionId:'forked',...sessionFamily(rows,'forked',new Map())}});
+    const continuedThreads=await page.evaluate(()=>Array.from(document.querySelectorAll('#threadList [data-p]'),node=>({id:node.dataset.p,text:node.textContent})));
+    assert.equal(continuedThreads.some(row=>row.id==='agent'),false,'sibling conversations stay out of this chat');
+    const previous=continuedThreads.find(row=>row.id==='parent');
+    assert(previous,'the origin remains one link away');assert(previous.text.includes('previous chat'));
+    assert(continuedThreads.some(row=>row.id==='fork-agent'));
     assert.deepEqual(errors,[]);await page.close();
   });
   await check('footer displays latest context including cache reads and writes, not cumulative input',async()=>{

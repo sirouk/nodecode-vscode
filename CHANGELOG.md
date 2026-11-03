@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.16]
+
 ### Fixed
 
 - Keep a recorded file's diff when a later receipt reports the same file without a diff body. A created or size-trimmed document used to replace the whole entry, so the row survived with no patch to show; the newest receipt still dates and counts the row, while the patch, and the truncation label that qualifies it, come from the most recent receipt that carried one.
@@ -188,7 +190,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.15...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.16...HEAD
+[0.1.16]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.13...v0.1.15
 [0.1.13]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.11...v0.1.12

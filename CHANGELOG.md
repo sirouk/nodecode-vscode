@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15]
+
 ### Added
 
 - Preview a collapsed thought as one line: the whole thought is in the header and CSS `text-overflow` cuts it to the row, so the ellipsis follows every resize instead of wrapping to a second line or stopping at a character count. The chevron replaces the native marker so the header stays one line tall, an open thought hides its own preview, and the preview is written as text, never as markup.
@@ -177,7 +179,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.13...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.15...HEAD
+[0.1.15]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.13...v0.1.15
 [0.1.13]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.10...v0.1.11

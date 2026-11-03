@@ -35,6 +35,7 @@ test('references snapshot current text, preserve fences and restore compact tran
   const controller = new SessionController({}, {log(){}}, {}, root, 'test');
   let sent;
   controller.rpc.sendCommand = command => {sent = command;};
+  controller.store.applyFrame({type:'session_stream_resumed',session_id:'test',replay_chunk_final:true,accumulated_frames:[]});controller.rpc.setState('connected');
   controller.sendPrompt(await controller.withFileReferences('review', ['source file.ts']));
   assert.match(sent.prompt, /latest/);
   assert.equal(sent.type, 'start_turn');

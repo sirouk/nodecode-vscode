@@ -379,6 +379,7 @@ export class SessionStore {
         this.applyQueueSnapshot((frame as { snapshot?: TurnQueueSnapshot }).snapshot ?? null);
         break;
       case "session_titled":
+        if (typeof frame.session_id !== "string" || frame.session_id !== this.sessionIdValue) return;
         this.titleValue = (frame as { title?: string }).title ?? this.titleValue;
         break;
       case "session_background_process_updated":
@@ -397,7 +398,6 @@ export class SessionStore {
         this.activeSessions = new Map(((frame as OrganismFrame).sessions ?? []).filter((row) => typeof row.id === "string").map((row) => [row.id as string, typeof row.started_at === "string" ? row.started_at : undefined]));
         break;
       case "organism.notice":
-      case "organism.notices":
         this.applyNotices(frame as OrganismFrame);
         break;
       default:
@@ -844,8 +844,6 @@ export class SessionStore {
     if (typeof header.through === "number") this.usageThrough = header.through;
     const context = header.context_usage;
     if (context) this.contextUsageValue = { input: context.input ?? 0, cached: context.cached ?? 0, cacheWrite: context.cache_write ?? 0 };
-    const model = context?.model;
-    if (model) this.modelValue = model;
     this.bump();
   }
 

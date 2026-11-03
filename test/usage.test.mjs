@@ -124,3 +124,11 @@ test('ambiguous ancestry usage in a native fast tail remains provisional and ful
   assert.deepEqual(tokenFields(store.view()),{input:0,output:0,cached:0,cacheWrite:0,total:0});
   assert.deepEqual(store.view().contextUsage,{input:0,cached:0,cacheWrite:0});
 });
+
+test('last-round usage models cannot overwrite the selected next-turn target',()=>{
+  const store=ownStore();store.setModelEffort('next-model','next-provider','high');
+  store.applyHeader({session_id:'own',through:1,context_usage:{input:100,cached:200,cache_write:30,model:'previous-model'}});
+  assert.equal(store.view().model,'next-model');assert.equal(store.view().provider,'next-provider');
+  assert.equal(store.view().effort,'high');
+  assert.deepEqual(store.view().contextUsage,{input:100,cached:200,cacheWrite:30});
+});

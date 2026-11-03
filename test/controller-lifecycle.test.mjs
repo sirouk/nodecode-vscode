@@ -91,7 +91,7 @@ test('disconnect invalidates running process receipts before notifying views and
   let listenerStatuses;ctl.subscribeConnection(state=>{if(state==='disconnected')listenerStatuses=ctl.store.view().processes.map(row=>row.status);});
   h.children.at(-1).child.emit('close',1,null);
   assert.deepEqual(listenerStatuses,['unknown','unknown','exited']);
-  assert.throws(()=>ctl.interruptExec(7),/not running/);
+  assert.throws(()=>ctl.interruptExec(7),/synchroniz/);
   assert.equal(ctl.store.view().processes[0].output,'last observed','uncertain output remains inspectable');
   ctl.connect();h.emit('root',replay('root',1));
   assert.equal(ctl.store.view().processes[0].status,'unknown','cursor catch-up cannot prove a process survived the outage');
@@ -124,4 +124,30 @@ test('a slash result already in flight cannot resync its reader while deletion i
   let resyncs=0;ctl.rpc.resync=()=>resyncs++;
   slash.resolve({kind:'ok'});assert.deepEqual(await running,{kind:'ok'});assert.equal(resyncs,0);
   result.resolve({sessions:['root']});await removing;
+});
+
+test('fresh, partial, disconnected and disposed controllers cannot admit prompts or turn controls',async t=>{
+  const h=harness(t),ctl=h.controller('root');
+  const blocked=()=>{
+    const writes=h.children.flatMap(({child})=>child.stdin.readableLength?[child.stdin.read().toString()]:[]);
+    for(const invoke of [
+      ()=>ctl.sendPrompt('Now'),()=>ctl.queuePrompt('Later'),()=>ctl.steer('turn','Correction'),
+      ()=>ctl.withdraw('pending'),()=>ctl.cancelActive(),()=>ctl.interruptExec(1),
+      ()=>ctl.navigateCheckpoint({direction:'undo'}),()=>ctl.assertCheckpointTurn('turn'),
+    ])assert.throws(invoke,/synchroniz|closed/i);
+    return Promise.all([
+      assert.rejects(ctl.runSlash('/help'),/synchroniz|closed/i),
+      assert.rejects(ctl.forkAtMessage('turn'),/synchroniz|closed/i),
+    ]).then(()=>{
+      assert.deepEqual(writes,[]);
+      assert(h.children.every(({child})=>child.stdin.readableLength===0),'blocked commands never reach the CLI');
+    });
+  };
+  await blocked();assert.equal(h.starts.length,0,'cold commands cannot implicitly launch and write before replay');
+  ctl.connect();await blocked();assert.equal(h.starts.length,1);
+  h.emit('root',{...replay('root'),replay_chunk_final:false});await blocked();
+  h.emit('root',{...replay('root'),replay_chunk_index:1});
+  assert.equal(ctl.store.replayComplete,true);assert.equal(ctl.rpc.connectionState,'connected');
+  h.children.at(-1).child.emit('close',1,null);await blocked();
+  ctl.dispose();await blocked();
 });

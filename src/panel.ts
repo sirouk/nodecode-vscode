@@ -201,7 +201,12 @@ export class SessionPanel {
     this.disposables.push(controller.store.subscribe(() => this.scheduleState()));
     this.disposables.push(controller.subscribeConnection((state, attempts) => {
       if (state === "connected" && this.connection !== "connected") {
-        for (const [id, image] of this.conversationImages) if (image.error) this.conversationImages.delete(id);
+        // Loaded historical rows are outside postState's tail, so retry them here.
+        for (const [key, image] of [...this.conversationImages]) if (image.error) {
+          this.conversationImages.delete(key);
+          const [sourceSessionId, id] = JSON.parse(key) as [string, string];
+          this.conversationImage(id, sourceSessionId);
+        }
       }
       this.connection = state;
       this.connectionAttempts = attempts;
@@ -225,42 +230,36 @@ export class SessionPanel {
     if (!this.disposed) void this.panel.webview.postMessage(message);
   }
 
-  private toolImageUrl(call: { metadata?: Record<string, unknown>; result?: string }, cwd: string): string | undefined {
-    const image = call.metadata?.image as Record<string, unknown> | undefined;
-    if (!image || typeof image !== "object") return undefined;
-    const text = call.result?.trim() ?? "";
-    const base64 = text.replace(/^data:image\/png[^,]*;base64[^,]*,/, "");
-    if (text.length <= 8 * 1024 * 1024 && /^[A-Za-z0-9+/=]{8,}$/.test(base64)) return `data:image/png;base64,${base64}`;
-    const file = typeof image.png_path === "string" ? image.png_path : image.path;
-    if (!cwd || typeof file !== "string" || !/\.(png|jpe?g|gif|webp)$/i.test(file)) return undefined;
-    try {
-      const root = fs.realpathSync(cwd);
-      const resolved = fs.realpathSync(path.resolve(cwd, file));
-      const relative = path.relative(root, resolved);
-      if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return undefined;
-      const roots = (this.panel.webview.options ?? {}).localResourceRoots ?? [];
-      if (!roots.some((uri) => uri.fsPath === root)) this.panel.webview.options = { ...this.panel.webview.options, localResourceRoots: [...roots, vscode.Uri.file(root)] };
-      return this.panel.webview.asWebviewUri(vscode.Uri.file(resolved)).toString();
-    } catch { return undefined; }
+  private pendingImageSettlements?: Map<string, {type:"imageSettled";sessionId:string;sourceSessionId:string;id:string;url?:string;error?:string}>;
+
+  private flushImageSettlements(): void {
+    if (this.disposed || this.panel.visible === false || !this.pendingImageSettlements) return;
+    for (const message of this.pendingImageSettlements.values()) this.postMessage(message);
+    this.pendingImageSettlements.clear();
   }
 
-  private conversationImage(id: string): { url?: string; error?: string; pending?: Promise<void> } {
-    let image = this.conversationImages.get(id);
+  private conversationImage(id: string, sourceSessionId = this.controller.sessionId): { url?: string; error?: string; pending?: Promise<void> } {
+    const key = JSON.stringify([sourceSessionId, id]);
+    let image = this.conversationImages.get(key);
     if (!image) {
       image = {};
-      this.conversationImages.set(id, image);
+      this.conversationImages.set(key, image);
       const controller = this.controller, result = image;
-      // The tail is re-posted whenever a url lands. An older slice is shipped
-      // once and never revisited, so it carries the fetch with it and waits.
-      result.pending = controller.imageDataUrl(id).then((url) => {
+      const settled = (): void => {
+        this.pendingImageSettlements ??= new Map();
+        this.pendingImageSettlements.set(key, {type:"imageSettled",sessionId:controller.sessionId,sourceSessionId,id,url:result.url,error:result.error});
+        this.flushImageSettlements();
+        this.postState();
+      };
+      result.pending = controller.imageDataUrl(id, sourceSessionId).then((url) => {
         if (this.disposed || this.controller !== controller) return;
         result.url = url; result.pending = undefined;
-        this.postState();
+        settled();
       }, (error) => {
         if (this.disposed || this.controller !== controller) return;
         result.error = String(error); result.pending = undefined;
         this.notes.log(`saved image ${id} unavailable: ${String(error)}`);
-        this.postState();
+        settled();
       });
     }
     return image;
@@ -270,14 +269,14 @@ export class SessionPanel {
   private static readonly sliceImageSettleMs = 4000;
 
   /** Ship one slice of older transcript, its saved images settled first. */
-  private async postPartsWindow(requestId: unknown, sessionId: string, start: number, slice: StoreView["parts"], cwd: string): Promise<void> {
+  private async postPartsWindow(requestId: unknown, sessionId: string, start: number, slice: StoreView["parts"]): Promise<void> {
     const waiting: Promise<void>[] = [];
-    this.decorateParts(slice, cwd, waiting);
+    this.decorateParts(slice, waiting);
     if (waiting.length) {
       await Promise.race([Promise.allSettled(waiting), new Promise((resolve) => setTimeout(resolve, SessionPanel.sliceImageSettleMs))]);
       if (this.disposed) return;
     }
-    this.postMessage({ type: "partsWindow", requestId, sessionId, start, total: this.controller.store.view().parts.length, parts: this.decorateParts(slice, cwd) });
+    this.postMessage({ type: "partsWindow", requestId, sessionId, start, total: this.controller.store.view().parts.length, parts: this.decorateParts(slice) });
   }
 
   /** Parts a fresh webview receives; the panel asks for older ones as the reader scrolls back. */
@@ -302,12 +301,20 @@ export class SessionPanel {
     return 0;
   }
 
-  private decorateParts(parts: StoreView["parts"], cwd: string, waiting?: Promise<void>[]): StoreView["parts"] {
-    return parts.map((part) => part.kind === "tool" ? { ...part, call: { ...part.call, imageUrl: this.toolImageUrl(part.call, cwd) } } : (part.kind === "user" || part.kind === "assistant") && part.images?.length ? { ...part, images: part.images.map((image) => {
-      const found = this.conversationImage(image.id), { pending, ...shown } = found;
-      if (waiting && pending) waiting.push(pending);
-      return { ...image, ...shown };
-    }) } : part);
+  private decorateParts(parts: StoreView["parts"], waiting?: Promise<void>[]): StoreView["parts"] {
+    return parts.map((part) => {
+      if (part.kind === "tool" && part.call.metadata?.image && typeof part.call.metadata.image === "object") {
+        const found = this.conversationImage(part.call.callId, part.call.sessionId), {pending, url, error} = found;
+        if (waiting && pending) waiting.push(pending);
+        return {...part,call:{...part.call,imageUrl:url,imageError:error}};
+      }
+      if ((part.kind === "user" || part.kind === "assistant") && part.images?.length) return {...part,images:part.images.map((image) => {
+        const found = this.conversationImage(image.id), {pending, ...shown} = found;
+        if (waiting && pending) waiting.push(pending);
+        return {...image,...shown};
+      })};
+      return part;
+    });
   }
 
   /** Exact and cheap: string equality is by value, so this walks the two lists
@@ -353,6 +360,7 @@ export class SessionPanel {
   }
 
   private postState(): void {
+    this.flushImageSettlements();
     this.clearStateTimer();
     if (this.disposed || this.panel.visible === false || this.controller.store.replaying) return;
     const view = this.controller.store.view();
@@ -379,7 +387,7 @@ export class SessionPanel {
       type: "state",
       view: {
         ...rest,
-        parts: this.decorateParts(view.parts.slice(start), view.cwd),
+        parts: this.decorateParts(view.parts.slice(start)),
         partsStart: start,
         partsTotal: view.parts.length,
         ...(filesUnchanged ? { modifiedFilesOmitted: true } : { modifiedFiles: this.encodeFiles(modifiedFiles) }),
@@ -584,7 +592,7 @@ export class SessionPanel {
           // Bounded by weight as well as by count, but never shorter than the
           // two parts the panel's merge witness needs to accept the answer.
           const from = SessionPanel.boundedFrom(view.parts, end, limit, SessionPanel.sliceWeight, 2);
-          void this.postPartsWindow(message.requestId, id, from, view.parts.slice(from, end), view.cwd);
+          void this.postPartsWindow(message.requestId, id, from, view.parts.slice(from, end));
           return;
         }
         case "openThread": {
@@ -784,7 +792,7 @@ export class SessionPanel {
       "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">",
       `<style>${PANEL_CSS}${HISTORY_CSS}${ATTACHMENT_CSS}${MESSAGE_CSS}</style></head><body>${PANEL_BODY.replaceAll("__MARK_URI__", this.markUri)}`,
       `<script nonce="${nonce}" src="${this.markdownUri}"></script>`,
-      `<script nonce="${nonce}">${CLIENT_JS.replaceAll("__MARK_URI__", this.markUri).replace("__SESSION_ID__", JSON.stringify(this.controller.sessionId))}</script>`,
+      `<script nonce="${nonce}">${CLIENT_JS.replaceAll("__MARK_URI__", () => this.markUri).replace("__SESSION_ID__", () => JSON.stringify(this.controller.sessionId).replaceAll("<", "\\u003c"))}</script>`,
       "</body></html>",
     ].join("\n");
   }
@@ -1234,6 +1242,7 @@ const CLIENT_JS = String.raw`
       renderAll(nearBottom());
       return;
     }
+    if (m.type === 'imageSettled') { receiveImageSettlement(m); return; }
     if (m.type === 'partsWindow') { receivePartsWindow(m); return; }
     if (m.type !== 'state') return;
     // The extension is alive and answering; a request whose window was lost must
@@ -1294,7 +1303,7 @@ const CLIENT_JS = String.raw`
     var body = '';
     if (call.arguments) body += '<div class="tool-sec"><div class="tool-label">Input</div><pre class="tool-io">' + esc(call.arguments) + '</pre></div>';
     var metadata=call.metadata||{},image=metadata.image,shell=metadata.background_shell;
-    if(image){var label=['Image',image.path||image.target||'',image.width&&image.height?image.width+' × '+image.height:'',image.media_type||''].filter(Boolean).join(' · ');body+='<div class="tool-sec"><div class="tool-label">'+esc(label)+'</div>'+(call.imageUrl?'<img class="message-image" src="'+esc(call.imageUrl)+'" alt="Tool image result">':'<div class="sub">Preview unavailable in this workspace</div>')+'</div>';}
+    if(image){var label=['Image',image.path||image.target||'',image.width&&image.height?image.width+' × '+image.height:'',image.media_type||''].filter(Boolean).join(' · ');body+='<div class="tool-sec"><div class="tool-label">'+esc(label)+'</div>'+(call.imageUrl?'<img class="message-image" src="'+esc(call.imageUrl)+'" alt="Tool image result">':'<div class="sub message-image-status" role="status">'+(call.imageError?'Image unavailable: '+esc(call.imageError):'Loading image…')+'</div>')+'</div>';}
     if(metadata.snippet&&metadata.snippet.note)body+='<div class="tool-sec sub">'+esc(metadata.snippet.note)+'</div>';
     if(shell)body+='<div class="tool-sec sub">'+esc(['Background process',shell.status,typeof shell.exit_code==='number'?'exit '+shell.exit_code:''].filter(Boolean).join(' · '))+'</div>';
     var diff=metadata.workspace_diff;
@@ -1556,6 +1565,7 @@ const CLIENT_JS = String.raw`
     if (node._stArgs !== (call && call.arguments ? call.arguments : '')) return false;
     if (node._stResult !== (call && call.result ? call.result : '')) return false;
     if (node._stImageUrl !== (call && call.imageUrl ? call.imageUrl : '')) return false;
+    if (node._stImageError !== (call && call.imageError ? call.imageError : '')) return false;
     return sameValue(node._stImages,part.images) && sameValue(node._stFiles,part.files)
       && sameValue(node._stTextFiles,part.textFiles) && sameValue(node._stMetadata,call && call.metadata);
   }
@@ -1566,6 +1576,7 @@ const CLIENT_JS = String.raw`
     node._stArgs = call && call.arguments ? call.arguments : '';
     node._stResult = call && call.result ? call.result : '';
     node._stImageUrl = call && call.imageUrl ? call.imageUrl : '';
+    node._stImageError = call && call.imageError ? call.imageError : '';
     node._stImages = part.images; node._stFiles = part.files; node._stTextFiles = part.textFiles;
     node._stMetadata = call && call.metadata;
   }
@@ -1582,19 +1593,21 @@ const CLIENT_JS = String.raw`
     transcript.querySelectorAll('.reasoning[open]').forEach(function(el){ el.open=false; });
   }
 
-  // Identity only, never content: a part in the overlap may legitimately have
-  // grown between states, and mistaking that for a replaced transcript would
-  // throw the reader to the bottom.
+  // Live parts can grow between states without replacing the transcript. Use
+  // their stable identity at the overlap, and exact source for completed rows,
+  // so neither streaming nor a same-length branch replacement loses its shape.
   function samePart(a,b){
     if(!a||!b)return false;
-    if(a.kind!==b.kind||a.turnNumber!==b.turnNumber||(a.forkTurnId||'')!==(b.forkTurnId||''))return false;
+    if(a.kind!==b.kind||a.turnNumber!==b.turnNumber)return false;
+    // A live assistant grows in place and gains its fork id when made durable.
+    // Neither change replaces the history preceding the delivered boundary.
+    if(a.kind==='assistant'&&(a.streaming||b.streaming)&&(!a.forkTurnId||!b.forkTurnId||a.forkTurnId===b.forkTurnId))return true;
+    if((a.forkTurnId||'')!==(b.forkTurnId||''))return false;
     if(a.call||b.call)return !!(a.call&&b.call&&a.call.callId===b.call.callId);
     if(a.childSessionId||b.childSessionId)return (a.childSessionId||'')===(b.childSessionId||'');
-    // System lines carry no turn identity at all, so without this any two of them
-    // witness as the same part and a prefix cut from an abandoned transcript is
-    // kept. Their text is pushed complete and never appended to - only the
-    // streaming tail grows, far from a cache boundary - so its length is stable.
-    return (a.text||'').length===(b.text||'').length;
+    // Completed rows do not grow. Their exact source distinguishes replacements
+    // even when an abandoned branch has the same turn number and text length.
+    return (a.text||'')===(b.text||'')&&(a.reasoning||'')===(b.reasoning||'');
   }
 
   function syncParts(view){
@@ -1652,7 +1665,7 @@ const CLIENT_JS = String.raw`
       return;
     }
     var turnNow = newestTurn(cachedParts);
-    if (cacheSession !== thinkingSession) { thinkingSession = cacheSession; thinkingTurn = turnNow; }
+    if (cacheSession !== thinkingSession || turnNow < thinkingTurn) { thinkingSession = cacheSession; thinkingTurn = turnNow; }
     else if (turnNow > thinkingTurn) { thinkingTurn = turnNow; collapseThinking(); }
     var last = partsTotal - 1, tail = budgetStart();
     // The tail also has to be a suffix the window can hold. A part too heavy for
@@ -1977,7 +1990,7 @@ const CLIENT_JS = String.raw`
   E('filePicker').addEventListener('click',function(ev){var option=ev.target.closest('[data-file]');if(option)chooseFile(Number(option.dataset.file));});
   composer.addEventListener('click',updateFileQuery);
   composer.addEventListener('scroll',positionFilePicker,{passive:true});
-  window.addEventListener('resize',positionFilePicker);
+  window.addEventListener('resize',function(){grow();positionFilePicker();});
   composer.addEventListener('keyup',function(ev){if(['ArrowLeft','ArrowRight','Home','End'].includes(ev.key))updateFileQuery();});
   document.addEventListener('click',function(ev){if(!E('composerBar').contains(ev.target))closeFilePicker();});
   function renderTextFiles(){
@@ -2068,6 +2081,23 @@ const CLIENT_JS = String.raw`
     // One part of overlap: the answer's last part has to be the cache's first,
     // which is the witness that it was cut from the transcript still on screen.
     vscode.postMessage({type:'requestParts',requestId:++loadRequest,before:partsStart+1,limit:FETCH_PARTS+1});
+  }
+  // Image requests may outlive the history slice's bounded wait. Update the
+  // cached row directly rather than replaying a consumed scrollback response.
+  function receiveImageSettlement(m){
+    if(m.sessionId!==sessionId)return;
+    var changed=false;
+    cachedParts=cachedParts.map(function(part){
+      if(part.kind==='tool'){
+        var call=part.call;
+        if(call.callId===m.id&&(call.sessionId||sessionId)===m.sourceSessionId){changed=true;return Object.assign({},part,{call:Object.assign({},call,{imageUrl:m.url,imageError:m.error})});}
+      }else if((part.kind==='user'||part.kind==='assistant')&&m.sourceSessionId===sessionId&&part.images){
+        var images=part.images.map(function(image){if(image.id!==m.id)return image;changed=true;return Object.assign({},image,{url:m.url,error:m.error});});
+        if(images.some(function(image,i){return image!==part.images[i];}))return Object.assign({},part,{images:images});
+      }
+      return part;
+    });
+    if(changed)renderAll(followLatest);
   }
   function receivePartsWindow(m){
     if(m.requestId!==loadRequest)return;

@@ -9,13 +9,16 @@ export const THINKING_CONTROLS_JS = String.raw`
     var source = String(text || '');
     return source.length > THOUGHT_PREVIEW ? source.slice(0, THOUGHT_PREVIEW) : source;
   }
-  // A forward turn number is a new turn: the prompt just sent, a queued one
-  // draining, or an answer landing. Parts without a turn number cannot move it.
+  // Committed input precedes turn.started, so a user part still carries the
+  // previous turn's number. It already belongs to the next turn for disclosure
+  // purposes; waiting for assistant content would leave the old thought open.
   function newestTurn(parts){
     var newest = 0;
     for (var i = parts.length - 1; i >= 0; i--) {
       var part = parts[i];
-      if (part && typeof part.turnNumber === 'number' && part.turnNumber > newest) newest = part.turnNumber;
+      if (!part || typeof part.turnNumber !== 'number') continue;
+      var turn = part.turnNumber + (part.kind === 'user' ? 1 : 0);
+      if (turn > newest) newest = turn;
     }
     return newest;
   }

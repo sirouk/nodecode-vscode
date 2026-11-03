@@ -11,6 +11,7 @@ test('message forks use recorded native turn identities and reject unknown or ac
   const controller=new SessionController({}, {log(){}}, {forkSession:async(...args)=>{calls.push(args);return 'new-child';}}, '/workspace', 'parent');
   const apply=(sequence,type,turn_id,payload={})=>controller.store.applyFrame({...event(sequence,type,payload),turn_id});
   try {
+    controller.store.applyFrame({type:'session_stream_resumed',session_id:'parent',replay_chunk_final:true,accumulated_frames:[]});controller.rpc.setState('connected');
     apply(1,'turn.started','turn-one');
     apply(2,'turn.input_committed','turn-one',{message:'First question'});
     apply(3,'turn.assistant_message_completed','turn-one',{message:{content:'First answer'}});
@@ -128,13 +129,14 @@ test('real sync envelopes normalize live and chunked replay facts', () => {
 
 test('multiple panels receive store updates until each unsubscribes', () => {
   const store = new SessionStore();
+  store.setThreads([],'own');
   let editor = 0, sidebar = 0;
   const first = store.subscribe(() => editor++);
   const second = store.subscribe(() => sidebar++);
-  store.applyFrame({type:'session_titled',title:'One'});
+  store.applyFrame({type:'session_titled',session_id:'own',title:'One'});
   assert.equal(editor, 1); assert.equal(sidebar, 1);
   first.dispose();
-  store.applyFrame({type:'session_titled',title:'Two'});
+  store.applyFrame({type:'session_titled',session_id:'own',title:'Two'});
   assert.equal(editor, 1); assert.equal(sidebar, 2);
   second.dispose();
 });
@@ -625,7 +627,7 @@ test('streaming and unrelated metadata do not revisit recorded diffs or rebuild 
     store.view();
   }
   for(const frame of [
-    {type:'session_titled',title:'Updated title'},
+    {type:'session_titled',session_id:'own',title:'Updated title'},
     {type:'model_changed',model:'model',provider:'provider'},
     {type:'session_input_queue_snapshot_updated',snapshot:{pending_prompts:[]}},
     {type:'session_background_process_updated',session_id:'own',process:{exec_id:1,status:'running',output:'process output'}},
@@ -747,4 +749,39 @@ test('transcript weight includes every recorded patch without parsing or copying
   for(const workspace_diff of [true,'invalid',[],{files:null},{files:'invalid'}]){
     assert.equal(partWeight({...part,call:{...part.call,metadata:{workspace_diff}}}),base+6000);
   }
+});
+
+test('globally broadcast title notifications only rename the matching session',()=>{
+  const store=new SessionStore();
+  store.applyFrame({type:'session_stream_resumed',session_id:'alpha',title:'Alpha',replay_chunk_final:true,accumulated_frames:[]});
+  const before=structuredClone(store.view());
+  store.applyFrame({type:'session_titled',session_id:'beta',title:'Beta renamed'});
+  assert.deepEqual(store.view(),before,'another shell title must not contaminate this conversation');
+  store.applyFrame({type:'session_titled',title:'Unscoped title'});
+  assert.deepEqual(store.view(),before,'a session title needs its native session identity');
+  store.applyFrame({type:'session_titled',session_id:'alpha',title:'Alpha renamed'});
+  assert.equal(store.view().title,'Alpha renamed');
+});
+
+test('standing notice-board snapshots do not duplicate spoken warnings in the transcript',()=>{
+  const store=new SessionStore();
+  const warning={key:'provider',text:'Provider temporarily unavailable',level:'warning'};
+  store.applyFrame({type:'organism.notices',notices:[warning,{key:'quiet',text:'status',level:'info'}]});
+  assert.equal(store.view().noticeCount,0);assert.deepEqual(store.view().parts,[]);
+  store.applyFrame({type:'organism.notice',...warning});
+  store.applyFrame({type:'organism.notices',notices:[warning,{key:'quiet',text:'changed status',level:'info'}]});
+  assert.equal(store.view().noticeCount,1);
+  assert.deepEqual(store.view().parts,[{kind:'system',text:warning.text,level:'warn'}]);
+  store.applyFrame({type:'organism.notice',text:'A later error',level:'error'});
+  assert.equal(store.view().noticeCount,2);assert.equal(store.view().parts.at(-1).level,'error');
+});
+
+test('title notifications stay session-scoped while replay is folded out of sight',()=>{
+  const store=new SessionStore();let changes=0;store.subscribe(()=>changes++);
+  store.applyFrame({type:'session_stream_resumed',session_id:'alpha',title:'Alpha',replay_chunk_final:false,accumulated_frames:[]});
+  store.applyFrame({type:'session_titled',session_id:'beta',title:'Other title'});
+  store.applyFrame({type:'session_titled',session_id:'alpha',title:'Fresh Alpha'});
+  assert.equal(changes,0,'a partial replay cannot expose a half-folded snapshot');
+  store.applyFrame({type:'session_stream_resumed',session_id:'alpha',replay_chunk_index:1,replay_chunk_final:true,accumulated_frames:[]});
+  assert.equal(changes,1);assert.equal(store.view().title,'Fresh Alpha');
 });

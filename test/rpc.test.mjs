@@ -101,6 +101,7 @@ test('native image messages serialize content and reject unsupported files', () 
   const commands = [];
   controller.rpc.sendCommand = command => {commands.push(command); return undefined;};
   try {
+    controller.store.applyFrame({type:'session_stream_resumed',session_id:'focused',replay_chunk_final:true,accumulated_frames:[]});controller.rpc.setState('connected');
     controller.sendPrompt('Describe', [{mediaType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII='}]);
     assert.deepEqual(commands[0], {type:'start_turn',prompt:'Describe',content:[{type:'text',text:'Describe'},{type:'image',source:{type:'base64',media_type:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII='}}]});
     assert.throws(() => controller.sendPrompt('Bad', [{mediaType:'image/svg+xml',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII='}]), /PNG/);
@@ -168,6 +169,7 @@ test('image-only prompts remain admissible and binary files cannot masquerade as
   const controller=new SessionController({}, {log(){}}, {}, process.cwd(), 'image-only');
   const commands=[];controller.rpc.sendCommand=command=>{commands.push(command);};
   const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII=';
+  controller.store.applyFrame({type:'session_stream_resumed',session_id:'image-only',replay_chunk_final:true,accumulated_frames:[]});controller.rpc.setState('connected');
   controller.sendPrompt('',[{mediaType:'image/png',data:png},{mediaType:'image/png',data:png}]);
   assert.equal(commands[0].content.length,3);
   assert(commands[0].prompt.length>0);
@@ -183,6 +185,7 @@ test('slash control stays on native API and refreshes only affected session stat
   controller.rpc.sendCommand=()=>{throw Error('slash must never become a model prompt');};
   controller.rpc.resync=()=>calls.push(['resync']);
   try{
+    controller.store.applyFrame({type:'session_stream_resumed',session_id:'slash-session',replay_chunk_final:true,accumulated_frames:[]});controller.rpc.setState('connected');
     assert.equal((await controller.runSlash('/help')).text,'done');
     assert.deepEqual(calls,[['slash','/help','slash-session']]);
     await controller.runSlash('/clear');

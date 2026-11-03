@@ -838,6 +838,43 @@ try{
       assert.deepEqual(errors,[]);
     }finally{projector.disposed=true;ctl.dispose();await page.close();server.close();await once(server,'close');}
   });
+  await check('native prompt boundaries collapse earlier thoughts after same-session undo',async()=>{
+    const {page,errors}=await open();
+    const thought=(turn,text,streaming=false)=>({kind:'assistant',turnNumber:turn,text:'Answer '+turn,reasoning:text,streaming,durable:!streaming,forkTurnId:streaming?undefined:'turn-'+turn});
+    const show=parts=>emit(page,{...state,view:{...state.view,running:true,parts}});
+    await show([thought(10,'Old branch thinking',true)]);
+    // Native replay rewinds the same session, not its session id.
+    const rewound=[{kind:'user',turnNumber:0,text:'Rewound prompt'},thought(1,'Thinking after undo')];
+    await emit(page,{...state,view:{...state.view,parts:rewound,replayComplete:false,cached:true}});
+    await show(rewound);await page.locator('.reasoning').evaluate(node=>{node.open=true;});
+    await page.waitForTimeout(20);
+    // input_committed carries the preceding turn number until turn.started;
+    // it must close the old thought without waiting for assistant output.
+    const next=[...rewound,{kind:'user',turnNumber:1,text:'Next prompt'}];
+    await show(next);assert.equal(await page.locator('.reasoning').first().evaluate(node=>node.open),false,'the committed prompt closes the previous thought after a rewind');
+    await show([...next,thought(2,'Current live thinking',true)]);
+    assert.equal(await page.locator('.reasoning').first().evaluate(node=>node.open),false);
+    assert.equal(await page.locator('.reasoning').last().evaluate(node=>node.open),true,'the live turn retains its own thought');
+    // An unchanged streaming tick must not close a reader-opened historical thought.
+    await page.locator('.reasoning').first().evaluate(node=>{node.open=true;});await page.waitForTimeout(20);
+    await show([...next,thought(2,'Current live thinking grows',true)]);
+    assert.equal(await page.locator('.reasoning').first().evaluate(node=>node.open),true,'only a new turn, not another token, closes older thoughts');
+    assert.deepEqual(errors,[]);await page.close();
+  });
+  await check('composer height follows wrapping when the panel narrows and widens without editing',async()=>{
+    const {page,errors}=await open({},'regression-session',{viewport:{width:1100,height:760}});
+    const composer=page.locator('#composer');
+    await composer.fill('This is a moderately long draft that wraps when the sidebar narrows but still fits in one wide line.');
+    const metrics=()=>composer.evaluate(node=>({height:node.clientHeight,scroll:node.scrollHeight,text:node.value}));
+    const wide=await metrics();assert(wide.height<30,'the draft starts on one line');
+    await page.setViewportSize({width:360,height:760});await page.waitForTimeout(80);
+    const narrow=await metrics();assert(narrow.height>wide.height,'resizing alone grows the wrapped draft');assert(narrow.scroll<=narrow.height+1,'the wrapped text is visible without another keystroke');
+    await page.setViewportSize({width:1100,height:760});await page.waitForTimeout(80);
+    const widened=await metrics();assert.equal(widened.height,wide.height,'widening restores content-driven single-line height');assert.equal(widened.text,wide.text);
+    await composer.fill('Line\n'.repeat(100));await page.setViewportSize({width:360,height:760});await page.waitForTimeout(80);
+    assert((await metrics()).height<=180,'long drafts retain the CSS height cap');
+    assert.deepEqual(errors,[]);await page.close();
+  });
   await check('saved thoughts render safe inline Markdown and copy the original source',async()=>{
     const {page,errors}=await open();
     const reasoning='**Reviewing project tasks**\n\nUse `**literal**` and \\*\\*escaped\\*\\*.\n<script>window.thoughtInjected=1</script><img src=x onerror="window.thoughtInjected=1">\n[bad](javascript:alert) [web](https://example.com/thought) [file](src/panel.ts:12)\n\n  \t';

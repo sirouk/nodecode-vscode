@@ -241,6 +241,49 @@ try{
     assert.equal(await page.evaluate(()=>document.getElementById('jumpBtn').classList.contains('hidden')),false,'the jump-to-latest affordance is offered');
     assert.deepEqual(errors,[]);await page.close();
   });
+  await check('a growing assistant at the delivery boundary preserves loaded history and selections',async()=>{
+    const history=Array.from({length:20},(_,i)=>({kind:'user',text:'Historic row '+i+' '+('Earlier context words. '.repeat(75)),turnNumber:i}));
+    const answer={kind:'assistant',turnNumber:21,text:'Streaming answer. '.repeat(29000),reasoning:'Thought',streaming:true,durable:false};
+    const parts=[...history,answer],{page,errors}=await open({},[answer]);
+    await page.evaluate(parts=>{window.__all=parts;},parts);
+    const ship=async extra=>{
+      const all=await page.evaluate(()=>window.__all);
+      const start=SessionPanel.boundedFrom(all,all.length,240,450000,1);
+      assert.equal(start,20,'the real host delivery budget starts at the large streaming assistant');
+      await emit(page,{...state,view:{...state.view,running:true,...extra,parts:all.slice(start),partsStart:start,partsTotal:all.length}});
+    };
+    await ship();await page.locator('#historyEarlier').click();
+    const req=await pendingRequest(page);assert(req,'older history is fetched across the streaming boundary');
+    await emit(page,{type:'partsWindow',requestId:req.id,sessionId:'window-session',start:0,total:parts.length,parts});
+    await page.locator('#scroll').evaluate(node=>{node.scrollTop=180;node.dispatchEvent(new Event('scroll'));});
+    await page.waitForTimeout(40);
+    const before=await page.evaluate(()=>{
+      const row=document.querySelector('#transcript').firstElementChild,text=document.createTreeWalker(row.querySelector('.bubble'),NodeFilter.SHOW_TEXT).nextNode(),range=document.createRange();
+      range.setStart(text,0);range.setEnd(text,12);window.getSelection().removeAllRanges();window.getSelection().addRange(range);
+      window.__heldRow=row;window.__heldText=text;
+      return {first:row._partIndex,rows:document.querySelector('#transcript').children.length,top:document.getElementById('scroll').scrollTop,selected:window.getSelection().toString()};
+    });
+    assert.equal(before.first,0,'the reader has loaded rows that subsequent tail deliveries omit');
+    for(const update of [{text:answer.text+' APPENDED'}, {text:answer.text+' APPENDED',streaming:false,durable:true,forkTurnId:'completed-turn-21'}]){
+      await page.evaluate(update=>{const all=window.__all;all[all.length-1]={...all[all.length-1],...update};},update);
+      await ship();await page.waitForTimeout(40);
+      const after=await page.evaluate(()=>({first:document.querySelector('#transcript').firstElementChild._partIndex,rows:document.querySelector('#transcript').children.length,top:document.getElementById('scroll').scrollTop,selected:window.getSelection().toString(),sameRow:document.querySelector('#transcript').firstElementChild===window.__heldRow,sameText:window.__heldText.isConnected&&window.__heldRow.contains(window.__heldText)}));
+      assert.equal(after.first,before.first,'stream growth and durable completion must not discard loaded history');
+      assert.equal(after.rows,before.rows);assert.equal(after.selected,before.selected);assert(after.sameRow&&after.sameText,'the selected historical DOM survives');
+      assert(Math.abs(after.top-before.top)<=2,'the reading position survives');
+    }
+    await page.evaluate(()=>window.getSelection().removeAllRanges());
+    await page.evaluate(()=>{const all=window.__all;all[all.length-1]={...all[all.length-1],forkTurnId:'different-branch-turn'};});
+    await ship();assert.equal(await firstIndex(page),20,'a different durable turn still replaces the old cached prefix');
+    await page.locator('#historyEarlier').click();
+    const restoredReq=await pendingRequest(page),restoredParts=await page.evaluate(()=>window.__all);
+    await emit(page,{type:'partsWindow',requestId:restoredReq.id,sessionId:'window-session',start:0,total:restoredParts.length,parts:restoredParts});
+    assert.equal(await firstIndex(page),0,'the prefix is loaded again before a native replacement');
+    // A restored branch is still a replacement even if its numbered boundary matches.
+    await ship({replayComplete:false,cached:true});
+    assert.equal(await firstIndex(page),20,'a real replay replacement drops the old cached prefix');
+    assert.deepEqual(errors,[]);await page.close();
+  });
   await check('a long read backwards keeps the window bounded and says where it stops',async()=>{
     const {page,errors}=await open();
     const total=await page.evaluate(()=>window.__all.length);
@@ -434,7 +477,7 @@ try{
       const all=window.__all.map(p=>p.text&&String(p.text).startsWith(mark)?{...p,text:String(p.text).slice(mark.length+1)}:p);
       // The witness is the part the new tail starts with, which the cache holds at
       // the front of that overlap: a system line, with nothing but its text to go by.
-      if(mutateBoundary)all[tailStart]={...all[tailStart],text:all[tailStart].text+' (and it was cancelled, not completed)'};
+      if(mutateBoundary)all[tailStart]={...all[tailStart],text:all[tailStart].text.replace('completed','cancelled')};
       window.__all=all;window.__ship(replay?{replayComplete:false,cached:true}:{});
     },{mark,replay,mutateBoundary,tailStart:parts.length-TAIL});
     await page.waitForTimeout(200);
@@ -445,8 +488,8 @@ try{
     return {seen,rendered};
   }
   await check('a replaced transcript whose boundary is a system line is not merged',async()=>{
-    // Both boundaries are system lines with no turn identity; only their text
-    // length tells them apart, so this is the witness that has to hold.
+    // Both boundaries are system lines with no turn identity and equal-length
+    // text. Exact source, not length, distinguishes the abandoned branch.
     const {seen,rendered}=await stalePrefix('STALE-A',false,true);
     assert(rendered>200,'the reader did read back over the replaced prefix ('+rendered+' rows)');
     assert(!seen,'no line from the abandoned transcript is left on screen');

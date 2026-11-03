@@ -77,8 +77,8 @@ function cancelHarness(t,{root,historyEventId=async()=> 'event-1',spawn=true,sta
     child.stdin.on('data',data=>{
       const wire=JSON.parse(data.toString());wires.push(wire);
       queueMicrotask(()=>emit({type:'gateway_turn_command_result',result:{
-        command:wire.type,command_id:wire.command_id,status:wire.turn_id?status:'rejected',
-        ...(!wire.turn_id?{message:'session_id and turn_id required'}:status==='rejected'?{message:'Runtime refused control'}:{}),
+        command:wire.type,command_id:wire.command_id,status:wire.turn_id||wire.type==='navigate_checkpoint'?status:'rejected',
+        ...(!wire.turn_id&&wire.type!=='navigate_checkpoint'?{message:'session_id and turn_id required'}:status==='rejected'?{message:'Runtime refused control'}:{}),
       }},child));
     });
     children.push(child);return child;
@@ -88,7 +88,7 @@ function cancelHarness(t,{root,historyEventId=async()=> 'event-1',spawn=true,sta
   const controller=new SessionController(cli,{log(){}},api,'/workspace','cancel-session',root);
   t.after(()=>controller.dispose());
   registerSessions({context:{subscriptions:[]},notes:{log(){}},controllerFor:()=>controller});
-  return {controller,children,starts,wires,emit,cancel:()=>commands.get('nodecode.cancelActiveTurn')('cancel-session')};
+  return {controller,children,starts,wires,emit,cancel:()=>commands.get('nodecode.cancelActiveTurn')('cancel-session'),undo:()=>commands.get('nodecode.undoLastTurn')('cancel-session')};
 }
 
 test('cancel connects a cold controller and waits for the final authoritative replay before selecting its turn',async t=>{
@@ -160,4 +160,16 @@ test('cancel synchronization wait times out, removes listeners, and cannot cance
   assert.equal(h.controller.connectionListeners.size,0);
   h.emit(replay([fact(1,'turn.started')]));await Promise.resolve();
   assert.equal(h.wires.length,0,'late synchronization must not apply an abandoned cancellation');
+});
+
+test('undo connects a cold controller and waits for final replay before restoring files',async t=>{
+  const h=cancelHarness(t),done=h.undo();await tick();
+  assert.equal(h.starts.length,1,'cold undo initiates synchronization');
+  assert.equal(h.wires.length,0,'undo must not modify files before receiving authoritative history');
+  h.emit(replay([fact(1,'turn.started')],{replay_chunk_final:false}));await tick();
+  assert.equal(h.wires.length,0,'partial history cannot authorize checkpoint navigation');
+  h.emit(replay([fact(2,'turn.completed')],{replay_chunk_index:1,cursor:2}));await done;
+  assert.equal(h.wires.length,1);
+  assert.equal(h.wires[0].type,'navigate_checkpoint');assert.equal(h.wires[0].direction,'undo');assert.equal(h.wires[0].restore_files,true);
+  assert.deepEqual(errors,[]);
 });

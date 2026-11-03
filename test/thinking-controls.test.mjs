@@ -23,10 +23,11 @@ test('a collapsed thought previews the whole text and leaves the cut to CSS',()=
   assert(context.thoughtPreview('a\nb').includes('\n'),'line breaks are left for white-space:nowrap to collapse, not rewritten');
 });
 
-test('a forward turn number is the only thing that reads as a new turn',()=>{
+test('native committed prompts already belong to the next turn for thought disclosures',()=>{
   assert.equal(context.newestTurn([]),0,'an empty transcript has no turn');
-  assert.equal(context.newestTurn([{kind:'user',turnNumber:3},{kind:'assistant',turnNumber:3}]),3,'a running turn has not moved on yet');
-  assert.equal(context.newestTurn([{kind:'user',turnNumber:3},{kind:'tool',turnNumber:4}]),4,'the next turn is the entry that closes the last thought');
+  assert.equal(context.newestTurn([{kind:'user',turnNumber:2},{kind:'assistant',turnNumber:3}]),3,'the input is numbered before turn.started increments the turn');
+  assert.equal(context.newestTurn([{kind:'assistant',turnNumber:3},{kind:'user',turnNumber:3}]),4,'a committed next prompt closes the preceding thought before assistant output');
+  assert.equal(context.newestTurn([{kind:'user',turnNumber:3},{kind:'tool',turnNumber:4}]),4,'the next turn and its input share one disclosure boundary');
   assert.equal(context.newestTurn([{kind:'assistant'},{}]),0,'parts without a turn number cannot move the cursor');
   assert.equal(context.newestTurn([{turnNumber:7},{turnNumber:2}]),7,'the newest turn wins wherever it sits in the window');
 });

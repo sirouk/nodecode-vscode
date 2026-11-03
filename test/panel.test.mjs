@@ -39,15 +39,15 @@ test('sidebar switches subscriptions, queues context until ready and keeps curre
   assert.equal(view.webview.html, html);
   sidebar.show(second);
   posted.length=0;
-  first.store.applyFrame({type:'session_titled',title:'old'});
+  first.store.applyFrame({type:'session_titled',session_id:first.sessionId,title:'old'});
   assert.equal(posted.length,0);
-  second.store.applyFrame({type:'session_titled',title:'new'});
+  second.store.applyFrame({type:'session_titled',session_id:second.sessionId,title:'new'});
   t.mock.timers.tick(16);
   assert.equal(posted.at(-1).view.title,'new');
   assert.equal(view.title,'Nodecode');
   sidebar.dispose();
   posted.length=0;
-  second.store.applyFrame({type:'session_titled',title:'disposed'});
+  second.store.applyFrame({type:'session_titled',session_id:second.sessionId,title:'disposed'});
   assert.equal(posted.length,0);
 });
 
@@ -62,23 +62,23 @@ test('streamed store bursts share a bounded snapshot while control receipts rema
   const storeView=ctl.store.view.bind(ctl.store);ctl.store.view=()=>{views++;return storeView();};
   try{
     sidebar.restore(ctl);sidebar.resolveWebviewView(view);received.fire({type:'ready'});posted.length=0;views=0;
-    for(let i=0;i<60;i++)ctl.store.applyFrame({type:'session_titled',title:'Burst '+i});
+    for(let i=0;i<60;i++)ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Burst '+i});
     assert.equal(posted.length,0,'an event burst does not send a snapshot for every event');
     assert.equal(views,0,'projection work is batched too, not just webview delivery');
     t.mock.timers.tick(16);
     assert.equal(posted.length,1);assert.equal(views,1);assert.equal(posted[0].view.title,'Burst 59');
     for(let i=0;i<5;i++){
-      ctl.store.applyFrame({type:'session_titled',title:'Continuous '+i});
+      ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Continuous '+i});
       t.mock.timers.tick(16);
       assert.equal(posted.at(-1).view.title,'Continuous '+i,'continuous traffic cannot starve the scheduled snapshot');
     }
-    ctl.store.applyFrame({type:'session_titled',title:'Connection flush'});
+    ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Connection flush'});
     connection('disconnected',1);
     assert.equal(posted.at(-1).connection,'disconnected','connection safety state is not delayed');
     const afterConnection=posted.length;t.mock.timers.tick(16);assert.equal(posted.length,afterConnection,'an immediate snapshot cancels redundant scheduled work');
     await SessionPanel.get(ctl.sessionId).onMessage({type:'ready',pendingSendId:'lost-receipt'});
     assert.equal(posted.at(-1).type,'sendRejected','send acknowledgement recovery bypasses rendering cadence');
-    ctl.store.applyFrame({type:'session_titled',title:'Disposed'});sidebar.dispose();posted.length=0;
+    ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Disposed'});sidebar.dispose();posted.length=0;
     t.mock.timers.tick(32);assert.equal(posted.length,0,'disposed timers cannot write into a new document');
   }finally{sidebar.dispose();}
 });
@@ -91,15 +91,15 @@ test('hidden panels do no snapshot work and reveal the latest complete state onc
   let views=0;const storeView=ctl.store.view.bind(ctl.store);ctl.store.view=()=>{views++;return storeView();};
   try{
     sidebar.restore(ctl);sidebar.resolveWebviewView(view);received.fire({type:'ready'});posted.length=0;views=0;
-    for(let i=0;i<60;i++)ctl.store.applyFrame({type:'session_titled',title:'Hidden '+i});
+    for(let i=0;i<60;i++)ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Hidden '+i});
     t.mock.timers.tick(1000);
     assert.equal(views,0,'hidden documents do not derive projections');assert.equal(posted.length,0,'or cross the webview bridge');
     view.visible=true;visibility.fire();
     assert.equal(posted.length,1);assert.equal(posted[0].view.title,'Hidden 59');
     assert(Array.isArray(posted[0].view.modifiedFiles));assert(Array.isArray(posted[0].history),'first reveal carries its complete collections');
-    ctl.store.applyFrame({type:'session_titled',title:'Pending when hidden'});view.visible=false;visibility.fire();
+    ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Pending when hidden'});view.visible=false;visibility.fire();
     t.mock.timers.tick(1000);assert.equal(posted.length,1,'hiding cancels pending projection work');
-    ctl.store.applyFrame({type:'session_titled',title:'Newest while hidden'});
+    ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Newest while hidden'});
     received.fire({type:'ready'});
     assert.equal(posted.length,1,'even a hidden document reload waits for visibility');
     view.visible=true;visibility.fire();
@@ -126,14 +126,15 @@ test('hidden panels keep image outcomes and control receipts and reveal current 
     connection('disconnected',2);
     ctl.store.applyFrame({type:'session_stream_event',session_id:ctl.sessionId,sequence:2,event:{type:'turn.input_committed',payload:{message:'Latest hidden question'}}});
     ctl.store.applyFrame({type:'session_stream_event',session_id:ctl.sessionId,sequence:3,event:{type:'turn.tool_result',payload:{'call-id':'hidden-edit',metadata:{workspace_diff:{files:[{path:'latest.ts',patch:'new patch'}]}}}}});
-    ctl.store.applyFrame({type:'session_titled',title:'Latest hidden title'});
+    ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Latest hidden title'});
     t.mock.timers.tick(32);
     assert.equal(views,0);assert.equal(posted.length,0,'image completion, connection, and store events cannot derive or ship hidden snapshots');
     await SessionPanel.get(ctl.sessionId).onMessage({type:'ready',pendingSendId:'unknown-hidden-send'});
     assert.equal(posted.at(-1).type,'sendRejected');assert.equal(posted.at(-1).outcomeUnknown,true,'a send receipt is delivered without waiting for visibility');
     posted.length=0;view.visible=true;visibility.fire();
-    assert.equal(views,1);assert.equal(posted.length,1);
-    const latest=posted[0];assert.equal(latest.type,'state');assert.equal(latest.connection,'disconnected');assert.equal(latest.attempts,2);
+    assert.equal(views,1);assert.equal(posted.filter(m=>m.type==='state').length,1);
+    assert.equal(posted.filter(m=>m.type==='imageSettled').length,2,'hidden image outcomes are replayed for cached historical rows when revealed');
+    const latest=posted.find(m=>m.type==='state');assert.equal(latest.type,'state');assert.equal(latest.connection,'disconnected');assert.equal(latest.attempts,2);
     assert.equal(latest.view.title,'Latest hidden title');assert.equal(latest.view.parts[0].images[0].url,'data:image/png;base64,aGVsbG8=');
     assert.match(latest.view.parts[0].images[1].error,/unavailable/);
     assert.equal(latest.view.modifiedFiles[0].path,'latest.ts');assert.equal(latest.history.at(-1),'Latest hidden question');
@@ -217,8 +218,9 @@ test('the extension ships a bounded transcript tail and answers scroll-back requ
   // notice that mapping being dropped.
   posted.length=0;
   const shot={kind:'tool',turnNumber:9,call:{callId:'shot',name:'screenshot',arguments:'{}',result:'data:image/png;base64,aGVsbG8=',done:true,status:'done',metadata:{image:{}}}};
-  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts:[shot].concat(parts)}),userPrompts:()=>[]}};
+  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts:[shot].concat(parts)}),userPrompts:()=>[]},imageDataUrl:async()=> 'data:image/png;base64,aGVsbG8='};
   await panel.onMessage({type:'requestParts',requestId:10,before:1,limit:1});
+  for(let i=0;i<20&&!posted.some(m=>m.type==='partsWindow');i++)await new Promise(setImmediate);
   assert.equal(posted.find(m=>m.type==='partsWindow').parts[0].call.imageUrl,'data:image/png;base64,aGVsbG8=','the older slice is decorated like the tail');
 
   // A slice cut while the session is still replaying would freeze rows that are
@@ -248,7 +250,8 @@ test('the extension ships a bounded transcript tail and answers scroll-back requ
   // An image that never resolves must not wedge scroll back either: the slice
   // ships without it after a bounded wait.
   const neverImage={kind:'user',turnNumber:8,text:'see this',images:[{id:'never-shot',mediaType:'image/png'}]};
-  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts:[neverImage].concat(parts)}),userPrompts:()=>[]},imageDataUrl:()=>new Promise(()=>{})};
+  let finishLate;
+  panel.controller={sessionId:'windowed',store:{replaying:false,view:()=>({sessionId:'windowed',cwd:'/work',title:'windowed',parts:[neverImage].concat(parts)}),userPrompts:()=>[]},imageDataUrl:()=>new Promise(resolve=>{finishLate=resolve;})};
   const realSettleMs=Object.getOwnPropertyDescriptor(SessionPanel,'sliceImageSettleMs');
   Object.defineProperty(SessionPanel,'sliceImageSettleMs',{value:20,configurable:true});
   posted.length=0;
@@ -256,7 +259,9 @@ test('the extension ships a bounded transcript tail and answers scroll-back requ
   for(let i=0;i<200&&!posted.some(m=>m.type==='partsWindow');i++)await new Promise(r=>setTimeout(r,5));
   const late=posted.find(m=>m.type==='partsWindow');
   assert.equal(late.requestId,14,'a slice with an unresolvable image still ships');
-  assert.equal(late.parts[0].images[0].url,undefined,'without the url it never got');
+  assert.equal(late.parts[0].images[0].url,undefined,'without the url it has not got yet');
+  finishLate('data:image/png;base64,bGF0ZQ==');await new Promise(setImmediate);
+  assert.deepEqual(posted.find(m=>m.type==='imageSettled'&&m.id==='never-shot'),{type:'imageSettled',sessionId:'windowed',sourceSessionId:'windowed',id:'never-shot',url:'data:image/png;base64,bGF0ZQ==',error:undefined},'late completion is delivered independently of the bounded tail');
   Object.defineProperty(SessionPanel,'sliceImageSettleMs',realSettleMs);
 });
 
@@ -397,7 +402,7 @@ test('deleting the selected session clears its sidebar without reattaching it', 
   assert(!view.webview.html.includes('id="composer"'));
   assert(view.webview.html.includes('id="sessionPicker"'));
   assert.equal(view.title,'Nodecode');
-  selected.store.applyFrame({type:'session_titled',title:'stale update'});
+  selected.store.applyFrame({type:'session_titled',session_id:selected.sessionId,title:'stale update'});
   assert.equal(view.title,'Nodecode');
   sidebar.dispose();
 });
@@ -436,16 +441,27 @@ test('late welcome search cannot populate a new welcome document after a session
 });
 
 
-test('native tool image projection permits inline PNG and in-workspace images only', () => {
+test('native tool images use authenticated gateway bytes, never extension-host metadata paths', async () => {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'nodecode-tool-image-'));
-  const panel=Object.create(SessionPanel.prototype);
-  panel.panel={webview:{options:{},asWebviewUri:u=>({toString:()=>`safe:${u.fsPath}`})}};
+  const panel=Object.create(SessionPanel.prototype), requested=[],posted=[];
+  panel.conversationImages=new Map();panel.notes={log(){}};panel.postState=()=>{};
+  panel.panel={visible:true,webview:{options:{localResourceRoots:[]},postMessage:m=>posted.push(m),asWebviewUri(){throw new Error('Tool metadata must not open host-local files');}}};
+  panel.controller={sessionId:'selected',imageDataUrl:async(id,source)=>{requested.push([id,source]);return 'data:image/jpeg;base64,Z2F0ZXdheQ==';}};
   try{
-    const file=path.join(root,'preview.png');fs.writeFileSync(file,'image');
-    assert.equal(panel.toolImageUrl({metadata:{image:{}},result:'data:image/png;base64,aGVsbG8='},root),'data:image/png;base64,aGVsbG8=');
-    assert.equal(panel.toolImageUrl({metadata:{image:{path:'preview.png'}}},root),`safe:${fs.realpathSync(file)}`);
-    assert.equal(panel.toolImageUrl({metadata:{image:{path:'/outside/missing.png'}}},root),undefined);
-    assert.equal(panel.toolImageUrl({metadata:{image:{path:'preview.svg'}}},root),undefined);
+    const file=path.join(root,'preview.jpg');fs.writeFileSync(file,'different extension-host-local bytes');
+    for(const [callId,metadata] of [
+      ['collision',{image:{path:file,media_type:'image/jpeg'}}],
+      ['native-transcode',{image:{path:'preview.jpg',png_path:'/native-cache/preview.png',media_type:'image/jpeg'}}],
+      ['external',{image:{path:'/native-other-folder/preview.jpg',media_type:'image/jpeg'}}],
+    ]){
+      const part={kind:'tool',turnNumber:1,call:{callId,sessionId:'ancestor',name:'look',arguments:'{}',done:true,metadata}};
+      const waiting=[];const first=panel.decorateParts([part],waiting)[0];
+      assert.equal(first.call.imageUrl,undefined,'metadata paths are not webview URLs');
+      await Promise.all(waiting);
+      assert.equal(panel.decorateParts([part])[0].call.imageUrl,'data:image/jpeg;base64,Z2F0ZXdheQ==');
+    }
+    assert.deepEqual(requested,[['collision','ancestor'],['native-transcode','ancestor'],['external','ancestor']],'native source session survives inherited tool rows');
+    assert.deepEqual(panel.panel.webview.options.localResourceRoots,[],'tool images never expand host-local resource permissions');
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
@@ -689,12 +705,12 @@ test('cached user and assistant images resolve asynchronously without blocking t
     sidebar.restore(first);sidebar.resolveWebviewView(view);
     assert.equal(requests,2);assert.equal(posted.at(-1).view.cached,true);assert.equal(posted.at(-1).view.parts[0].text,'Image question');
     assert.equal(posted.at(-1).view.parts[0].images[0].url,undefined,'no broken or credential-bearing URL is projected while loading');
-    first.store.applyFrame({type:'session_titled',title:'A title update while images load'});assert.equal(requests,2);
+    first.store.applyFrame({type:'session_titled',session_id:first.sessionId,title:'A title update while images load'});assert.equal(requests,2);
     pending.get('user-image').resolve('data:image/png;base64,aGVsbG8=');await new Promise(setImmediate);
     assert.equal(posted.at(-1).view.parts[0].images[0].url,'data:image/png;base64,aGVsbG8=');assert.equal(requests,2);
     pending.get('assistant-image').reject(new Error('gateway GET image -> 401'));await new Promise(setImmediate);
     assert.match(posted.at(-1).view.parts[1].images[0].error,/401/);
-    first.store.applyFrame({type:'session_titled',title:'Another stream update'});assert.equal(requests,2,'failed images must not retry on every streamed update');
+    first.store.applyFrame({type:'session_titled',session_id:first.sessionId,title:'Another stream update'});assert.equal(requests,2,'failed images must not retry on every streamed update');
     const old=controller('old-images');let finishOld;
     old.imageDataUrl=()=>new Promise(resolve=>{finishOld=resolve;});
     old.store.applyFrame({type:'session_stream_event',session_id:old.sessionId,sequence:1,event:{type:'turn.input_committed',payload:{message:'Old image',metadata:{images:[{id:'late',media_type:'image/png'}]}}}});
@@ -721,7 +737,7 @@ test('saved-image failures retry only after connection recovery without refetchi
   try{
     sidebar.restore(ctl);sidebar.resolveWebviewView(view);await new Promise(setImmediate);
     assert.match(images()[0].error,/unavailable/);assert(images()[1].url);assert.equal(images()[2].url,undefined);
-    for(let i=0;i<5;i++)ctl.store.applyFrame({type:'session_titled',title:'Streaming '+i});
+    for(let i=0;i<5;i++)ctl.store.applyFrame({type:'session_titled',session_id:ctl.sessionId,title:'Streaming '+i});
     connected('connected',0);await new Promise(setImmediate);
     assert.equal(requests.get('retry'),1,'frames and duplicate connected notifications must not retry a failure');
     available=true;connected('disconnected',1);connected('connected',0);await new Promise(setImmediate);
@@ -732,6 +748,56 @@ test('saved-image failures retry only after connection recovery without refetchi
     finishPending('data:image/png;base64,cGVuZGluZw==');await new Promise(setImmediate);
     assert.equal(images()[2].url,'data:image/png;base64,cGVuZGluZw==');assert.equal(requests.get('pending'),1);
   }finally{sidebar.dispose();}
+});
+
+test('reconnection retries failed historical prompt and inherited tool images without another paging request',async()=>{
+  const received=event(),disposed=event(),visibility=event(),posted=[];
+  const view={visible:true,title:'Nodecode',show(){},onDidDispose:disposed.register,onDidChangeVisibility:visibility.register,webview:{html:'',cspSource:'https://webview.local',asWebviewUri:u=>u,postMessage:m=>posted.push(m),onDidReceiveMessage:received.register}};
+  const sidebar=new SessionSidebar(uri('/extension'),{}, {log(){}}),ctl=controller('historical-image-recovery'),requests=[];
+  let connected,available=false;
+  ctl.subscribeConnection=listener=>{connected=listener;return {dispose(){}};};
+  ctl.imageDataUrl=async(id,source)=>{requests.push([source,id]);if(!available)throw new Error('gateway temporarily unavailable');return 'data:image/png;base64,aGVsbG8=';};
+  let sequence=0;
+  const fact=(type,payload)=>({type:'session_stream_event',session_id:ctl.sessionId,sequence:++sequence,event:{type,payload}});
+  ctl.store.applyFrame({type:'session_stream_resumed',session_id:ctl.sessionId,replay_chunk_final:true,accumulated_frames:[
+    fact('session.created',{id:'ancestor'}),
+    fact('turn.tool_result',{'call-id':'old-look',metadata:{image:{path:'/native/old.png'}}}),
+    fact('session.created',{id:ctl.sessionId}),
+    fact('turn.input_committed',{message:'Old saved image',metadata:{images:[{id:'old-prompt-image',media_type:'image/png'}]}}),
+    ...Array.from({length:600},(_,i)=>fact('turn.input_committed',{message:'Later message '+i})),
+  ]});
+  try{
+    sidebar.restore(ctl);sidebar.resolveWebviewView(view);
+    assert(posted.at(-1).view.partsStart>1,'both image rows lie before the currently shipped tail');
+    assert.equal(requests.length,0,'unrequested history is not fetched');
+    const panel=SessionPanel.get(ctl.sessionId);
+    await panel.onMessage({type:'requestParts',requestId:91,before:2,limit:2});await new Promise(setImmediate);
+    const slice=posted.find(m=>m.type==='partsWindow'&&m.requestId===91);
+    assert(slice,'the historical rows are already loaded before reconnecting');
+    assert.match(slice.parts[0].call.imageError,/temporarily unavailable/);
+    assert.match(slice.parts[1].images[0].error,/temporarily unavailable/);
+    assert.deepEqual(requests,[['ancestor','old-look'],[ctl.sessionId,'old-prompt-image']]);
+    posted.length=0;available=true;connected('disconnected',1);connected('connected',0);await new Promise(setImmediate);
+    assert.deepEqual(requests,[['ancestor','old-look'],[ctl.sessionId,'old-prompt-image'],['ancestor','old-look'],[ctl.sessionId,'old-prompt-image']],'recovery retries the already-requested historical images with their original source sessions');
+    const settled=posted.filter(m=>m.type==='imageSettled');
+    assert.equal(settled.length,2,'cached historical rows receive the recovered image outcomes');
+    assert(settled.every(m=>m.sessionId===ctl.sessionId&&m.url==='data:image/png;base64,aGVsbG8='&&m.error===undefined));
+    assert(!posted.some(m=>m.type==='partsWindow'),'recovery does not require or replay a consumed paging request');
+    connected('connected',0);connected('disconnected',1);connected('connected',0);await new Promise(setImmediate);
+    assert.equal(requests.length,4,'recovered successes stay cached across later reconnections');
+  }finally{sidebar.dispose();}
+});
+
+test('saved-image source sessions are independent even when inherited tool call IDs collide',async()=>{
+  const requested=[],api={imageDataUrl:async(sid,id)=>{requested.push([sid,id]);return 'data:image/png;base64,'+Buffer.from(sid).toString('base64');}};
+  const ctl=new SessionController({},{log(){}},api,'/workspace','selected');
+  try{
+    const own=await ctl.imageDataUrl('same-call');
+    const ancestor=await ctl.imageDataUrl('same-call','ancestor');
+    assert.notEqual(own,ancestor,'equal call IDs from different sessions do not share image bytes');
+    assert.equal(await ctl.imageDataUrl('same-call','ancestor'),ancestor);
+    assert.deepEqual(requested,[['selected','same-call'],['ancestor','same-call']]);
+  }finally{ctl.dispose();}
 });
 
 test('closing a controller discards an image result already in flight',async()=>{

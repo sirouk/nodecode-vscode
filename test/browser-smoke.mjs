@@ -19,6 +19,28 @@ panel.markdownUri = 'https://webview.local/markdown.js';
 const html = panel.html().replace(/<script nonce="([^"]+)" src="[^"]+"><\/script>/, (_, nonce) => '<script nonce="' + nonce + '">' + fs.readFileSync(new URL('../out/markdown.js', import.meta.url), 'utf8') + '</script>');
 const browser = await chromium.launch({ headless: true });
 try {
+  // Session IDs are opaque imported data, not HTML or replacement templates.
+  for(const sessionId of [
+    '</script><p id="injected-node">untrusted session markup</p><img src="https://example.invalid/probe">',
+    '<!--<script>', '$&', '$`', "$'", 'quoted \" session\nname',
+  ]){
+    const probe=await browser.newPage(),errors=[],outbound=[];
+    probe.on('pageerror',error=>errors.push(error.message));
+    await probe.route(/^https?:/,route=>{outbound.push(route.request().url());return route.abort();});
+    await probe.addInitScript(()=>{window.posted=[];window.saved={};window.acquireVsCodeApi=()=>({postMessage:m=>window.posted.push(m),getState:()=>window.saved,setState:s=>{window.saved=structuredClone(s);}});});
+    panel.controller={sessionId};
+    const importedHtml=panel.html().replace(/<script nonce="([^"]+)" src="[^"]+"><\/script>/,(_,nonce)=>'<script nonce="'+nonce+'">'+fs.readFileSync(new URL('../out/markdown.js',import.meta.url),'utf8')+'</script>');
+    await probe.goto('data:text/html,'+encodeURIComponent(importedHtml));
+    await probe.waitForFunction(()=>window.posted.some(m=>m.type==='ready'),null,{timeout:3000});
+    await probe.locator('#composer').fill('exact identity');
+    assert.equal(await probe.evaluate(id=>window.saved.sessions[id].draft,sessionId),'exact identity');
+    assert.equal(await probe.locator('#injected-node').count(),0);
+    assert.deepEqual(errors,[]);assert.deepEqual(outbound,[],'imported identifiers never inject external image requests');
+    await probe.close();
+  }
+  panel.controller={sessionId:'test-session'};
+  console.log('PASS browser bootstrap: imported script delimiters and replacement tokens retain exact session identity without HTML injection or network requests');
+
   const page = await browser.newPage({ viewport: { width: 960, height: 760 } });
   page.setDefaultTimeout(10000);
   const errors = [];
@@ -859,6 +881,46 @@ try {
   await restoredPage.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),stream);
   assert.equal(await restoredPage.locator('.reasoning').evaluate(e=>e.open),false);
   await restoredPage.close();
+
+  // Exercise a history response that times out before its image requests settle.
+  // The later outcomes must update cached old rows, not just the newest tail.
+  {
+    const posted=[],pending=new Map(),source='history-images',png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII=';
+    const all=[{kind:'user',turnNumber:0,text:'Old saved image',images:[{id:'late-user',mediaType:'image/png'}]},
+      {kind:'tool',turnNumber:0,call:{callId:'late-tool',sessionId:'ancestor-images',name:'look',arguments:'{}',done:true,metadata:{image:{path:'/native/image.jpg',png_path:'/native-cache/image.png',media_type:'image/jpeg'}}}},
+      ...Array.from({length:250},(_,i)=>({kind:'user',turnNumber:i+1,text:'History '+i+' '+('content '.repeat(18))}))];
+    const view={sessionId:source,title:'Historical images',cwd:'/native/work',parts:all,modifiedFiles:[],queue:[],threads:[],processes:[],totals:{},replayComplete:true};
+    const host=Object.create(SessionPanel.prototype);
+    Object.assign(host,{controller:{sessionId:source,closeTextAttachments(){},store:{replaying:false,view:()=>view,userPrompts:()=>[]},imageDataUrl:(id,sid)=>new Promise((resolve,reject)=>pending.set(id,{sid,resolve,reject}))},panel:{visible:true,webview:{cspSource:'https://webview.local',postMessage:m=>posted.push(m)}},conversationImages:new Map(),notes:{log(){}},connection:'connected',connectionAttempts:0,disposables:[],markUri:panel.markUri,markdownUri:panel.markdownUri});
+    const imagePage=await browser.newPage({viewport:{width:1000,height:760}}),imageErrors=[];
+    imagePage.on('pageerror',error=>imageErrors.push(error.message));
+    await imagePage.addInitScript(()=>{window.posted=[];window.saved={};window.acquireVsCodeApi=()=>({postMessage:m=>window.posted.push(m),getState:()=>window.saved,setState:s=>{window.saved=structuredClone(s);}});});
+    const imageHtml=host.html().replace(/<script nonce="([^"]+)" src="[^"]+"><\/script>/,(_,nonce)=>'<script nonce="'+nonce+'">'+fs.readFileSync(new URL('../out/markdown.js',import.meta.url),'utf8')+'</script>');
+    const deliver=async()=>{for(const message of posted.splice(0))await imagePage.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),message);};
+    const settleDescriptor=Object.getOwnPropertyDescriptor(SessionPanel,'sliceImageSettleMs');
+    try{
+      await imagePage.goto('data:text/html,'+encodeURIComponent(imageHtml));
+      await imagePage.waitForFunction(()=>window.posted.some(m=>m.type==='ready'));
+      host.postState();await deliver();
+      await imagePage.locator('#historyEarlier').click();await imagePage.locator('#historyEarlier').click();
+      const request=await imagePage.evaluate(()=>window.posted.filter(m=>m.type==='requestParts').at(-1));
+      assert(request,'the image rows are fetched through historical paging, outside the latest tail');
+      Object.defineProperty(SessionPanel,'sliceImageSettleMs',{value:20,configurable:true});
+      await host.onMessage(request);await new Promise(resolve=>setTimeout(resolve,40));await deliver();
+      assert.equal(await imagePage.locator('.message-image-status').count(),2,'both pending image rows are present after the bounded wait');
+      assert.equal(pending.get('late-tool').sid,'ancestor-images','inherited tool previews retain their native source session');
+      const firstBefore=await imagePage.locator('#transcript > section').first().evaluate(e=>e._partIndex);
+      await imagePage.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),{type:'imageSettled',sessionId:'wrong-session',sourceSessionId:source,id:'late-user',url:png});
+      assert.equal(await imagePage.locator('.message-image').count(),0,'another conversation cannot change this image row');
+      pending.get('late-user').resolve(png);pending.get('late-tool').reject(new Error('gateway GET image -> 404'));
+      await new Promise(setImmediate);await deliver();
+      assert.equal(await imagePage.locator('.message-image').count(),1);
+      assert.match(await imagePage.locator('.message-image-status').textContent(),/Image unavailable:.*404/);
+      assert.equal(await imagePage.locator('#transcript > section').first().evaluate(e=>e._partIndex),firstBefore,'late outcomes keep the loaded history window');
+      assert.deepEqual(imageErrors,[]);
+    }finally{Object.defineProperty(SessionPanel,'sliceImageSettleMs',settleDescriptor);host.dispose();await imagePage.close();}
+    console.log('PASS browser historical images: late success and failure update cached rows after slice timeout, preserve source/session boundaries and retain loaded history');
+  }
 
   console.log('PASS browser: ready handshake, thread navigation, reasoning/tool expansion, scroll preservation, send acknowledgement, rich Markdown/copy/file links, images, compact thought scrolling/selection, session popup/search/rename, caret @ picker/Tab, 1000-row history anchors, persistence, escaping, 360px layout');
 } finally {

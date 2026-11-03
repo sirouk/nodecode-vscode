@@ -203,7 +203,8 @@ export function activate(context: vscode.ExtensionContext): void {
       const models=Array.isArray(catalog)?catalog:catalog.models;
       const current=models.find((row)=>row.provider===target.provider&&row.model===target.model);
       await favoriteWrite;
-      return {models,target,auxiliary,decider,failover,favorites:context.globalState.get<ModelFavorite[]>("nodecode.modelFavorites", []),context:{used:header.context_usage?.input,limit:current?.context}};
+      const usage=header.context_usage;
+      return {models,target,auxiliary,decider,failover,favorites:context.globalState.get<ModelFavorite[]>("nodecode.modelFavorites", []),context:{used:(usage?.input??0)+(usage?.cached??0)+(usage?.cache_write??0),limit:current?.context}};
     },
     selectModel: async (sid,provider,model) => {
       const result=await api.setModel(sid,provider,model) as {shared_config_error?:string};

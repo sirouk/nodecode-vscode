@@ -69,7 +69,7 @@ const NODECODE_MD = [
   "",
 ].join("\n");
 
-/** Turn ids from cached or partial history cannot authorize cancellation. */
+/** Cached or partial history cannot authorize turn controls. */
 async function waitForSynchronizedSession(controller: SessionController): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -87,7 +87,7 @@ async function waitForSynchronizedSession(controller: SessionController): Promis
         finish();
       }
     };
-    const timer = setTimeout(() => finish(new Error("Session did not finish synchronizing before cancellation. Try again when it is connected.")), 30000);
+    const timer = setTimeout(() => finish(new Error("Session did not finish synchronizing before the command. Try again when it is connected.")), 30000);
     const changes = controller.store.subscribe(check);
     // RPC announces connected just before the final replay frame reaches the store.
     const connection = controller.subscribeConnection(() => queueMicrotask(check));
@@ -212,7 +212,11 @@ export function registerSessions(deps: CommandDeps): void {
   cmd("nodecode.undoLastTurn", async (arg: unknown) => {
     const sid = await sessionIdOf(deps, arg);
     if (!sid) return;
-    await retry("undo", () => requireAccepted(deps.controllerFor(sid).navigateCheckpoint({ direction: "undo" })));
+    const controller = deps.controllerFor(sid);
+    await retry("undo", async () => {
+      await waitForSynchronizedSession(controller);
+      await requireAccepted(controller.navigateCheckpoint({ direction: "undo" }));
+    });
   });
 
   cmd("nodecode.pickModel", async (arg: unknown) => {

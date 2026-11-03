@@ -32,30 +32,39 @@ test('recorded modified files use latest native call metadata rather than summin
   assert.deepEqual(recordedFileChanges([{kind:'tool',call:{callId:'shell',metadata:{}}}]),[]);
 });
 
-// A receipt can report a change without a diff body: a file created with no hunk
-// text, or a document trimmed for size. Last-wins erased the patch on screen, so a
-// real session's own rows lost the change they were reporting.
-test('a receipt with no diff body never erases the patch that showed the change',()=>{
+test('a latest receipt without a patch does not misattribute an older call\'s patch',()=>{
   const parts=[
     {kind:'tool',call:{callId:'one',diffOrder:1,metadata:{workspace_diff:{files:[{path:'src/diff-view.ts',added:102,removed:0,patch:'+++ created'}]}}}},
     {kind:'tool',call:{callId:'two',diffOrder:2,metadata:{workspace_diff:{files:[{path:'src/diff-view.ts',added:4,removed:1}]}}}}
   ];
   const [file]=recordedFileChanges(parts);
-  assert.equal(file.patch,'+++ created','the newest patch still shows what changed');
-  assert.equal(file.added,4,'the row is dated and counted by the newest receipt');
+  assert.equal(file.patch,undefined,'missing native patch stays unavailable; the old patch remains in its tool row');
+  assert.equal(parts[0].call.metadata.workspace_diff.files[0].patch,'+++ created');
+  assert.equal(file.added,4);
   assert.equal(file.removed,1);
   assert.equal(file.callId,'two');
   assert.equal(file.changeCount,2);
 });
 
-test('a truncation label travels with the patch it qualifies',()=>{
+test('binary changes never inherit an older text patch',()=>{
   const parts=[
-    {kind:'tool',call:{callId:'one',diffOrder:1,metadata:{workspace_diff:{truncated:true,files:[{path:'a.ts',patch:'cut'}]}}}},
-    {kind:'tool',call:{callId:'two',diffOrder:2,metadata:{workspace_diff:{files:[{path:'a.ts',added:1,removed:0}]}}}}
+    {kind:'tool',call:{callId:'text',diffOrder:1,metadata:{workspace_diff:{files:[{path:'a.ts',patch:'old text'}]}}}},
+    {kind:'tool',call:{callId:'binary',diffOrder:2,metadata:{workspace_diff:{files:[{path:'a.ts',added:0,removed:0,binary:true}]}}}}
   ];
   const [file]=recordedFileChanges(parts);
-  assert.equal(file.patch,'cut');
-  assert.equal(file.truncated,true,'the label describes the patch still on screen');
+  assert.equal(file.binary,true);
+  assert.equal(file.patch,undefined);
+  assert.equal(file.callId,'binary');
+});
+
+test('truncation describes only the latest receipt, even when its patch is absent',()=>{
+  const first={kind:'tool',call:{callId:'one',diffOrder:1,metadata:{workspace_diff:{truncated:true,files:[{path:'a.ts',patch:'cut'}]}}}};
+  for(const truncated of [false,true]){
+    const last={kind:'tool',call:{callId:'two',diffOrder:2,metadata:{workspace_diff:{truncated,files:[{path:'a.ts',added:1,removed:0}]}}}};
+    const [file]=recordedFileChanges([first,last]);
+    assert.equal(file.patch,undefined);
+    assert.equal(file.truncated,truncated?true:undefined,'an older receipt does not supply the new label');
+  }
 });
 
 // Foreign sessions never enter this store, so an unattributed receipt can only be
@@ -95,7 +104,7 @@ test('native child discovery emits one navigable notice only after initial roste
 test('interrupt routes a numeric ID only for this session current running process',()=>{
   const controller=new SessionController({}, {log(){}}, {}, '', 'own');const commands=[];
   controller.rpc.sendCommand=command=>commands.push(command);
-  controller.store.setThreads([],'own');
+  controller.store.applyFrame({type:'session_stream_resumed',session_id:'own',replay_chunk_final:true,accumulated_frames:[]});controller.rpc.setState('connected');
   controller.store.applyFrame({type:'session_background_process_updated',session_id:'other',process:{shell_session_id:99,status:'running'}});
   assert.throws(()=>controller.interruptExec('99'),/not running/);
   controller.store.applyFrame({type:'session_background_process_updated',session_id:'own',process:{shell_session_id:7,status:'running'}});

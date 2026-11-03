@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep recorded-file previews faithful to the latest native receipt. A later binary or unavailable patch no longer displays an older call’s text or truncation label; earlier patches remain available in their original tool results.
+- Include native cache-read and cache-write tokens in the model menu’s context usage, matching the conversation status row; historical usage no longer replaces the model selected for the next turn.
+- Refuse prompts and turn controls until the CLI is connected and its replay is complete, including after disconnects; Undo now synchronizes an unopened conversation before restoring its files.
+- Keep native title updates scoped to their conversation and prevent older header responses from reversing a newer rename.
+- Treat standing notice-board snapshots as status, not new spoken warnings, so refreshes do not duplicate warning rows.
+- Escape opaque session identifiers at the webview’s script boundary, preserving imported names without allowing injected HTML or breaking startup.
+- Retrieve tool-image previews through the authenticated gateway rather than opening runtime paths on the extension host; late image results and successful retries after reconnect also update already-loaded history.
+- Preserve loaded history and its reading position while a large response streams or becomes durable, reset thinking-collapse tracking after undo, and resize the composer when its width changes.
+- Update the packaging tool’s Azure identity dependency to its compatible security patch, removing the vulnerable MSAL authorization-code implementation without adding a runtime dependency.
+
 ## [0.1.16]
 
 ### Fixed

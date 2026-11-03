@@ -36,6 +36,7 @@ test('ordinary sends steer the current active turn; queueing is explicit and one
   const ctl=new SessionController({},{log(){}},{},'/workspace','steering');
   const commands=[];ctl.rpc.sendCommand=command=>{commands.push(command);return {done:Promise.resolve({status:'accepted'})};};
   try{
+    ctl.store.applyFrame({type:'session_stream_resumed',session_id:'steering',replay_chunk_final:true,accumulated_frames:[]});ctl.rpc.setState('connected');
     ctl.store.applyFrame({type:'session_stream_event',session_id:'steering',sequence:1,turn_id:'working-turn',event:{type:'turn.started',payload:{}}});
     ctl.sendPrompt('Correct the current approach');
     assert.deepEqual(commands.at(-1),{type:'steer_turn',expected_turn_id:'working-turn',prompt:'Correct the current approach'});
@@ -53,6 +54,7 @@ test('a busy turn that cannot take a steer queues the message instead of refusin
   const ctl=new SessionController({},{log(){}},{},'/workspace','unavailable');
   const commands=[];ctl.rpc.sendCommand=command=>{commands.push(command);return {done:Promise.resolve({status:'accepted'})};};
   try{
+    ctl.store.applyFrame({type:'session_stream_resumed',session_id:'unavailable',replay_chunk_final:true,accumulated_frames:[]});ctl.rpc.setState('connected');
     ctl.store.applyFrame({type:'session_stream_event',session_id:'unavailable',sequence:1,turn_id:'working-turn',event:{type:'turn.started',payload:{}}});
     ctl.store.applyFrame({type:'session_input_queue_snapshot_updated',session_id:'unavailable',snapshot:{active_turn:'working-turn',active_turn_steerable:false,pending_prompts:[]}});
     // The engine answers a busy start_turn with status 'queued', so nothing typed is lost.
@@ -67,6 +69,7 @@ test('automatic steering preserves native image content instead of sending a que
   ctl.rpc.sendCommand=value=>{command=value;return {done:Promise.resolve({status:'accepted'})};};
   const image={mediaType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZcToAAAAASUVORK5CYII='};
   try{
+    ctl.store.applyFrame({type:'session_stream_resumed',session_id:'image-steering',replay_chunk_final:true,accumulated_frames:[]});ctl.rpc.setState('connected');
     ctl.store.applyFrame({type:'session_stream_event',session_id:'image-steering',sequence:1,turn_id:'image-turn',event:{type:'turn.started',payload:{}}});
     ctl.sendPrompt('',[image]);
     assert.equal(command.type,'steer_turn');assert.equal(command.expected_turn_id,'image-turn');
@@ -148,4 +151,57 @@ test('controllers observing the same native activity share one post-notification
     assert.deepEqual(controllers[1].store.view().descendants,[]);
     assert.deepEqual(controllers[0].store.view().parts.filter(part=>part.childSessionId).map(part=>part.childSessionId),['new-child']);
   }finally{controllers.forEach(ctl=>ctl.dispose());for(const {res} of responses)res.end('[]');server.close();await once(server,'close');}
+});
+
+test('an own-session native title invalidates older header/detail replies and fetches current usage',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const oldHeader=deferred(),oldDetail=deferred();let headers=0,details=0;
+  const api={
+    header:()=>++headers===1?oldHeader.promise:Promise.resolve({session_id:'root',title:'Fresh native name',through:2,session_usage:{input:20}}),
+    sessionDetail:()=>++details===1?oldDetail.promise:Promise.resolve({session_id:'root',cwd:'/fresh'}),
+    sessions:async()=>[],
+  };
+  const ctl=new SessionController({},{log(){}},api,'/workspace','root');
+  try{
+    ctl.store.setThreads([],'root');ctl.store.applyHeader({session_id:'root',title:'Old name'});ctl.refreshHeader();
+    ctl.rpc.onFrame({type:'session_titled',session_id:'root',title:'Fresh native name'});
+    assert.equal(ctl.store.view().title,'Fresh native name');
+    oldHeader.resolve({session_id:'root',title:'Old name',through:1,session_usage:{input:10}});
+    oldDetail.resolve({session_id:'root',cwd:'/old'});await new Promise(setImmediate);
+    assert.equal(ctl.store.view().title,'Fresh native name','older HTTP cannot reverse the native rename');
+    assert.notEqual(ctl.store.view().cwd,'/old');
+    t.mock.timers.tick(600);await new Promise(setImmediate);
+    assert.equal(headers,2);assert.equal(details,2);
+    assert.equal(ctl.store.view().totals.input,20,'discarding an older title must not lose the eventual usage refresh');
+    assert.equal(ctl.store.view().cwd,'/fresh');
+  }finally{ctl.dispose();}
+});
+
+test('another session rename does not invalidate this session header or fetch a new one',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const header=deferred();let requests=0;
+  const ctl=new SessionController({},{log(){}},{header:()=>{requests++;return header.promise;},sessionDetail:async()=>({}),sessions:async()=>[]},'/workspace','root');
+  try{
+    ctl.store.setThreads([],'root');ctl.refreshHeader();
+    ctl.rpc.onFrame({type:'session_titled',session_id:'other',title:'Other name'});
+    header.resolve({session_id:'root',title:'Own name',through:1,session_usage:{input:10}});await new Promise(setImmediate);
+    assert.equal(ctl.store.view().title,'Own name');assert.equal(ctl.store.view().totals.input,10);
+    t.mock.timers.tick(600);await new Promise(setImmediate);assert.equal(requests,1);
+  }finally{ctl.dispose();}
+});
+
+test('a header for the previous round cannot reverse the freshly selected native target',async()=>{
+  const api={
+    target:async()=>({provider:'new-provider',model:'new-model',effort:'high'}),
+    header:async()=>({session_id:'root',through:1,context_usage:{input:100,cached:200,model:'previous-model'}}),
+    sessionDetail:async()=>({session_id:'root'}),
+  };
+  const ctl=new SessionController({},{log(){}},api,'/workspace','root');
+  try{
+    ctl.store.setThreads([],'root');ctl.refreshTarget();await new Promise(setImmediate);
+    assert.equal(ctl.store.view().model,'new-model');
+    ctl.refreshHeader();await new Promise(setImmediate);
+    assert.equal(ctl.store.view().model,'new-model');assert.equal(ctl.store.view().provider,'new-provider');
+    assert.deepEqual(ctl.store.view().contextUsage,{input:100,cached:200,cacheWrite:0});
+  }finally{ctl.dispose();}
 });

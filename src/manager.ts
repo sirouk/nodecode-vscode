@@ -1,5 +1,5 @@
 // A SessionController owns one RpcProcess + one SessionStore for a session,
-// and refreshes the session header (usage totals, title, model) after turn
+// and refreshes the session header (usage totals and title) after turn
 // boundaries, debounced.
 
 import { NodecodeApi, SlashCommand, SlashResult } from "./api";
@@ -85,6 +85,11 @@ export class SessionController {
         // A checkpoint replay can lower usage watermarks; old-branch HTTP must not win.
         this.headerRevision++;
         this.witness = undefined;
+      }
+      if (frame.type === "session_titled" && frame.session_id === this.sessionId) {
+        // A native rename is newer than any header already in flight.
+        this.headerRevision++;
+        this.scheduleHeaderRefresh();
       }
       this.store.applyFrame(frame);
       this.observeWitness(frame);
@@ -179,18 +184,19 @@ export class SessionController {
     }, delayMs);
   }
 
-  imageDataUrl(id: string): Promise<string> {
+  imageDataUrl(id: string, sourceSessionId = this.sessionId): Promise<string> {
     if (this.disposed) return Promise.reject(new Error("Session is closed"));
-    let source = this.imageSources.get(id);
+    const key = JSON.stringify([sourceSessionId, id]);
+    let source = this.imageSources.get(key);
     if (!source) {
-      source = this.api.imageDataUrl(this.sessionId, id).then((url) => {
+      source = this.api.imageDataUrl(sourceSessionId, id).then((url) => {
         if (this.disposed) throw new Error("Session is closed");
         return url;
       }).catch((error) => {
-        this.imageSources.delete(id);
+        this.imageSources.delete(key);
         throw error;
       });
-      this.imageSources.set(id, source);
+      this.imageSources.set(key, source);
     }
     return source;
   }
@@ -243,8 +249,9 @@ export class SessionController {
     return this.api.slashCompletions(name, text, this.sessionId);
   }
   private assertSynchronized(): void {
+    if (this.disposed) throw new Error("Session is closed.");
     if (deletingSessions.get(this.api)?.has(this.sessionId)) throw new Error("Wait for session deletion to finish before using turn controls.");
-    if (this.store.cached || this.store.replaying) throw new Error("Wait for the session to finish synchronizing before using turn controls.");
+    if (this.rpc.connectionState !== "connected" || !this.store.replayComplete || this.store.cached || this.store.replaying) throw new Error("Wait for the session to finish synchronizing before using turn controls.");
   }
 
   async runSlash(line: string): Promise<SlashResult> {
@@ -382,7 +389,6 @@ export class SessionController {
 
   cancelActive(turnId?: string | null): SentCommand | undefined {
     this.assertSynchronized();
-    if (this.rpc.connectionState !== "connected" || !this.store.replayComplete) throw new Error("Wait for the session to finish synchronizing before cancelling a turn.");
     // A surface's Stop names the turn it drew: the one running now. A name that
     // has already ended must not be forwarded — the engine accepts a cancel for
     // any turn id, so the live turn would keep running and the click would look

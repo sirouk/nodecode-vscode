@@ -52,6 +52,22 @@ test('native panel model picker preserves provider identity and supports cancell
   assert.equal(calls.length,1);
 });
 
+test('model options count the complete native context, including cache reads and writes',async()=>{
+  api.models=async()=>({models:[{provider:'test',model:'model',context:32000}]});
+  api.target=async()=>({provider:'test',model:'model',efforts:[]});
+  api.auxiliaryModel=api.deciderModel=api.failover=async()=>({});
+  for(const [context_usage,used] of [
+    [{input:1000,cached:2000,cache_write:300},3300],
+    [{input:1000},1000],
+    [{cached:2000},2000],
+    [{},0],
+    [undefined,0],
+  ]){
+    api.header=async()=>({session_id:'session',context_usage});
+    assert.deepEqual((await callbacks.modelOptions('session')).context,{used,limit:32000});
+  }
+});
+
 test('native action callbacks return their asynchronous failures to the caller',async t=>{
   for(const [callback,method] of [
     ['forkSession','forkSession'],['exportSession','exportJsonl'],

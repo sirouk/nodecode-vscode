@@ -732,15 +732,25 @@ try{
     assert.equal(sent.mode,undefined);assert.equal(sent.turnId,undefined);assert.equal(await page.locator('#queueBtn').isVisible(),false);
     assert.deepEqual(errors,[]);await page.close();
   });
-  await check('unavailable steering never silently queues on Enter, including reconnect and partial replay',async()=>{
+  await check('a busy turn that cannot take a steer queues the message instead of refusing it',async()=>{
     const {page,errors}=await open(),composer=page.locator('#composer');
     const active={...state,view:{...state.view,running:true,activeTurnId:'turn-A',activeTurnSteerable:true}};
-    await emit(page,{...active,view:{...active.view,activeTurnSteerable:false}});await composer.fill('Must steer, not queue');
-    assert.equal(await page.locator('#sendBtn').isDisabled(),true);assert.equal(await page.locator('#queueBtn').isDisabled(),false);
-    await composer.press('Enter');assert.equal(await posted(page,'send'),undefined);assert((await page.locator('#attachmentError').textContent()).includes('cannot be steered'));
-    await emit(page,{...active,connection:'connecting'});await composer.press('Enter');assert.equal(await posted(page,'send'),undefined);assert.equal(await page.locator('#queueBtn').isDisabled(),true);
-    await emit(page,{...active,view:{...active.view,replayComplete:false}});await composer.press('Enter');assert.equal(await posted(page,'send'),undefined);
-    await emit(page,active);await composer.press('Enter');const sent=await posted(page,'send');assert.equal(sent.mode,'steer');assert.equal(sent.turnId,'turn-A');
+    const sends=()=>page.evaluate(()=>window.posted.filter(m=>m.type==='send').length);
+    await emit(page,{...active,view:{...active.view,activeTurnSteerable:false}});await composer.fill('Queue this for the next turn');
+    assert.equal(await page.locator('#sendBtn').isDisabled(),false,'a busy thread never refuses a message');
+    assert.equal(await page.locator('#queueBtn').isDisabled(),false);
+    assert.equal(await page.locator('#sendBtn').getAttribute('aria-label'),'Queue for the next turn');
+    assert((await page.locator('#composerHint').textContent()).includes('Enter to queue'));
+    await composer.press('Enter');let sent=await posted(page,'send');
+    assert.equal(sent.mode,'queue');assert.equal(sent.turnId,undefined);
+    assert.equal(await page.locator('#statusLine .connection').textContent(),'Queueing…');
+    await emit(page,{type:'sendAccepted',requestId:sent.requestId});
+    // A dropped connection or a session still replaying is not a busy thread: the
+    // panel does not yet know the session well enough to submit anything.
+    const before=await sends();
+    await emit(page,{...active,connection:'connecting'});await composer.press('Enter');assert.equal(await sends(),before);assert.equal(await page.locator('#queueBtn').isDisabled(),true);
+    await emit(page,{...active,view:{...active.view,replayComplete:false}});await composer.press('Enter');assert.equal(await sends(),before);
+    await emit(page,active);await composer.fill('Steer this now');await composer.press('Enter');sent=await posted(page,'send');assert.equal(sent.mode,'steer');assert.equal(sent.turnId,'turn-A');
     assert.deepEqual(errors,[]);await page.close();
   });
   await check('pending steering preserves its target across recreation without resubmission',async()=>{

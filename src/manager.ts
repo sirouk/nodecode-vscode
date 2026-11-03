@@ -4,6 +4,7 @@
 
 import { NodecodeApi, SlashCommand, SlashResult } from "./api";
 import { NodecodeCli } from "./cli";
+import { decideSend } from "./send-controls";
 import { Notifications } from "./discovery";
 import {
   ConnectionState,
@@ -261,12 +262,8 @@ export class SessionController {
 
   sendPrompt(text: string, images: ImageAttachment[] = []): SentCommand | undefined {
     this.assertSynchronized();
-    const view = this.store.view();
-    if (view.running) {
-      if (!view.activeTurnSteerable || !view.activeTurnId) throw new Error("The active response cannot be steered right now. Wait or use Queue explicitly.");
-      return this.steer(view.activeTurnId, text, images);
-    }
-    return this.queuePrompt(text, images);
+    const decision = decideSend(this.store.view());
+    return decision.mode === "steer" ? this.steer(decision.turnId, text, images) : this.queuePrompt(text, images);
   }
 
   queuePrompt(text: string, images: ImageAttachment[] = []): SentCommand | undefined {

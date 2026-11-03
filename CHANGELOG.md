@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Preview a collapsed thought as one line: the whole thought is in the header and CSS `text-overflow` cuts it to the row, so the ellipsis follows every resize instead of wrapping to a second line or stopping at a character count. The chevron replaces the native marker so the header stays one line tall, an open thought hides its own preview, and the preview is written as text, never as markup.
+
+### Changed
+
+- Close the thinking above a new turn. The cursor is the turn number in the transcript, so a prompt just sent, a queued one draining, or an answer landing all close every finished thought and leave only the live turn's own thinking open; the close is recorded in the saved state rather than re-rendered over it.
+- Start the composer one line tall and grow it as the draft wraps. Growth is capped by `#composer`'s own `max-height` instead of a copy of that number in the script, and the box scrolls past it.
+- Send to a busy thread the way the CLI does: steer the live turn when it has a confirmed steering target, otherwise queue the message for the next turn. Send no longer disables because a turn cannot take a steer, and the panel and controller no longer refuse a message the operator typed; a disconnected or still-syncing panel is still held back.
+
 ### Fixed
 
 - Make the Stop button cancel the running turn. The panel now sends the confirmed active turn id, and the controller resolves the live turn when a surface names none instead of refusing every stop; a surface that names a turn which has already ended is refused rather than sending a cancel the engine would accept and ignore. The button shows `Stopping…`, ignores a second click in the same second, stays reachable so a stop that never lands can be asked again, and clears when the turn ends, a cancellation is rejected, or the connection drops.

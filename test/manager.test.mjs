@@ -49,14 +49,15 @@ test('ordinary sends steer the current active turn; queueing is explicit and one
   }finally{ctl.dispose();}
 });
 
-test('an active turn without a steering target never silently queues an ordinary send',()=>{
+test('a busy turn that cannot take a steer queues the message instead of refusing it',()=>{
   const ctl=new SessionController({},{log(){}},{},'/workspace','unavailable');
   const commands=[];ctl.rpc.sendCommand=command=>{commands.push(command);return {done:Promise.resolve({status:'accepted'})};};
   try{
     ctl.store.applyFrame({type:'session_stream_event',session_id:'unavailable',sequence:1,turn_id:'working-turn',event:{type:'turn.started',payload:{}}});
     ctl.store.applyFrame({type:'session_input_queue_snapshot_updated',session_id:'unavailable',snapshot:{active_turn:'working-turn',active_turn_steerable:false,pending_prompts:[]}});
-    assert.throws(()=>ctl.sendPrompt('Steer now'),/not.*steer|cannot.*steer/i);
-    assert.equal(commands.length,0);
+    // The engine answers a busy start_turn with status 'queued', so nothing typed is lost.
+    ctl.sendPrompt('Queue this for the next turn');
+    assert.deepEqual(commands.at(-1),{type:'start_turn',prompt:'Queue this for the next turn'});
     ctl.queuePrompt('Explicit follow-up');assert.equal(commands.at(-1).type,'start_turn');
   }finally{ctl.dispose();}
 });

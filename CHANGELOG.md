@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.17]
+
 ### Fixed
 
 - Keep recorded-file previews faithful to the latest native receipt. A later binary or unavailable patch no longer displays an older call’s text or truncation label; earlier patches remain available in their original tool results.
@@ -202,7 +204,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.16...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.17...HEAD
+[0.1.17]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.13...v0.1.15
 [0.1.13]: https://github.com/sirouk/nodecode-vscode/compare/v0.1.12...v0.1.13

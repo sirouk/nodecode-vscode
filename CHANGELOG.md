@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep a recorded file's diff when a later receipt reports the same file without a diff body. A created or size-trimmed document used to replace the whole entry, so the row survived with no patch to show; the newest receipt still dates and counts the row, while the patch, and the truncation label that qualifies it, come from the most recent receipt that carried one.
+- Record one row per file however a tool spells its path: `./src/a.ts`, `src//a.ts` and `src/a.ts/` are the same file, and a receipt the store could not attribute to a session is no longer discarded with the foreign ones it never contains.
+
+### Changed
+
+- Ship each recorded patch once per panel. A heavy session re-sent every patch it had recorded on every change — 247 KB in this repository's busiest session, and megabytes in the worst case — so an unchanged patch is now left to the webview's copy and a changed one always ships whole.
+
 ## [0.1.15]
 
 ### Added

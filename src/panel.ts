@@ -316,6 +316,21 @@ export class SessionPanel {
     if (last === null || next.length !== last.length) return false;
     return next.every((text, index) => text === last[index]);
   }
+  // The patch is most of what a recorded file weighs and it rarely changes: ship it
+  // once per panel and let the webview keep its copy, the way an unchanged
+  // collection is left out whole. A session holding megabytes of recorded diffs
+  // then costs one shipment rather than a whole one per change.
+  private shippedPatches?: Map<string, string | undefined>;
+  private encodeFiles(files: StoreView["modifiedFiles"] | undefined): Array<StoreView["modifiedFiles"][number] & { patchOmitted?: true }> {
+    const list = files ?? [];
+    const shipped = this.shippedPatches;
+    const encoded = list.map((file) => {
+      if (file.patch === undefined) return file;
+      return shipped?.get(file.path) === file.patch ? { ...file, patch: undefined, patchOmitted: true as const } : file;
+    });
+    this.shippedPatches = new Map(list.map((file) => [file.path, file.patch]));
+    return encoded;
+  }
   private static sameFiles(next: StoreView["modifiedFiles"], last: StoreView["modifiedFiles"] | null): boolean {
     if (last === null || next.length !== last.length) return false;
     return next.every((file, index) => {
@@ -354,7 +369,7 @@ export class SessionPanel {
     // token: the patch text of every file this thread recorded, and every prompt it
     // ever had. They move rarely, so a tick that changes neither says so and the
     // panel keeps the copy it has.
-    if (view.sessionId !== this.shippedSession) { this.shippedSession = view.sessionId; this.shippedFiles = null; this.shippedPrompts = null; }
+    if (view.sessionId !== this.shippedSession) { this.shippedSession = view.sessionId; this.shippedFiles = null; this.shippedPrompts = null; this.shippedPatches = undefined; }
     const prompts = this.controller.store.userPrompts();
     const filesUnchanged = SessionPanel.sameFiles(modifiedFiles, this.shippedFiles);
     const promptsUnchanged = SessionPanel.samePrompts(prompts, this.shippedPrompts);
@@ -367,7 +382,7 @@ export class SessionPanel {
         parts: this.decorateParts(view.parts.slice(start), view.cwd),
         partsStart: start,
         partsTotal: view.parts.length,
-        ...(filesUnchanged ? { modifiedFilesOmitted: true } : { modifiedFiles }),
+        ...(filesUnchanged ? { modifiedFilesOmitted: true } : { modifiedFiles: this.encodeFiles(modifiedFiles) }),
       },
       connection: this.connection,
       attempts: this.connectionAttempts,
@@ -548,7 +563,7 @@ export class SessionPanel {
             this.attachmentSource = {};
           }
           this.ready = true;
-          this.shippedSession = undefined; this.shippedFiles = null; this.shippedPrompts = null;
+          this.shippedSession = undefined; this.shippedFiles = null; this.shippedPrompts = null; this.shippedPatches = undefined;
           if (this.pendingThreadNavigation) { this.restoreThreadNavigation(this.pendingThreadNavigation); this.pendingThreadNavigation = undefined; }
           if (this.pendingHistory) { this.pendingHistory = false; this.postMessage({type:"showSessions"}); }
           for (const text of this.pendingContext.splice(0)) this.postMessage({ type: "addContext", text });
@@ -1231,6 +1246,12 @@ const CLIENT_JS = String.raw`
     // move, so carry over the copy this panel already holds.
     if (m.historyOmitted && state) m.history = state.history;
     if (m.view && m.view.modifiedFilesOmitted && state && state.view) m.view.modifiedFiles = state.view.modifiedFiles;
+    else if (m.view && Array.isArray(m.view.modifiedFiles) && state && state.view && Array.isArray(state.view.modifiedFiles)) {
+      // A patch this panel already holds is sent once; the entry that replaces it
+      // says so, and the copy already on screen is the patch it describes.
+      var heldPatches = new Map(state.view.modifiedFiles.map(function(file){return [file.path, file.patch];}));
+      m.view.modifiedFiles.forEach(function(file){ if (file.patchOmitted) { var held = heldPatches.get(file.path); if (held !== undefined) file.patch = held; } });
+    }
     state = m;
     syncParts(m.view);
     renderAll(wasNearBottom);

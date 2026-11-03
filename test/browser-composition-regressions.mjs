@@ -124,5 +124,27 @@ try{
       assert.deepEqual(errors,[]);
     }finally{await page.close();}
   });
+  await check('a recorded patch the panel already holds is not resent and the row keeps its diff',async()=>{
+    const {page,errors}=await open();
+    const rows=()=>page.locator('#fileList [data-file-path]'),codes=()=>page.locator('#fileList .diff-code');
+    const patch='@@ -1 +1 @@\n-old line\n+new line';
+    try{
+      await emit(page,{...state,view:{...state.view,modifiedFiles:[{path:'src/memo.ts',callId:'c1',changeCount:1,added:1,removed:1,binary:false,patch}]}});
+      await page.locator('#fileDetails > summary').click();
+      await page.locator('#fileList [data-file-path] summary').first().click();
+      assert((await codes().first().textContent()).includes('+new line'),'the recorded patch is on screen');
+      // The same patch arrives with a newer receipt, so its text is left out of the tick.
+      await emit(page,{...state,view:{...state.view,modifiedFiles:[{path:'src/memo.ts',callId:'c2',changeCount:2,added:2,removed:1,binary:false,patchOmitted:true}]}});
+      assert.equal(await rows().count(),1,'the row survives an entry with no patch text');
+      await page.locator('#fileList [data-file-path] summary').first().click();
+      assert((await codes().first().textContent()).includes('+new line'),'the patch the panel already held is still the one shown');
+      assert((await page.locator('#fileList [data-file-path] summary').first().textContent()).includes('2'),'and the row reports the newer change');
+      // A different patch is never inferred from the held copy.
+      await emit(page,{...state,view:{...state.view,modifiedFiles:[{path:'src/memo.ts',callId:'c3',changeCount:3,added:3,removed:1,binary:false,patch:'@@ -2 +2 @@\n-older\n+newest'}]}});
+      await page.locator('#fileList [data-file-path] summary').first().click();
+      assert((await codes().first().textContent()).includes('+newest'),'a changed patch replaces what is shown');
+      assert.deepEqual(errors,[]);
+    }finally{await page.close();}
+  });
 }finally{await browser.close();}
 if(failures.length)process.exitCode=1;

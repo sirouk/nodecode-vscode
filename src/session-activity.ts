@@ -9,6 +9,17 @@ export interface RecordedFileChange {
   truncated?: true;
 }
 
+/** One file is one row. A tool that reports "./src/a" and one that reports "src/a"
+ *  would otherwise split the file in two, each showing half its history. An
+ *  absolute path is left alone: without the session's cwd there is nothing safe
+ *  to strip, and it is at least consistently itself. */
+export function recordedFilePath(path: string): string {
+  let normalized = path.startsWith("//") ? path : path.replace(/\/{2,}/g, "/");
+  while (normalized.startsWith("./")) normalized = normalized.slice(2);
+  if (normalized.length > 1) normalized = normalized.replace(/\/+$/, "");
+  return normalized || path;
+}
+
 /** Latest call-scoped diff per path, never a global working-tree attribution. */
 export function recordedFileChanges(parts: Array<{kind:string;turnNumber?:number;call?:{callId:string;sessionId?:string;turnId?:string;diffOrder?:number;metadata?:Record<string,unknown>}}>, sessionId?:string): RecordedFileChange[] {
   const files = new Map<string, RecordedFileChange>();
@@ -17,19 +28,32 @@ export function recordedFileChanges(parts: Array<{kind:string;turnNumber?:number
   const ordered = [...parts].sort((a,b) => (a.call?.diffOrder ?? 0) - (b.call?.diffOrder ?? 0));
   for (const part of ordered) {
     if (part.kind !== "tool" || !part.call) continue;
-    if (sessionId && part.call.sessionId !== sessionId) continue;
+    // A receipt the store could not attribute can only be this session's: another
+    // session's facts never enter it. Refusing an unattributed one loses the change.
+    if (sessionId && part.call.sessionId !== undefined && part.call.sessionId !== sessionId) continue;
     const document = part.call.metadata?.workspace_diff as {files?:unknown;truncated?:unknown} | undefined;
     if (!Array.isArray(document?.files)) continue;
     for (const value of document.files) {
       if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.path !== "string" || !value.path) continue;
-      const seen = calls.get(value.path) ?? new Set<string>();
-      seen.add(JSON.stringify([part.call.sessionId, part.call.turnId ?? part.turnNumber, part.call.callId])); calls.set(value.path, seen);
-      files.set(value.path, {
-        path:value.path, callId:part.call.callId, changeCount:seen.size,
+      const path = recordedFilePath(value.path);
+      const seen = calls.get(path) ?? new Set<string>();
+      seen.add(JSON.stringify([part.call.sessionId, part.call.turnId ?? part.turnNumber, part.call.callId])); calls.set(path, seen);
+      // Identity and counts come from the latest receipt, so a file's row is dated
+      // by its newest change. The patch is the one thing a receipt can lack - a
+      // file created with no diff body, or a document trimmed for size - and that
+      // receipt must not erase the last patch that showed what changed.
+      const inPatch = typeof value.patch === "string" ? value.patch : undefined;
+      const carried = inPatch === undefined ? files.get(path) : undefined;
+      const patch = inPatch ?? carried?.patch;
+      // The label qualifies the patch on screen; a receipt with no body of its own
+      // still describes its own document.
+      const truncated = inPatch === undefined && carried?.patch !== undefined ? carried.truncated === true : document.truncated === true;
+      files.set(path, {
+        path, callId:part.call.callId, changeCount:seen.size,
         added:Number.isSafeInteger(value.added) && value.added >= 0 ? value.added : undefined,
         removed:Number.isSafeInteger(value.removed) && value.removed >= 0 ? value.removed : undefined,
-        binary:value.binary === true, patch:typeof value.patch === "string" ? value.patch : undefined,
-        ...(document.truncated === true ? {truncated:true as const} : {}),
+        binary:value.binary === true, patch,
+        ...(truncated ? {truncated:true as const} : {}),
       });
     }
   }

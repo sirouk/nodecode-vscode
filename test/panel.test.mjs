@@ -347,6 +347,43 @@ test('a tick that changes neither the recorded files nor the prompts does not re
   assert.deepEqual(switched.history,prompts,'and its own prompt history');
 });
 
+// A patch is most of a recorded file's weight and it changes rarely. A heavy
+// session re-shipped megabytes on every change before this memo.
+test('a patch the panel already holds is not resent, while a changed one always ships', () => {
+  const posted=[];
+  const patch='@@ -1,1 +1,1 @@\n-old line\n+'+'z'.repeat(200000);
+  const view={sessionId:'memo',cwd:'/work',title:'memo',parts:[{kind:'user',turnNumber:0,text:'prompt'}],
+    modifiedFiles:[{path:'src/a.ts',callId:'c1',changeCount:1,added:1,removed:1,binary:false,patch}]};
+  const panel=Object.create(SessionPanel.prototype);
+  panel.conversationImages=new Map(); // Object.create skips field initializers
+  panel.controller={sessionId:'memo',store:{replaying:false,view:()=>view,userPrompts:()=>['prompt']}};
+  panel.panel={webview:{postMessage:m=>posted.push(m)}};
+  panel.postMessage=m=>{panel.panel.webview.postMessage(m);};
+  panel.postState();
+  assert.equal(posted.find(m=>m.type==='state').view.modifiedFiles[0].patch,patch,'the first shipment carries the patch');
+
+  posted.length=0;
+  view.modifiedFiles=[{path:'src/a.ts',callId:'c2',changeCount:2,added:2,removed:1,binary:false,patch}];
+  panel.postState();
+  const repeated=posted.find(m=>m.type==='state').view.modifiedFiles[0];
+  assert.equal(repeated.patch,undefined,'a patch already sent is left to the panel copy');
+  assert.equal(repeated.patchOmitted,true,'and the entry says why it has none');
+  assert.equal(repeated.callId,'c2','the row still carries the newer receipt');
+  assert.equal(repeated.changeCount,2);
+  assert(JSON.stringify(posted.find(m=>m.type==='state')).length<4000,`a repeated patch cost ${JSON.stringify(posted.find(m=>m.type==='state')).length} bytes`);
+
+  posted.length=0;
+  view.modifiedFiles=[{path:'src/a.ts',callId:'c3',changeCount:3,added:3,removed:1,binary:false,patch:patch+'\n+more'}];
+  panel.postState();
+  assert.equal(posted.find(m=>m.type==='state').view.modifiedFiles[0].patch,patch+'\n+more','a changed patch always ships');
+
+  // A different thread's rows are another document's memory, never this one's.
+  posted.length=0;
+  view.sessionId='other';
+  panel.postState();
+  assert.equal(posted.find(m=>m.type==='state').view.modifiedFiles[0].patch,patch+'\n+more','a thread switch ships the patch again');
+});
+
 
 test('deleting the selected session clears its sidebar without reattaching it', () => {
   const received=event(), disposed=event(), visibility=event();

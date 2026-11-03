@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
-const {BackgroundProcesses,recordedFileChanges}=require('../out/session-activity.js');
+const {BackgroundProcesses,recordedFileChanges,recordedFilePath}=require('../out/session-activity.js');
 const {SessionStore}=require('../out/store.js');
 const {SessionController}=require('../out/manager.js');
 const b64=bytes=>Buffer.from(bytes).toString('base64');
@@ -30,6 +30,55 @@ test('recorded modified files use latest native call metadata rather than summin
   assert.deepEqual(files[0],{path:'a.ts',added:1,removed:2,binary:false,patch:'two',callId:'two',changeCount:2});
   assert.equal(files[1].binary,true);
   assert.deepEqual(recordedFileChanges([{kind:'tool',call:{callId:'shell',metadata:{}}}]),[]);
+});
+
+// A receipt can report a change without a diff body: a file created with no hunk
+// text, or a document trimmed for size. Last-wins erased the patch on screen, so a
+// real session's own rows lost the change they were reporting.
+test('a receipt with no diff body never erases the patch that showed the change',()=>{
+  const parts=[
+    {kind:'tool',call:{callId:'one',diffOrder:1,metadata:{workspace_diff:{files:[{path:'src/diff-view.ts',added:102,removed:0,patch:'+++ created'}]}}}},
+    {kind:'tool',call:{callId:'two',diffOrder:2,metadata:{workspace_diff:{files:[{path:'src/diff-view.ts',added:4,removed:1}]}}}}
+  ];
+  const [file]=recordedFileChanges(parts);
+  assert.equal(file.patch,'+++ created','the newest patch still shows what changed');
+  assert.equal(file.added,4,'the row is dated and counted by the newest receipt');
+  assert.equal(file.removed,1);
+  assert.equal(file.callId,'two');
+  assert.equal(file.changeCount,2);
+});
+
+test('a truncation label travels with the patch it qualifies',()=>{
+  const parts=[
+    {kind:'tool',call:{callId:'one',diffOrder:1,metadata:{workspace_diff:{truncated:true,files:[{path:'a.ts',patch:'cut'}]}}}},
+    {kind:'tool',call:{callId:'two',diffOrder:2,metadata:{workspace_diff:{files:[{path:'a.ts',added:1,removed:0}]}}}}
+  ];
+  const [file]=recordedFileChanges(parts);
+  assert.equal(file.patch,'cut');
+  assert.equal(file.truncated,true,'the label describes the patch still on screen');
+});
+
+// Foreign sessions never enter this store, so an unattributed receipt can only be
+// its own; refusing it dropped a real change.
+test('a receipt the store could not attribute still counts, another session\'s does not',()=>{
+  const call=(callId,sessionId,path)=>({kind:'tool',call:{callId,...(sessionId?{sessionId}:{}),metadata:{workspace_diff:{files:[{path,patch:callId}]}}}});
+  assert.deepEqual(recordedFileChanges([call('mine',undefined,'a.ts'),call('theirs','other','b.ts'),call('here','this','c.ts')],'this').map(file=>file.path),['a.ts','c.ts']);
+});
+
+test('one file is one row whatever spelling the tool used',()=>{
+  assert.equal(recordedFilePath('./src/a.ts'),'src/a.ts');
+  assert.equal(recordedFilePath('src//a.ts'),'src/a.ts');
+  assert.equal(recordedFilePath('src/a.ts/'),'src/a.ts');
+  assert.equal(recordedFilePath('//server/share/a.ts'),'//server/share/a.ts','a root-relative share keeps its root');
+  assert.equal(recordedFilePath('/abs/a.ts'),'/abs/a.ts','an absolute path is not guessed at');
+  assert.equal(recordedFilePath('./'),'./','nothing is left of an empty path, so the original stands');
+  const parts=[
+    {kind:'tool',call:{callId:'one',diffOrder:1,metadata:{workspace_diff:{files:[{path:'src/a.ts',patch:'first'}]}}}},
+    {kind:'tool',call:{callId:'two',diffOrder:2,metadata:{workspace_diff:{files:[{path:'./src//a.ts',patch:'second'}]}}}}
+  ];
+  const files=recordedFileChanges(parts);
+  assert.equal(files.length,1,'two spellings of one path are one row');
+  assert.equal(files[0].changeCount,2);
 });
 
 test('native child discovery emits one navigable notice only after initial roster',()=>{

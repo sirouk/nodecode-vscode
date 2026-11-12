@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 
-import { Gateway, GatewayStatus } from "./gateway";
+import { Gateway, GatewayState, GatewayStatus } from "./gateway";
 import { Notifications } from "./discovery";
 
 export interface Frame {
@@ -112,7 +112,13 @@ ${body}
 
 interface Surface {
   webview: vscode.Webview;
+  /** What this surface was last given, so an unchanged poll writes nothing. */
+  shown?: string;
 }
+
+/** A framed page is a whole application: poll slowly while it is up, quickly while setting up. */
+const READY_POLL_MS = 20000;
+const SETUP_POLL_MS = 5000;
 
 /** Keeps every surface (sidebar view, editor tabs) on the same page. */
 export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -120,6 +126,7 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
   private readonly panels = new Set<vscode.WebviewPanel>();
   private timer: NodeJS.Timeout | undefined;
   private disposed = false;
+  private state: GatewayState | undefined;
 
   constructor(
     private readonly gateway: Gateway,
@@ -131,7 +138,10 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     view.webview.options = { enableScripts: true };
     const surface: Surface = { webview: view.webview };
     view.webview.onDidReceiveMessage((message: { type?: string }) => void this.act(message?.type ?? "", surface));
-    view.onDidDispose(() => this.surfaces.delete(surface));
+    view.onDidDispose(() => {
+      this.surfaces.delete(surface);
+      if (this.surfaces.size === 0) this.stop();
+    });
     this.surfaces.add(surface);
     this.start();
     void this.render(surface);
@@ -157,12 +167,16 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
   }
 
   private start(): void {
-    if (this.timer || this.disposed) return;
-    this.timer = setInterval(() => void this.refresh(), 5000);
+    if (this.timer || this.disposed || this.surfaces.size === 0) return;
+    const wait = this.state === "ready" ? READY_POLL_MS : SETUP_POLL_MS;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      void this.refresh().finally(() => this.start());
+    }, wait);
   }
 
   private stop(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
   }
 
@@ -170,17 +184,21 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     for (const surface of [...this.surfaces]) await this.render(surface);
   }
 
+  /**
+   * Show the current state. Writing the webview's html again reloads the page
+   * inside the frame, and that page carries the operator's own state — so a poll
+   * that finds nothing new writes nothing and the page is left alone.
+   */
   private async render(surface: Surface, working?: string): Promise<void> {
     if (!this.surfaces.has(surface) || this.disposed) return;
     const frame = working ? undefined : await this.gateway.frame();
     const status = working ? await this.gateway.status() : frame!.status;
-    surface.webview.html = renderHtml({
-      status,
-      frame: frame?.pageUrl && frame?.pageOrigin ? { url: frame.pageUrl, origin: frame.pageOrigin } : undefined,
-      nonce: nonce(),
-      cspSource: surface.webview.cspSource,
-      working,
-    });
+    this.state = status.state;
+    const page = frame?.pageUrl && frame?.pageOrigin ? { url: frame.pageUrl, origin: frame.pageOrigin } : undefined;
+    const shown = [working ?? "", status.state, status.message, page?.url ?? "", page?.origin ?? ""].join("\u0000");
+    if (surface.shown === shown) return;
+    surface.shown = shown;
+    surface.webview.html = renderHtml({ status, frame: page, nonce: nonce(), cspSource: surface.webview.cspSource, working });
   }
 
   private async act(action: string, surface: Surface): Promise<void> {

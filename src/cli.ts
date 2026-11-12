@@ -70,6 +70,7 @@ export function resolveCliBinary(
 export class NodecodeCli {
   version: string = NODECODE_CLI_UNKNOWN_VERSION;
   private versionFailure = "";
+  private versionBinary: string | undefined;
 
   constructor(
     private readonly discovery: NodecodeDiscovery,
@@ -85,7 +86,14 @@ export class NodecodeCli {
   }
 
   /** Read `nodecode --version`; a failure leaves version unknown and its reason set. */
+  /**
+   * Read `nodecode --version`, cached per binary: the view's poll cannot afford a
+   * process on every tick, and the version only changes when the binary does. A
+   * failed read is not cached, so the screen after an install keeps retrying.
+   */
   readVersion(binary: string): string {
+    if (this.versionBinary === binary && !this.versionFailure) return this.version;
+    this.versionBinary = binary;
     this.versionFailure = "";
     try {
       const out = execFileSync(binary, ["--version"], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] }).trim();

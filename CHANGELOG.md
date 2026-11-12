@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Fixed
+
+- **The page no longer reloads, and a chat no longer jumps back to its first screen, every few seconds.** The view polls to notice a gateway that went away, and every poll rewrote the webview's html — an identical page, but a new document, so the framed application started over and lost whatever the operator was doing. A poll that finds nothing new now writes nothing at all.
+- **The poll no longer starts a process.** Reading the version ran `nodecode --version` on every tick, on the extension host's only thread; the answer is now cached per binary and re-read only when the binary changes or the last read failed.
+- **A framed page is polled slowly, a setup screen quickly:** every 20 seconds once the page is up, every 5 while it is still being set up, and not at all once the last view closes.
+
 ## [0.2.0]
 
 ### Changed

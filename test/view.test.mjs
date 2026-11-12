@@ -50,3 +50,26 @@ test('work in progress says so and offers nothing to press',()=>{
   assert.doesNotMatch(html,/data-action="/);
   assert.doesNotMatch(html,/<iframe/);
 });
+
+test('a poll that finds nothing new leaves the framed page alone',async()=>{
+  const {NodecodeView}=require('../out/view.js');
+  let writes=0,html='';
+  const webview={cspSource:'x',options:{},set html(value){writes++;html=value;},get html(){return html;},onDidReceiveMessage(){}};
+  let state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',installCommand:'x',installUrl:'y',docsUrl:'z',baseUrl:'http://127.0.0.1:50171'};
+  const page='http://127.0.0.1:53117/web/#t=secret';
+  let link=page;
+  const gateway={frame:async()=>link?{status:state,pageUrl:link,pageOrigin:'http://127.0.0.1:53117'}:{status:state},status:async()=>state,startGateway:async()=>state,enableWebCell:async()=>state,notify(){}};
+  const view=new NodecodeView(gateway,{log(){}},{install(){}});
+  view.resolveWebviewView({webview,onDidDispose:(fn)=>fn&&0});
+  await new Promise((resolve)=>setTimeout(resolve,20));
+  assert.equal(writes,1,'the page is written once');
+  assert.match(html,/<iframe id="page" src="http:\/\/127\.0\.0\.1:53117\/web\/#t=secret"/);
+  for(let tick=0;tick<4;tick+=1) await view.refresh();
+  assert.equal(writes,1,'four polls that changed nothing rewrite nothing, so the page keeps its state');
+  state={...state,state:'gateway-down',message:'The gateway stopped answering.'};
+  link=undefined;
+  await view.refresh();
+  assert.equal(writes,2,'a real change is written');
+  assert.doesNotMatch(html,/<iframe/,'the page is gone, so it is not framed');
+  view.dispose();
+});

@@ -54,7 +54,8 @@ const require=createRequire(import.meta.url);
 const {activate}=require('../out/extension.js');
 Module._load=load;
 
-const context={subscriptions:[],globalState:{get:(_k,fallback)=>fallback,update:async()=>{}},workspaceState:{get:(_k,fallback)=>fallback,update:async()=>{}},extensionUri:vscode.Uri.file(home)};
+const remembered=new Map();
+const context={subscriptions:[],globalState:{get:(k,fallback)=>remembered.has(k)?remembered.get(k):fallback,update:async(k,v)=>{remembered.set(k,v);}},workspaceState:{get:(_k,fallback)=>fallback,update:async()=>{}},extensionUri:vscode.Uri.file(home)};
 
 const listening=new Promise((resolve)=>gatewayServer.listen(0,'127.0.0.1',resolve));
 const settle=()=>new Promise((resolve)=>setTimeout(resolve,150));
@@ -77,6 +78,15 @@ test('a gateway without the web cell asks for the web cell, and says so in the v
   const ask=messages.find((entry)=>entry.message.includes('web cell is off'));
   assert.ok(ask,'the operator is asked once, by name');
   assert.ok(ask.actions.includes('Turn on the web cell'),'and offered the step that fixes it');
+});
+
+test('a window that activates again does not repeat an ask the operator already had',async()=>{
+  assert.equal(remembered.get('asked.web-cell'),true,'the ask was recorded');
+  pageServes=false;
+  const before=messages.length;
+  activate(context);
+  await settle();
+  assert.equal(messages.length,before,'nothing is asked twice for the same missing piece');
 });
 
 test('the view shows the setup step, then frames the page once the cell is on',async()=>{

@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2]
+
+### Fixed
+
+- **A missing piece is announced once, not once per window.** The notice that offered to turn on the web cell (or to install Nodecode) fired on every activation, so every reload, every new window and every reopened folder raised the same toast. The answer is now remembered: the view and the status bar still say what is missing, and the notice stays quiet.
+
 ## [0.2.1]
 
 ### Fixed

@@ -101,16 +101,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
   void refresh();
 
-  // --- the one ask: say what is missing, once per activation --------------
+  // --- the one ask: say what is missing, once per install -----------------
+  // A reload, a new window or a reopened folder activates again; the operator
+  // who already said "Not now" should not be told again. The view and the status
+  // bar keep saying it, so nothing is hidden by staying quiet.
+  const asked = (key: string): boolean => context.globalState.get<boolean>(`asked.${key}`, false) === true;
+  const remember = (key: string): void => void context.globalState.update(`asked.${key}`, true);
   void gateway.status().then((status) => {
-    if (status.state === "missing-cli") {
+    if (status.state === "missing-cli" && !asked("install")) {
+      remember("install");
       void vscode.window
         .showInformationMessage("Nodecode is not installed. Install it to show its page in this window.", "Install", "Docs")
         .then((choice) => {
           if (choice === "Install") cli.installInTerminal();
           if (choice === "Docs") void vscode.env.openExternal(vscode.Uri.parse(status.docsUrl));
         });
-    } else if (status.state === "web-cell-off") {
+    } else if (status.state === "web-cell-off" && !asked("web-cell")) {
+      remember("web-cell");
       void vscode.window
         .showInformationMessage("Nodecode is running, but its web cell is off — the cell that serves the page this view shows.", "Turn on the web cell", "Not now")
         .then(async (choice) => {

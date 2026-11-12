@@ -493,7 +493,12 @@ if ! confirm "$confirm_prompt"; then
 fi
 
 git add package.json package-lock.json CHANGELOG.md media/icon.png
-git commit -m "$commit_title" >/dev/null || fail "release commit failed"
+if git diff --cached --quiet; then
+    # A re-cut after a cut that failed before publishing: the tree already is this release.
+    log "nothing to commit: this tree is already ${chosen_tag#v}"
+else
+    git commit -m "$commit_title" >/dev/null || fail "release commit failed"
+fi
 git tag -a "$chosen_tag" -m "$commit_title"
 
 if [ -n "$git_remote" ]; then

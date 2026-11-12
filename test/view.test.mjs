@@ -1,0 +1,52 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createRequire,Module} from 'node:module';
+const require=createRequire(import.meta.url),load=Module._load;
+class EventEmitter{event=()=>({dispose(){}});fire(){}dispose(){}}
+Module._load=function(name,...args){return name==='vscode'?{EventEmitter,window:{createWebviewPanel(){}},ViewColumn:{Active:-1},env:{openExternal:async()=>true,asExternalUri:async(uri)=>uri},Uri:{parse:(value)=>({toString:()=>value})}}:load.call(this,name,...args);};
+const {renderHtml,escapeHtml}=require('../out/view.js');
+Module._load=load;
+
+const status=(overrides={})=>({state:'ready',message:'Nodecode is ready.',version:'0.1.14',binary:'/usr/bin/nodecode',installCommand:'curl -fsSL https://nodecode.ai/install.sh | sh',installUrl:'https://nodecode.ai/install.sh',docsUrl:'https://nodecode.ai/docs',baseUrl:'http://127.0.0.1:50171',...overrides});
+const render=(options)=>renderHtml({status:status(),nonce:'abc123',cspSource:'x',...options});
+
+test('the ready view frames the gateway page and allows exactly that origin',()=>{
+  const html=render({frame:{url:'http://127.0.0.1:53117/web/#t=secret',origin:'http://127.0.0.1:53117'}});
+  assert.match(html,/frame-src http:\/\/127\.0\.0\.1:53117;/);
+  assert.match(html,/<iframe id="page" src="http:\/\/127\.0\.0\.1:53117\/web\/#t=secret"/);
+  assert.match(html,/allow="clipboard-read; clipboard-write"/);
+  assert.doesNotMatch(html,/class="action/,'the ready view offers no setup steps');
+  assert.match(html,/script-src 'nonce-abc123'/);
+});
+
+test('each missing piece names one step and never leaks the token',()=>{
+  const cases=[
+    ['missing-cli',"Nodecode is not installed, or not on this machine's PATH."],
+    ['web-cell-off','The gateway is running at http://127.0.0.1:50171 without the web cell'],
+    ['gateway-down','The Nodecode gateway is not running in this home.'],
+  ];
+  for(const [state,message] of cases){
+    const html=render({status:status({state,message})});
+    assert.ok(html.includes(escapeHtml(message)),`${state} shows its message`);
+    assert.doesNotMatch(html,/http:\/\/127\.0\.0\.1:\d+\/web\/#t=/,`${state} frames nothing`);
+    assert.match(html,/data-action="recheck"/);
+  }
+  assert.match(render({status:status({state:'missing-cli',message:'x'})}),/data-action="install"/);
+  assert.match(render({status:status({state:'gateway-down',message:'x'})}),/data-action="start"/);
+  assert.match(render({status:status({state:'web-cell-off',message:'x'})}),/data-action="enable"/);
+  assert.doesNotMatch(render({status:status({state:'web-cell-off',message:'x'})}),/data-action="install"/);
+});
+
+test('messages from the gateway are written as text, never as markup',()=>{
+  const html=render({status:status({state:'gateway-down',message:'<img src=x onerror="boom">'})});
+  assert.doesNotMatch(html,/<img src=x/);
+  assert.match(html,/&lt;img src=x onerror=&quot;boom&quot;&gt;/);
+  assert.equal(escapeHtml(`<&>"'`),'&lt;&amp;&gt;&quot;&#39;');
+});
+
+test('work in progress says so and offers nothing to press',()=>{
+  const html=render({working:'Turning the web cell on…'});
+  assert.match(html,/Turning the web cell on…/);
+  assert.doesNotMatch(html,/data-action="/);
+  assert.doesNotMatch(html,/<iframe/);
+});

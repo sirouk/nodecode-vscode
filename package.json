@@ -1,8 +1,8 @@
 {
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
-  "description": "Nodecode in VS Code: live conversations, thinking, tools, child threads, checkpoints and model controls.",
-  "version": "0.1.17",
+  "description": "Nodecode in VS Code: the gateway's own page in your sidebar or an editor tab, with nothing in between.",
+  "version": "0.2.0",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -10,26 +10,29 @@
     "nodecode",
     "ai agent",
     "coding agent",
-    "chat",
-    "sessions",
-    "checkpoints"
+    "agent",
+    "gateway",
+    "web",
+    "chat"
   ],
   "repository": {
     "type": "git",
     "url": "https://github.com/sirouk/nodecode-vscode"
   },
   "homepage": "https://github.com/sirouk/nodecode-vscode",
-  "bugs": "https://github.com/sirouk/nodecode-vscode/issues",
+  "bugs": {
+    "url": "https://github.com/sirouk/nodecode-vscode/issues"
+  },
   "galleryBanner": {
     "color": "#171716",
     "theme": "dark"
   },
   "capabilities": {
     "untrustedWorkspaces": {
-      "supported": false,
-      "description": "Launches the local nodecode CLI, which reads and writes files in the workspace."
+      "supported": true,
+      "description": "Shows the local Nodecode gateway's own page. It reads the gateway's port and operator token from ~/.nodecode and touches no workspace file."
     },
-    "virtualWorkspaces": false
+    "virtualWorkspaces": true
   },
   "engines": {
     "vscode": "^1.96.0"
@@ -50,7 +53,7 @@
         "nodecode.cliPath": {
           "type": "string",
           "default": "nodecode",
-          "description": "Path to the nodecode CLI binary, or a bare name resolved against PATH."
+          "description": "Path to the nodecode CLI binary, or a bare name resolved against PATH. The extension uses it only to start the gateway and turn the web cell on."
         },
         "nodecode.diagnostics": {
           "type": "boolean",
@@ -71,7 +74,7 @@
     "views": {
       "nodecode": [
         {
-          "id": "nodecodeChat",
+          "id": "nodecodeWeb",
           "type": "webview",
           "name": "Nodecode",
           "contextualTitle": "Nodecode"
@@ -80,142 +83,90 @@
     },
     "commands": [
       {
-        "command": "nodecode.openPanel",
-        "title": "Open Session Panel",
+        "command": "nodecode.open",
+        "title": "Open Nodecode",
         "category": "Nodecode",
-        "icon": "$(comment-discussion)"
+        "icon": "$(chip)"
       },
       {
-        "command": "nodecode.openSessionPicker",
-        "title": "Open Existing Session…",
+        "command": "nodecode.openInEditor",
+        "title": "Open Nodecode in an Editor Tab",
         "category": "Nodecode",
-        "icon": "$(list-selection)"
+        "icon": "$(open-preview)"
       },
       {
-        "command": "nodecode.newSession",
-        "title": "New Conversation",
+        "command": "nodecode.openInBrowser",
+        "title": "Open the Page in Your Browser",
         "category": "Nodecode",
-        "icon": "$(add)"
+        "icon": "$(link-external)"
       },
       {
-        "command": "nodecode.newSessionInTerminal",
-        "title": "New Session in Terminal",
+        "command": "nodecode.copyLink",
+        "title": "Copy the Page Link",
         "category": "Nodecode",
-        "icon": "$(terminal)"
+        "icon": "$(clippy)"
       },
       {
-        "command": "nodecode.refreshSessions",
-        "title": "Refresh Sessions",
+        "command": "nodecode.reload",
+        "title": "Reload the Page",
         "category": "Nodecode",
         "icon": "$(refresh)"
       },
       {
-        "command": "nodecode.forkSession",
-        "title": "Continue in New Chat",
+        "command": "nodecode.enableWebCell",
+        "title": "Turn On the Web Cell",
         "category": "Nodecode",
-        "icon": "$(git-branch)"
+        "icon": "$(check)"
       },
       {
-        "command": "nodecode.renameSession",
-        "title": "Rename Session",
+        "command": "nodecode.startGateway",
+        "title": "Start the Gateway",
         "category": "Nodecode",
-        "icon": "$(pencil)"
+        "icon": "$(play)"
       },
       {
-        "command": "nodecode.deleteSession",
-        "title": "Delete Session",
+        "command": "nodecode.install",
+        "title": "Install Nodecode",
         "category": "Nodecode",
-        "icon": "$(trash)"
+        "icon": "$(cloud-download)"
       },
       {
-        "command": "nodecode.focusSessionTerminal",
-        "title": "Reveal Session Terminal",
-        "category": "Nodecode",
-        "icon": "$(terminal-view)"
-      },
-      {
-        "command": "nodecode.viewSessionLogs",
-        "title": "Export Session History",
-        "category": "Nodecode",
-        "icon": "$(output)"
-      },
-      {
-        "command": "nodecode.cancelActiveTurn",
-        "title": "Cancel Active Turn",
-        "category": "Nodecode",
-        "icon": "$(debug-stop)"
-      },
-      {
-        "command": "nodecode.undoLastTurn",
-        "title": "Undo Last Turn (Checkpoint)",
-        "category": "Nodecode",
-        "icon": "$(discard)"
-      },
-      {
-        "command": "nodecode.pickModel",
-        "title": "Choose Model…",
-        "category": "Nodecode",
-        "icon": "$(symbol-misc)"
-      },
-      {
-        "command": "nodecode.pickEffort",
-        "title": "Choose Effort…",
-        "category": "Nodecode",
-        "icon": "$(gauge)"
-      },
-      {
-        "command": "nodecode.storeNodecodeMd",
-        "title": "Write nodecode.md to Workspace",
-        "category": "Nodecode",
-        "icon": "$(book)"
-      },
-      {
-        "command": "nodecode.showActivationLog",
-        "title": "Show Activation Log",
-        "category": "Nodecode"
-      },
-      {
-        "command": "nodecode.viewExtensionLogs",
+        "command": "nodecode.showDiagnostics",
         "title": "Show Diagnostics Output",
         "category": "Nodecode",
         "icon": "$(pulse)"
-      },
-      {
-        "command": "nodecode.addSelectionToChat",
-        "title": "Add Selection to Conversation",
-        "category": "Nodecode",
-        "icon": "$(comment-discussion)"
-      },
-      {
-        "command": "nodecode.addActiveFileToChat",
-        "title": "Add Active File to Conversation",
-        "category": "Nodecode",
-        "icon": "$(file-code)"
       }
     ],
     "menus": {
-      "editor/context": [
+      "commandPalette": [
         {
-          "command": "nodecode.addSelectionToChat",
-          "when": "editorHasSelection",
-          "group": "nodecode"
+          "command": "nodecode.enableWebCell"
+        },
+        {
+          "command": "nodecode.startGateway"
+        },
+        {
+          "command": "nodecode.install"
         }
       ],
-      "editor/title/context": [
+      "view/title": [
         {
-          "command": "nodecode.addActiveFileToChat",
-          "group": "nodecode"
+          "command": "nodecode.reload",
+          "when": "view == nodecodeWeb",
+          "group": "navigation@1"
+        },
+        {
+          "command": "nodecode.openInEditor",
+          "when": "view == nodecodeWeb",
+          "group": "navigation@2"
+        },
+        {
+          "command": "nodecode.openInBrowser",
+          "when": "view == nodecodeWeb",
+          "group": "navigation@3"
         }
       ]
-    },
-    "keybindings": [
-      {
-        "command": "nodecode.addSelectionToChat",
-        "key": "ctrl+shift+l",
-        "mac": "cmd+shift+l",
-        "when": "editorTextFocus && editorHasSelection"
-      }
-    ]
+    }
   },
   "scripts": {
     "compile": "tsc -p ./",
@@ -223,7 +174,6 @@
     "vscode:prepublish": "npm run compile",
     "typecheck": "tsc --noEmit",
     "test": "npm run compile && node --test test/*.test.mjs && node ./test/parity.mjs",
-    "test:browser": "npm run compile && node test/browser-regressions.mjs && node test/browser-smoke.mjs && node test/browser-windowing.mjs && node test/browser-diffs.mjs && node test/browser-composition-regressions.mjs && node test/browser-activity-regressions.mjs",
     "package": "npx @vscode/vsce package --no-dependencies",
     "icon": "node test/render-icon.mjs"
   },

@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The extension now shows Nodecode's own page instead of reimplementing it.** The gateway's web cell already serves a complete interface at `/web/`; this extension frames that page in the sidebar and in an editor tab, so a new feature, a fixed layout or a changed control reaches the editor the moment Nodecode ships it. The extension keeps the organisational work it had — the release pipeline, the parity probe, the activation walk, the packaging gates — and drops the second client it used to maintain: the RPC session controller, the store, the markdown renderer, the diff viewer, the model and checkpoint controls, and the webview panel that held them.
+- **The page is framed through a loopback proxy, not by weakening Nodecode.** The web cell serves its page with `frame-ancestors 'none'` and the gateway refuses a socket from a foreign origin. A proxy on `127.0.0.1` in front of the gateway's port drops that one directive and passes everything else — page, assets, requests, the token in the URL fragment, the `/gateway` socket — through untouched.
+
+### Added
+
+- **Three gates, each with the step that clears it:** whether nodecode is installed, whether its gateway is running, and whether the web cell is on. The view names the missing piece and offers **Install Nodecode**, **Start the gateway** (`nodecode gateway on`) or **Turn on the web cell** (`nodecode add nc://web`); the operator is asked once, by name, the first time a piece is missing.
+- **Open Nodecode in an Editor Tab**, for the full-width layout, alongside the sidebar view; **Open the Page in Your Browser** runs `nodecode web`, and **Copy the Page Link** copies the operator's own link.
+- **A parity probe that checks the surfaces this stands on:** the version, the `web`/`add`/`gateway` verbs, the printed link and its token, the served page's framing refusal, and — through the proxy — the page, its assets, the accepted token, the opened socket and a refused foreign origin.
+
+### Removed
+
+- The in-webview client: session picker, chat rendering, checkpoints and bookmarks, file attachments and `@file` references, diffs, model/effort menus, slash commands, child threads, the local session cache and the RPC controller. All of it lives in the gateway's page the view now frames, and the history of that work stays in this repository's git log.
+- The `nodecode.md` writer and the editor-context commands, which fed the removed composer.
+
 ## [0.1.17]
 
 ### Fixed

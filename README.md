@@ -1,41 +1,20 @@
 # Nodecode for VS Code
 
-Watch and steer live [Nodecode](https://nodecode.ai) sessions without leaving VS Code: streaming replies, queued prompts, checkpoints, forks and background processes, surfaced in the sidebar and a session panel. The extension talks to the `nodecode` CLI's RPC protocol — the same session data you see in the terminal TUI, projected into the editor.
+The Nodecode gateway's own page, in your sidebar or an editor tab — not a copy of it. Nodecode already serves a complete interface at `http://127.0.0.1:<port>/web/` from its web cell: sessions, threads, the board, settings, the composer, model controls. This extension puts that page in VS Code and gets out of the way. There is no second client to keep in step, because there is no second client.
 
-## Features
+![Nodecode in the VS Code sidebar](media/icon.png)
 
-- **Session picker** — browse, rename and delete conversations in a scrollable popover without leaving the chat. Switch between recent sessions and their explicit parent/child lineage; selecting a session keeps the picker and search open. Click the conversation title to rename it; the workspace path is in its tooltip. The chat is the sole view in the Nodecode container; history stays in the popover.
-- **Chat sidebar and editor panel** — a Nodecode-branded conversation with the official axolotl, warm orange accents, theme-aware surfaces, a compact header with a small avatar and title, session actions and model/effort controls. Replies use a small inline avatar; clipboard icons appear on their own message, thought or code area on hover or keyboard focus. Reply Copy, Fork and Bookmark controls stay inside the response body, remain reachable as you move the pointer onto them, and reserve their own strip above the reply so they never cover a link, an image or a code copy button; thought-process controls stay separate. Streaming replies and tool results retain their reading position during updates. At the latest message, automatic scrolling survives thinking-height changes and incoming content; deliberate upward scrolling or text selection still pauses it. Long conversations open at the latest messages, or back at the place you left when the panel still holds it, and reveal earlier history as you scroll up, keeping your reading position. Only a bounded window of messages around your reading position is held on screen; scrolling up fetches the next slice of history on demand and rows far above you are released again, while reading past the far end of the window slides it forward, with a Load later messages button for the rest. Holding a text selection pauses that slide so a drag is never cut short, and the Latest message jump returns you to the end of the thread, not the end of the window. A collapsed thought previews all of its text on one line, cut to the row by CSS text-overflow so the snippet follows every resize instead of wrapping or counting characters; a new turn closes the thoughts above it and keeps the live turn's own thinking open. Expanded thinking grows with its content, capped at eight lines or one-third of the chat viewport. It follows new thoughts until you scroll away or select text; return to its bottom to follow again. Thought process renders inline Markdown such as bold, emphasis and code while preserving paragraph spacing. Trailing blank thought lines do not consume pane space, while saved and copied source text stays intact. Compact footer disclosures omit divider lines to leave more room for the conversation; activity children are indented beneath their headings, including the nested Idle list.
-- **Threads** — navigate children, siblings and history forks without closing Agents & threads. Parent links stay above the indented family list, and the current conversation is highlighted and stays visible even when idle; clicking it does not reload the conversation. Parent links follow native lineage rather than the last sibling visited. Nodecode fresh threads and inherited-history forks remain distinct. Within each family level, non-idle work stays newest-started first, followed by the most recently updated idle thread; other idle threads stay in a newest-first Idle subsection, collapsed by default. Parent links, the selected conversation and ancestors of visible work remain outside that fold. The Agents & threads and Idle disclosures persist across navigation while drafts remain separate for each conversation. Its compact, scrollable list leaves room for the conversation, and Spawned notices use the fork’s matching color cap. Completed assistant messages offer a Fork action that opens a new chat through that recorded turn: it keeps the earlier conversation up to and including that answer, appears as its own conversation rather than a child of the one it came from, and the original stays open. The new chat keeps one Started from link back to its origin; deleting an origin also deletes every chat started from it. Bookmark controls mark existing recorded checkpoints without creating a new file snapshot; draft chats show their native save state.
-- **Rich conversation** — the safe Markdown renderer from Prime Agent brings aligned tables, task lists, all heading levels, fenced code with language labels, copy controls and clickable source-file links. Native tool states, image results, workspace diffs and metadata stay inspectable. Eval/tool cards use compact headers and matching 11px input, output and result details with tight insets; all content remains expandable and scrollable. Attach, paste or drop PNG, JPEG, GIF and WebP images; restore image previews from session history through authenticated retrieval without exposing gateway credentials to the webview.
-- **Recorded changes** — compact Modified files rows and tool-result previews share red/green unified diffs with old/new line numbers. Expand a file to inspect its recorded patch; the separate Open file button opens its current workspace file without toggling the preview. Reading positions, selections and disclosures survive updates, and expanded diffs and scroll positions survive webview reloads. The strip shows the latest recorded change per file, not a net session diff or a comparison against Git HEAD — one row per file however a tool spelled its path. A receipt without a patch is shown as unavailable rather than borrowing an older change’s patch; earlier patches remain in their own tool results. Binary, unavailable, incomplete and explicitly truncated patches are labeled instead of inventing missing content.
-- **File references** — type `@` to find a workspace file, then use arrow keys and Tab or Enter, or click, to attach it. Suggestions follow the caret inside the composer. Selected @files stay inline at the caret as editable references. Removing the reference removes its context; Nodecode receives the current contents of selected references when you send. Files selected through + remain separate attachment chips.
-- **Editor context** — add a selected range or the active file to the draft with the editor context menu; nothing is submitted until you send.
-- **Reliable composition** — the input box uses the available panel width with small, balanced side gutters, starts one line tall and grows only as the draft wraps. Draft text and image/file selections survive webview reloads. A pending send resumes acknowledgement tracking without submitting it again; only the accepted draft is cleared, preserving edits made while it was sending. If the extension host loses the acknowledgement, the draft stays available with an outcome-unknown warning so you can check history before retrying. While work is active, Enter and Send steer that response when it has a confirmed steering target and otherwise queue the message for the next turn, so a busy conversation never refuses what you type; the separate Queue button always waits for the current turn to finish. Steering takes effect after the current response and its tool batch finish, not by interrupting an in-flight tool. Pending chips distinguish “Steer pending” from “Queued”; Withdraw removes either before delivery. Stop work or jump back to the newest message after reading history.
-- **Turn controls** — cancel the active turn or undo the last turn (checkpoint restore) without switching to the terminal. Stop reports Stopping…, ignores a double click, stays clickable so a stop that never lands can be asked again, and clears when the turn ends, a cancellation is rejected, or the connection drops.
-- **Model controls** — search the inline model menu, star favorites, inspect reported context limits, and choose only reasoning levels supplied by Nodecode. Sticky Main, Aux, Decider and Backup tabs control their separate native settings; backup tests run only when clicked.
-- **Attachments** — large text becomes a retained text-file attachment; add multiple files/images, preview them, and retry failed staging without losing the draft. The + dropdown immediately lists Nodecode files; type to filter without changing the draft, or use its footer to choose files in this computer’s native file dialog. Native browsing requires a verified local runtime; a separate host is reported as unavailable rather than showing the wrong filesystem.
-- **Native commands and runtime** — slash commands use Nodecode's catalog and dialogs; missing installs offer the official installer and Retry, and the menu can restart the native service. The Nodecode CLI version links to its matching GitHub release when available, with verified release or binary-update dates in the tooltip.
-- **Steering** — pick the model or effort budget for a session, and write `nodecode.md` into any workspace to guide the agent there.
-- **Diagnostics** — an output channel shows activation and CLI protocol traffic when `nodecode.diagnostics` is enabled.
+## What it asks for, in order
 
-### Reopening history and usage
+1. **Is nodecode installed?** If not, the view says so and offers the installer.
+2. **Is the gateway running?** If not, it offers **Start the gateway** (`nodecode gateway on`), which also keeps it running at login.
+3. **Is the web cell on?** If not, it asks once, by name, and turns it on with `nodecode add nc://web` — the cell ships with Nodecode, so it stays current with the release you run.
 
-Open controllers are reused when switching conversations. After a completed sync, the extension saves a private local projection in VS Code’s extension storage. Reopening shows that saved history immediately, including recorded file changes, agent relationships and usage, while validating a durable event and catching up from the saved cursor. The runtime remains authoritative: changed branches, incompatible or corrupt caches, and failed validation trigger a replacement replay. Partial replays never replace the last complete checkpoint. Sending and turn controls wait for synchronization; cached process output is last observed, not proof a process is still running.
-
-Every runtime event is applied to the store; visible panels coalesce streaming display updates on a 16 ms timer. Hidden panels do not build or send display snapshots; revealing one immediately shows the current state. Command acknowledgements and connection changes bypass the streaming timer. Unchanged recorded-file, prompt-history and family projections are reused instead of rebuilding historical data per token, and the browser leaves unchanged file lists and controls alone. Controllers share overlapping roster requests, but each caller receives independent results; native roster notifications reject older snapshots and the next read after completion fetches fresh data. Unchanged checkpoints are not rebuilt for ignored RPC traffic. Recorded patch text counts toward the delivery and rendering budgets without truncating the patches or making earlier messages unavailable.
-
-Below the chat input, the status row shows work and save state, **current context** separately from **cumulative tokens**, abbreviated in K/M, and recorded cost. Hover for exact input, output, cache-read and cache-write counts. Cumulative usage and recorded cost cover this session’s currently visible branch, not child agents or work discarded by undo; cost may exclude unpriced rounds. Earlier messages remain available by scrolling upward—the cache is not a history truncation.
-
-## Requirements
-
-- VS Code 1.96 or newer.
-- The [nodecode](https://nodecode.ai) CLI installed and reachable on PATH (or set `nodecode.cliPath`).
-- Untrusted and virtual workspaces are not supported: the extension launches the local CLI and reads workspace files.
+Once all three hold, the view shows the page. Nothing else to configure.
 
 ## Install
 
-From the VS Code Marketplace: search **Nodecode** (publisher `sirouk`), or run:
+From the VS Code Marketplace: search **Nodecode** (publisher `sirouk`), or:
 
 ```sh
 code --install-extension sirouk.nodecode-vscode
@@ -43,76 +22,54 @@ code --install-extension sirouk.nodecode-vscode
 
 From a release asset: download the latest `.vsix` from the [Releases](https://github.com/sirouk/nodecode-vscode/releases) page, then **Extensions → … → Install from VSIX…**.
 
-## Getting started
-
-1. Click the **Nodecode** icon in the activity bar and choose **New Conversation** to start directly in the editor. Existing terminal sessions also appear automatically.
-2. Use **Browse sessions** in the chat toolbar to choose an existing conversation from the popover. Search titles and conversation content directly in the popover.
-3. Click a session to open it in Chat. **Session actions → Open in editor** opens a full editor tab. **New Session in Terminal** starts the CLI instead. The last selected conversation is restored in that workspace.
-
-## Configuration
-
-| Setting | Default | Notes |
-| --- | --- | --- |
-| `nodecode.cliPath` | `nodecode` | Path to the CLI binary, or a bare name resolved against PATH. |
-| `nodecode.diagnostics` | `false` | Verbose extension/CLI protocol logging in the Nodecode output channel. |
+Requires VS Code 1.96 or newer and the [nodecode](https://nodecode.ai) CLI on PATH (or `nodecode.cliPath`).
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `nodecode.openPanel` | Open the session panel (same as clicking a session). |
-| `nodecode.openSessionPicker` | Open searchable session history with recent and lineage views. |
-| `nodecode.newSession` | Start a conversation directly in the editor. |
-| `nodecode.newSessionInTerminal` | Create a VS Code terminal and run `nodecode` in it. |
-| `nodecode.refreshSessions` | Open the searchable history popover. |
-| `nodecode.forkSession` | Continue a session in a new chat from its recorded checkpoint. |
-| `nodecode.renameSession` | Rename a session. |
-| `nodecode.deleteSession` | Delete a session (asks for confirmation). |
-| `nodecode.focusSessionTerminal` | Reveal the terminal that owns the session. |
-| `nodecode.viewSessionLogs` | Export the session history to a file. |
-| `nodecode.cancelActiveTurn` | Interrupt the active turn. |
-| `nodecode.undoLastTurn` | Restore the session's last checkpoint. |
-| `nodecode.pickModel` | Choose the model for a session. |
-| `nodecode.pickEffort` | Choose the effort budget for a session. |
-| `nodecode.storeNodecodeMd` | Write a `nodecode.md` file into the workspace. |
-| `nodecode.showActivationLog` | Show the activation log (session troubleshooting). |
-| `nodecode.viewExtensionLogs` | Show the diagnostics output channel. |
+| **Nodecode: Open Nodecode** | Focus the sidebar view |
+| **Nodecode: Open Nodecode in an Editor Tab** | The same page, full width, where the layout has room |
+| **Nodecode: Open the Page in Your Browser** | Runs `nodecode web`, which opens your own browser |
+| **Nodecode: Copy the Page Link** | Copies the link, token and all — keep it to yourself |
+| **Nodecode: Reload the Page** | Re-probes the gateway and reloads the frame |
+| **Nodecode: Turn On the Web Cell** | `nodecode add nc://web --yes` |
+| **Nodecode: Start the Gateway** | `nodecode gateway on` |
+| **Nodecode: Install Nodecode** | Runs the official installer in a terminal |
+| **Nodecode: Show Diagnostics Output** | Activation log and CLI calls (`nodecode.diagnostics`) |
+
+The view's title bar carries **Reload**, **Open in an Editor Tab** and **Open in Your Browser**.
+
+## How it works
+
+Nodecode's page is deliberately unframable: the web cell serves it with `Content-Security-Policy: frame-ancestors 'none'`, and the gateway refuses a socket whose `Origin` is not the same loopback authority it is asked under. Both are good defaults, so this extension does not ask Nodecode to relax them.
+
+Instead it starts a small proxy on `127.0.0.1` in front of the gateway's port and changes exactly one thing on the way through: it drops that single `frame-ancestors` directive. The page, its assets, its requests, the operator token in its URL fragment, and the `/gateway` socket all pass through untouched. The webview frames the proxy's loopback origin, so the page runs as itself, on its own origin, with its own CSP — and when the web cell changes, this extension shows the change the moment it ships, because it is showing the cell.
+
+Nothing about a session, a model, a checkpoint or a setting is modelled here. The extension knows four facts (CLI path, gateway port, operator token, whether `/web/` answers) and one trick (lifting the framing refusal).
+
+The operator token is read from `~/.nodecode/operator-token` and placed in the framed page's URL fragment, which a browser never sends to a server; it is never written to disk, logged, or sent anywhere.
+
+## Requirements and caveats
+
+- **Untrusted and virtual workspaces are supported:** the extension reads only `~/.nodecode` (port, token) and never touches workspace files.
+- **Remote (SSH, WSL, dev containers):** the gateway runs on the remote host, and the frame is resolved through VS Code's port forwarding (`vscode.env.asExternalUri`). Loopback-only setups work; a gateway reachable another way does not yet.
+- **Profiles:** the extension follows `NODECODE_HOME` and the home the CLI reports. Multiple profiles are not switched between inside the view; run `nodecode -p NAME web` for another home.
 
 ## Development
 
 ```sh
-git clone https://github.com/sirouk/nodecode-vscode
-cd nodecode-vscode
 npm install
 npm run compile
+npm test            # unit tests, the activation walk, and the CLI/gateway parity probe
+npm run package     # nodecode-vscode-<version>.vsix
 ```
 
-Press **F5** for an Extension Development Host. `npm test` compiles the extension and runs the Node regression suite plus the IPC + HTTP parity probe (CLI sections skip when `nodecode` is not on PATH); `npm run icon` writes `media/icon.png` from the embedded official mark — it must stay committed, CI fails if it drifts; `npm run typecheck` typechecks without emitting; `npm run package` builds the `.vsix`.
+`npm test` skips the gateway probes when none is running, so it stays green on a machine that has not started Nodecode. `test/live-gateway.test.mjs` and `test/parity.mjs` exercise the real thing: the page served, framing lifted, assets loaded, the token accepted, the page's socket opened through the proxy — and a foreign origin refused.
 
-For the optional Chromium interaction checks, use an existing Playwright installation with its Chromium browser installed:
+## Publishing
 
-```sh
-export PLAYWRIGHT_PATH=/path/to/installed/playwright
-npm run test:browser # all six at once, or run them individually:
-node test/browser-smoke.mjs
-node test/browser-regressions.mjs
-node test/browser-windowing.mjs
-node test/browser-diffs.mjs
-node test/browser-composition-regressions.mjs
-node test/browser-activity-regressions.mjs
-```
-
-These cover rendering, bounded history windows, unchanged-stream work counts, narrow layouts, navigation, draft persistence, delayed acknowledgements, active-response steering versus explicit queuing, failure recovery, long-draft references, upload reloads, thread-family grouping and navigation, process reconnection, and recorded-diff coloring, copying, navigation and reading-state retention. No browser dependency is added to the extension.
-
-## Releasing
-
-This repo follows the same release discipline as [prime-agent-vscode](https://github.com/sirouk/prime-agent-vscode):
-
-1. `./release.sh --dry-run` runs every gate and prints the plan without editing anything.
-2. `./release.sh --version vX.Y.Z` — synchronizes the version in `package.json` and `package-lock.json`, promotes `[Unreleased]` changelog entries, runs the full battery (compile, tests/parity, icon freshness), packages the vsix and asserts exactly the intended file set ships, then commits, tags, pushes, and creates the GitHub release with the vsix asset.
-3. The Marketplace publish belongs to CI: pushing the version tag triggers `.github/workflows/publish.yml`. It installs locked dependencies with `npm ci`, verifies tests and icon freshness for that exact tagged commit, then packages and publishes only if verification succeeds. The script monitors that tag-push run, not a GitHub release event.
-4. Once, set the secret: an Azure DevOps PAT with **Marketplace → Manage** scope, named `VSCE_PAT` in the GitHub **CI environment** (Settings → Environments → CI → Environment secrets). The tag-only publish job selects `environment: CI`, matching Prime’s setup; repository Actions secrets are also supported. `release.sh` checks environment and repository secret names without reading their values, and distinguishes missing secrets from scopes it cannot inspect. A rerun uses the original workflow revision, so a workflow repair must be included in a new release tag.
-5. Optional local publishing: `.env` with `VSCE_PAT` plus `VSCE_PUBLISH=1` (see `release.sh --help`). This does **not** disable tag-triggered CI publishing, so the two publishers can race and one can fail with a duplicate-version error; leave it unset for the normal CI-owned release. `.env` is excluded from git and from every vsix by `.vscodeignore` and the package allowlist — never commit it.
+`./release.sh` is the whole pipeline: pre-flight gates (branch, tree, remote), version bump in `package.json` and `package-lock.json`, promotion of `[Unreleased]` in this changelog, the verification battery (compile, `npm test`, icon), packaging, tag, push, GitHub release with the `.vsix`, and the tag-triggered workflow that publishes to the Marketplace with `VSCE_PAT`. `--dry-run` prints the plan and changes nothing.
 
 ## License
 

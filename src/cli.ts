@@ -1,79 +1,94 @@
-// Locating and health-checking the `nodecode` CLI, and respawning the
-// gateway when it is restorable but down.
+// Locating the `nodecode` CLI, its version, and the three things the extension
+// does through it: turn the web cell on, start the gateway, open the page.
 
-import { ChildProcess, execFileSync, spawn } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import * as fs from "fs";
-import * as path from "path";
 import * as os from "os";
+import * as path from "path";
 import * as vscode from "vscode";
-import { NodecodeDiscovery, Notifications } from "./discovery";
-import { NODECODE_CLI_UNKNOWN_VERSION } from "./protocol";
 
+import { NodecodeDiscovery, Notifications } from "./discovery";
+
+export const NODECODE_CLI_UNKNOWN_VERSION = "unknown";
+export const NODECODE_SITE_URL = "https://nodecode.ai";
+export const NODECODE_DOCS_URL = "https://nodecode.ai/docs";
 export const NODECODE_INSTALL_URL = "https://nodecode.ai/install.sh";
 export const NODECODE_INSTALL_COMMAND = "curl -fsSL https://nodecode.ai/install.sh | sh";
 export const NODECODE_WINDOWS_INSTALL_COMMAND = "irm https://nodecode.ai/install.ps1 | iex";
-export type RuntimeFailureReason = "missing-cli" | "unusable-cli" | "gateway-unavailable";
-export type EnsureReadyResult = "ok" | { failure: string; reason: RuntimeFailureReason; fixableByDaemon: boolean };
-export interface RuntimeStatus {
-  state: "ready" | RuntimeFailureReason;
-  message: string;
-  binary?: string;
-  installCommand?: string;
-  installUrl: string;
-  canRestart: boolean;
+/** The cell that serves the gateway's own page at /web/. */
+export const NODECODE_WEB_CELL = "web";
+
+export interface CommandResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
 }
 
-export function resolveCliBinary(configured: string, options: {pathEnv:string;home:string;platform:string;localAppData?:string} = {pathEnv:process.env.PATH ?? "", home:os.homedir(), platform:process.platform,localAppData:process.env.LOCALAPPDATA}): string | undefined {
+export function installCommand(platform: string = process.platform): string {
+  return platform === "win32" ? NODECODE_WINDOWS_INSTALL_COMMAND : NODECODE_INSTALL_COMMAND;
+}
+
+export function resolveCliBinary(
+  configured: string,
+  options: { pathEnv: string; home: string; platform: string; localAppData?: string } = {
+    pathEnv: process.env.PATH ?? "",
+    home: os.homedir(),
+    platform: process.platform,
+    localAppData: process.env.LOCALAPPDATA,
+  },
+): string | undefined {
   const executable = (file: string): boolean => {
-    try { if (!fs.statSync(file).isFile()) return false; fs.accessSync(file, options.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK); return true; }
-    catch { return false; }
+    try {
+      if (!fs.statSync(file).isFile()) return false;
+      fs.accessSync(file, options.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
   };
   if (configured.includes("/") || configured.includes("\\")) return executable(configured) ? configured : undefined;
   const extensions = options.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
   for (const directory of options.pathEnv.split(options.platform === "win32" ? ";" : path.delimiter)) {
     if (!directory) continue;
-    for (const ext of extensions) { const candidate = path.join(directory, configured + ext); if (executable(candidate)) return candidate; }
+    for (const ext of extensions) {
+      const candidate = path.join(directory, configured + ext);
+      if (executable(candidate)) return candidate;
+    }
   }
-  // GUI-launched VS Code often misses the installer's ~/.local/bin PATH entry.
+  // A GUI-launched VS Code often misses the installer's ~/.local/bin PATH entry.
   if (configured === "nodecode") {
-    const candidates = options.platform === "win32"
-      ? [path.join(options.localAppData ?? path.join(options.home,"AppData","Local"),"Programs","nodecode","current","nodecode.exe")]
-      : [path.join(options.home,".local","bin","nodecode"),path.join(options.home,".local","share","nodecode","current","nodecode")];
+    const candidates =
+      options.platform === "win32"
+        ? [path.join(options.localAppData ?? path.join(options.home, "AppData", "Local"), "Programs", "nodecode", "current", "nodecode.exe")]
+        : [path.join(options.home, ".local", "bin", "nodecode"), path.join(options.home, ".local", "share", "nodecode", "current", "nodecode")];
     for (const candidate of candidates) if (executable(candidate)) return candidate;
   }
   return undefined;
 }
 
 export class NodecodeCli {
-  private readonly discovery: NodecodeDiscovery;
-  private readonly notes: Notifications;
   version: string = NODECODE_CLI_UNKNOWN_VERSION;
   private versionFailure = "";
 
-  constructor(discovery: NodecodeDiscovery, notes: Notifications) {
-    this.discovery = discovery;
-    this.notes = notes;
-  }
+  constructor(
+    private readonly discovery: NodecodeDiscovery,
+    private readonly notes: Notifications,
+  ) {}
 
   configuredPath(): string {
-    return (
-      vscode.workspace.getConfiguration("nodecode").get<string>("cliPath")?.trim() ||
-      "nodecode"
-    );
+    return vscode.workspace.getConfiguration("nodecode").get<string>("cliPath")?.trim() || "nodecode";
   }
 
   resolve(): string | undefined {
     return resolveCliBinary(this.configuredPath());
   }
 
+  /** Read `nodecode --version`; a failure leaves version unknown and its reason set. */
   readVersion(binary: string): string {
     this.versionFailure = "";
     try {
-      const out = execFileSync(binary, ["--version"], {
-        encoding: "utf8",
-        timeout: 10000,
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+      const out = execFileSync(binary, ["--version"], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] }).trim();
       this.version = out || NODECODE_CLI_UNKNOWN_VERSION;
     } catch (error) {
       this.version = NODECODE_CLI_UNKNOWN_VERSION;
@@ -82,61 +97,76 @@ export class NodecodeCli {
     return this.version;
   }
 
-  /** CLI resolvable + gateway answering. Never throws. */
-  async ensureReady(): Promise<EnsureReadyResult> {
+  /** Why the last readVersion failed, when it did. */
+  versionError(): string {
+    return this.versionFailure;
+  }
+
+  /** One CLI command; never throws. */
+  run(args: string[], timeoutMs = 120000): Promise<CommandResult> {
+    return new Promise<CommandResult>((resolve) => {
+      const binary = this.resolve();
+      if (!binary) {
+        resolve({ code: -1, stdout: "", stderr: "nodecode is not installed or not on PATH", timedOut: false });
+        return;
+      }
+      const child = execFile(
+        binary,
+        args,
+        { encoding: "utf8", timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+        (error, stdout, stderr) => {
+          const timedOut = (error as { killed?: boolean } | null)?.killed === true;
+          const code = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : 1) : 0;
+          resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), timedOut });
+        },
+      );
+      this.notes.log(`nodecode ${args.join(" ")} (pid ${child.pid ?? "?"})`);
+    });
+  }
+
+  /** The link `nodecode web --print` prints, or undefined when the page is not served. */
+  async webLink(): Promise<string | undefined> {
+    const result = await this.run(["web", "--print"], 25000);
+    if (result.code !== 0) {
+      this.notes.log(`nodecode web --print failed: ${result.stderr.trim() || result.code}`);
+      return undefined;
+    }
+    const link = result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => /^http:\/\/127\.0\.0\.1:\d+\/web\//.test(line));
+    return link;
+  }
+
+  /** Turn the web cell on (installs the shipped cell when it is missing, and starts it live). */
+  enableWebCell(): Promise<CommandResult> {
+    return this.run(["add", `nc://${NODECODE_WEB_CELL}`, "--yes", "--wait", "120"], 180000);
+  }
+
+  /** Keep the gateway running in the background, and at login. */
+  startGateway(): Promise<CommandResult> {
+    return this.run(["gateway", "on"], 90000);
+  }
+
+  /** Open this home's page in the operator's own browser. */
+  openInBrowser(): void {
     const binary = this.resolve();
     if (!binary) {
-      const configured = this.configuredPath();
-      const failure =
-        configured === "nodecode"
-          ? "`nodecode` is not on PATH. Install Nodecode or set nodecode.cliPath to the binary."
-          : `nodecode.cliPath points at ${configured}, which does not exist.`;
-      return { failure, reason: "missing-cli", fixableByDaemon: false };
+      void vscode.window.showErrorMessage("Nodecode is not installed — install it first, then try again.");
+      return;
     }
-    this.readVersion(binary);
-    if (this.versionFailure) return {failure:`Nodecode was found at ${binary}, but could not start: ${this.versionFailure}`,reason:"unusable-cli",fixableByDaemon:false};
-    let endpoint = this.discovery.current();
-    if (!endpoint) endpoint = await this.discovery.probe();
-    if (!endpoint) {
-      const fixable = this.discovery.canRestore;
-      const failure = fixable
-        ? "The Nodecode gateway is not answering, but its store is still present — it can be restarted."
-        : "No Nodecode gateway is running in this home (no history.db.owner). Start one (nodecode serve) and retry.";
-      return { failure, reason:"gateway-unavailable", fixableByDaemon: fixable };
-    }
-    return "ok";
-  }
-
-  /** Restart the gateway when ensureReady flagged it fixable. */
-  ensureDaemon(fixable: boolean): void {
-    if (!fixable) return;
-    const binary = this.resolve();
-    if (!binary) return;
-    try {
-      const store = path.join(NodecodeDiscovery.nodecodeHome(), "history.db");
-      const child = spawn(binary, ["serve", "--store", store], {
-        detached: true,
-        stdio: "ignore",
-      });
-      child.on("error", (error) => this.notes.log(`Failed to respawn gateway: ${String(error)}`));
-      child.once("spawn", () => {
-        this.notes.log(`Respawned gateway: ${binary} serve --store ${store} (pid ${child.pid})`);
-      });
-      child.unref();
-    } catch (error) {
-      this.notes.log(`Failed to respawn gateway: ${String(error)}`);
-    }
-  }
-
-  spawnRpc(sessionId: string | undefined, cwd: string, cursor?: number): ChildProcess | undefined {
-    const binary = this.resolve();
-    if (!binary) return undefined;
-    const args = sessionId ? ["rpc", sessionId] : ["rpc"];
-    if (sessionId && cursor !== undefined) args.push("--cursor", String(cursor));
-    return spawn(binary, args, {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+    execFile(binary, ["web"], { timeout: 30000 }, (error) => {
+      if (error) this.notes.log(`nodecode web failed: ${error.message.split("\n")[0]}`);
     });
+  }
+
+  /** Run the official installer in a terminal the operator can watch. */
+  installInTerminal(): void {
+    const terminal = vscode.window.createTerminal({
+      name: "Install Nodecode",
+      ...(process.platform === "win32" ? { shellPath: "powershell.exe" } : {}),
+    });
+    terminal.show();
+    terminal.sendText(installCommand());
   }
 }

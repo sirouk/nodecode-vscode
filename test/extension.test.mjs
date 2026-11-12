@@ -1,97 +1,119 @@
-import test from 'node:test';
+// Activation, end to end and off the real machine: a fake home whose owner
+// file points at a stub gateway lets the test walk the same three gates the
+// operator meets — not installed, web cell off, ready — and check what the
+// view is handed at each one.
+
+import test,{after} from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import {createRequire,Module} from 'node:module';
-const require=createRequire(import.meta.url),load=Module._load;
-let callbacks,api;
-const terminalFailure=new Error('terminal unavailable');
-const uri=fsPath=>({scheme:'file',fsPath,toString:()=>fsPath});
+
+const home=fs.mkdtempSync(path.join(os.tmpdir(),'nodecode-ext-'));
+process.env.NODECODE_HOME=home;
+const messages=[],panels=[],status=[],providers=new Map(),commands=new Map(),executed=[],copied=[];
+let pageServes=false;
+
+class EventEmitter{constructor(){this.listeners=new Set();}event=(listener)=>{this.listeners.add(listener);return {dispose:()=>this.listeners.delete(listener)};};fire(value){for(const listener of this.listeners)listener(value);}dispose(){this.listeners.clear();}}
+
 const disposable=()=>({dispose(){}});
 const vscode={
-  StatusBarAlignment:{Left:1},MarkdownString:class{},
+  StatusBarAlignment:{Left:1},ProgressLocation:{Notification:15},ViewColumn:{Active:-1},
+  MarkdownString:class{constructor(value){this.value=value;}},
+  EventEmitter,
+  Uri:{parse:(value)=>({toString:()=>value,fsPath:value}),file:(value)=>({toString:()=>value,fsPath:value})},
+  env:{asExternalUri:async(uri)=>uri,openExternal:async()=>true,clipboard:{writeText:async(text)=>{copied.push(text);}}},
+  workspace:{getConfiguration:()=>({get:(key)=>key==='cliPath'?'/bin/echo':undefined}),workspaceFolders:undefined},
+  commands:{
+    registerCommand:(id,run)=>{commands.set(id,run);return disposable();},
+    executeCommand:async(id,...args)=>{executed.push(id);return commands.get(id)?.(...args);},
+  },
   window:{
-    createStatusBarItem:()=>({show(){},dispose(){}}),
-    registerWebviewViewProvider:()=>disposable(),
-    showQuickPick:async rows=>rows[1],
-    terminals:[],createTerminal:()=>{throw terminalFailure;},
+    createStatusBarItem:()=>{const item={show(){item.shown=true;},dispose(){}};status.push(item);return item;},
+    registerWebviewViewProvider:(id,provider,options)=>{providers.set(id,{provider,options});return disposable();},
+    showInformationMessage:async(message,...actions)=>{messages.push({message,actions});return undefined;},
+    showWarningMessage:async()=>undefined,
+    withProgress:async(_options,task)=>task(),
+    createTerminal:(options)=>({options,lines:[],show(){},sendText(text){this.lines.push(text);}}),
+    createWebviewPanel:(_type,title)=>{const panel={title,webview:{html:'',options:{},cspSource:'vscode-webview://test',onDidReceiveMessage(){return disposable();}},onDidDispose(){return disposable();},dispose(){}};panels.push(panel);return panel;},
   },
-  workspace:{workspaceFolders:[{uri:uri('/workspace')}]},
-  commands:{registerCommand:()=>disposable()},
 };
-class Api{constructor(){api=this;}async sessions(){return [];}}
-const mocks={
-  './api':{NodecodeApi:Api},
-  './cli':{NodecodeCli:class{version='test';resolve(){return '/nodecode';}async ensureReady(){return 'ok';}}},
-  './discovery':{
-    Notifications:class{log(){}},
-    NodecodeDiscovery:class{watch(){}onDidChange(){return disposable();}current(){return null;}},
-  },
-  './panel':{SessionPanel:{},SessionSidebar:class{constructor(_uri,actions){callbacks=actions;}}},
-  './sessions':{registerSessions(){}},
-};
-Module._load=function(name,parent,...args){
-  if(name==='vscode')return vscode;
-  if(parent?.filename.endsWith('/out/extension.js')&&mocks[name])return mocks[name];
-  return load.call(this,name,parent,...args);
-};
+
+const load=Module._load;
+Module._load=function(name,...args){return name==='vscode'?vscode:load.call(this,name,...args);};
+
+const gatewayServer=http.createServer((request,response)=>{
+  if(request.url==='/api/gateway/target'){response.writeHead(200,{'content-type':'application/json'});response.end('{}');return;}
+  if(request.url==='/web/'&&pageServes){response.writeHead(200,{'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'self'; frame-ancestors 'none'"});response.end('<html>the gateway page</html>');return;}
+  response.writeHead(404,{'content-type':'text/plain'});response.end('not found');
+});
+
+const require=createRequire(import.meta.url);
 const {activate}=require('../out/extension.js');
 Module._load=load;
-const state={get:(_key,fallback)=>fallback,update:async()=>{}};
-activate({subscriptions:[],globalState:state,workspaceState:state,extensionUri:uri('/extension')});
 
-test('native panel model picker preserves provider identity and supports cancellation',async()=>{
-  const calls=[];
-  api.models=async()=>[
-    {provider:'alpha',model:'shared',display_name:'Shared model'},
-    {provider:'beta',model:'shared',display_name:'Shared model'},
-  ];
-  api.setModel=async(...args)=>calls.push(args);
-  await callbacks.pickModel('session',{});
-  assert.deepEqual(calls,[['session','beta','shared']]);
-  vscode.window.showQuickPick=async()=>undefined;
-  await callbacks.pickModel('session',{});
-  assert.equal(calls.length,1);
+const context={subscriptions:[],globalState:{get:(_k,fallback)=>fallback,update:async()=>{}},workspaceState:{get:(_k,fallback)=>fallback,update:async()=>{}},extensionUri:vscode.Uri.file(home)};
+
+const listening=new Promise((resolve)=>gatewayServer.listen(0,'127.0.0.1',resolve));
+const settle=()=>new Promise((resolve)=>setTimeout(resolve,150));
+
+test('activation registers the view and every command it publishes',async()=>{
+  await listening;
+  fs.writeFileSync(path.join(home,'history.db.owner'),JSON.stringify({pid:1,port:gatewayServer.address().port}));
+  fs.writeFileSync(path.join(home,'operator-token'),'token-abc\n');
+  activate(context);
+  await settle();
+  assert.ok(providers.get('nodecodeWeb'),'the sidebar view is registered');
+  assert.equal(providers.get('nodecodeWeb').options.webviewOptions.retainContextWhenHidden,true);
+  const published=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).contributes.commands.map((entry)=>entry.command);
+  assert.deepEqual([...commands.keys()].sort(),published.sort(),'every contributed command exists, and none is missing');
+  assert.ok(status.length>0&&status[0].shown,'the status bar item is shown');
 });
 
-test('model options count the complete native context, including cache reads and writes',async()=>{
-  api.models=async()=>({models:[{provider:'test',model:'model',context:32000}]});
-  api.target=async()=>({provider:'test',model:'model',efforts:[]});
-  api.auxiliaryModel=api.deciderModel=api.failover=async()=>({});
-  for(const [context_usage,used] of [
-    [{input:1000,cached:2000,cache_write:300},3300],
-    [{input:1000},1000],
-    [{cached:2000},2000],
-    [{},0],
-    [undefined,0],
-  ]){
-    api.header=async()=>({session_id:'session',context_usage});
-    assert.deepEqual((await callbacks.modelOptions('session')).context,{used,limit:32000});
-  }
+test('a gateway without the web cell asks for the web cell, and says so in the view',async()=>{
+  await settle();
+  const ask=messages.find((entry)=>entry.message.includes('web cell is off'));
+  assert.ok(ask,'the operator is asked once, by name');
+  assert.ok(ask.actions.includes('Turn on the web cell'),'and offered the step that fixes it');
 });
 
-test('native action callbacks return their asynchronous failures to the caller',async t=>{
-  for(const [callback,method] of [
-    ['forkSession','forkSession'],['exportSession','exportJsonl'],
-    ['showCheckpointHistory','checkpoints'],['pickModel','models'],['pickEffort','target'],
-  ])await t.test(callback,async()=>{
-    const failure=new Error(`${method} unavailable`);
-    api[method]=async()=>{throw failure;};
-    const result=callbacks[callback]('session',{});
-    assert.equal(typeof result?.then,'function','callback must return its work');
-    await assert.rejects(result,error=>error===failure);
-  });
-  await assert.rejects(callbacks.revealTerminal('session'),error=>error===terminalFailure);
+test('the view shows the setup step, then frames the page once the cell is on',async()=>{
+  const view=providers.get('nodecodeWeb').provider;
+  const surface={webview:{html:'',options:{},cspSource:'vscode-webview://test',onDidReceiveMessage:()=>disposable()},onDidDispose:()=>disposable()};
+  view.resolveWebviewView(surface);
+  await settle();
+  assert.match(surface.webview.html,/data-action="enable"/,'the view offers to turn the cell on');
+  assert.doesNotMatch(surface.webview.html,/<iframe/,'and frames nothing yet');
+
+  await commands.get('nodecode.enableWebCell')();
+  await settle();
+  pageServes=true;
+  await commands.get('nodecode.reload')();
+  await settle();
+  assert.match(surface.webview.html,/<iframe id="page" src="http:\/\/127\.0\.0\.1:\d+\/web\/#t=token-abc"/,'the gateway page is framed');
+  assert.match(surface.webview.html,/frame-src http:\/\/127\.0\.0\.1:\d+;/,'and only that origin may be framed');
 });
 
+test('the editor tab is the same page, and the browser link is the gateway link',async()=>{
+  const view=providers.get('nodecodeWeb').provider;
+  await view.openInEditor();
+  await settle();
+  assert.equal(panels.length,1);
+  assert.match(panels[0].webview.html,/<iframe/,'the editor tab frames the same page');
+  await commands.get('nodecode.copyLink')();
+  assert.match(copied.at(-1),/^http:\/\/127\.0\.0\.1:\d+\/web\/#t=token-abc$/);
+  assert.ok(messages.some((entry)=>entry.message.includes('operator token')),'and says what it just copied');
+});
 
-test('native checkpoint picker reports a missing or rejected acknowledgement',async()=>{
-  api.checkpoints=async()=>[{turn_id:'recorded-turn',prompt:'Restore point'}];
-  vscode.window.showQuickPick=async rows=>rows[0];
-  for(const result of [undefined,{status:'rejected',message:'Checkpoint restore refused'},{status:'accepted'}]){
-    const controller={navigateCheckpoint:async options=>{
-      assert.deepEqual(options,{targetTurnId:'recorded-turn'});return result;
-    }};
-    const action=callbacks.showCheckpointHistory('session',controller);
-    if(result?.status==='accepted')await action;
-    else await assert.rejects(action,result?/Checkpoint restore refused/:/not connected/i);
-  }
+test('opening the view focuses it',async()=>{
+  await commands.get('nodecode.open')();
+  assert.equal(executed.at(-1),'nodecodeWeb.focus');
+});
+
+after(()=>{
+  for(const subscription of context.subscriptions)subscription?.dispose?.();
+  gatewayServer.close();
+  fs.rmSync(home,{recursive:true,force:true});
 });

@@ -1,33 +1,40 @@
-// Parity probe for the nodecode CLI IPC and HTTP surfaces this extension
-// builds on. Run with `npm run parity` (itself run from CI). Exercises:
-//   1. nodecode --version (any form) prints a version
-//   2. `nodecode --help` (or -h) renders and includes a command
-//   3. `nodecode rpc --help` (or -h) resolves (spawned rpc exits after help)
-//   4. If a gateway is reachable (NODECODE_GATEWAY_URL), GET /api/gateway/
-//      paths respond with JSON and CORS permits the extension's host use.
-// Non-zero exit on any hard failure; unavailable pieces print skip notes.
+// Parity probe: the nodecode surfaces this extension stands on, checked
+// against the CLI and the gateway on this machine. Run by `npm test`, and by
+// release.sh before anything is packaged.
+//   1. nodecode --version prints a version
+//   2. nodecode help lists the verbs the extension runs: web, add, gateway
+//   3. nodecode web --print prints the page link
+//   4. the link's token is the home's operator token
+//   5. the page is served with frame-ancestors 'none' — the reason for the proxy
+//   6. through the proxy: the page arrives framable, its assets load, the token
+//      is accepted, and the page's /gateway socket upgrades
+// Non-zero exit on any hard failure; an absent gateway skips its checks.
 
 import { spawn } from "node:child_process";
-import http from "node:http";
 import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 
+const require = createRequire(import.meta.url);
 const BIN = process.env.NODECODE_BIN ?? "nodecode";
-const nodecodeHome = process.env.NODECODE_HOME || path.join(os.homedir(), ".nodecode");
+const home = process.env.NODECODE_HOME || path.join(os.homedir(), ".nodecode");
 let owner;
 let token = "";
-try { owner = JSON.parse(fs.readFileSync(path.join(nodecodeHome, "history.db.owner"), "utf8")); } catch {}
-try { token = fs.readFileSync(path.join(nodecodeHome, "operator-token"), "utf8").trim(); } catch {}
-const GATEWAY = process.env.NODECODE_GATEWAY_URL ?? (owner?.port ? `http://127.0.0.1:${owner.port}` : "http://127.0.0.1:3918");
+try { owner = JSON.parse(fs.readFileSync(path.join(home, "history.db.owner"), "utf8")); } catch {}
+try { token = fs.readFileSync(path.join(home, "operator-token"), "utf8").trim(); } catch {}
+const GATEWAY = process.env.NODECODE_GATEWAY_URL ?? (owner?.port ? `http://127.0.0.1:${owner.port}` : undefined);
 
 const results = [];
 const record = (name, pass, detail) => {
   results.push({ name, pass, detail });
   console.log(`${pass ? "ok  " : "FAIL"} ${name}${detail !== undefined ? ` — ${detail}` : ""}`);
 };
+const skip = (name, why) => console.log(`skip ${name} — ${why}`);
 
-const run = (args, timeoutMs = 20000) =>
+const run = (args, timeoutMs = 25000) =>
   new Promise((resolve) => {
     const child = spawn(BIN, args, { shell: process.platform === "win32" });
     let stdout = "";
@@ -36,77 +43,103 @@ const run = (args, timeoutMs = 20000) =>
     child.stderr.on("data", (chunk) => (stderr += chunk));
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      resolve({ spawned: true, timedOut: true, stdout, stderr, code: null, signal: "SIGKILL" });
+      resolve({ spawned: true, timedOut: true, stdout, stderr, code: null });
     }, timeoutMs);
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ spawned: false, error: err.code ?? String(err), stdout, stderr, code: null, signal: null });
+      resolve({ spawned: false, error: err.code ?? String(err), stdout, stderr, code: null });
     });
-    child.on("close", (code, signal) => {
+    child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ spawned: true, timedOut: false, stdout, stderr, code, signal });
+      resolve({ spawned: true, timedOut: false, stdout, stderr, code });
     });
-  });
-
-const httpGet = (pathStr, timeoutMs = 5000) =>
-  new Promise((resolve) => {
-    const req = http.get(`${GATEWAY}/api/gateway${pathStr}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} }, (res) => {
-      let body = "";
-      res.on("data", (chunk) => (body += chunk));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body, json: undefined }));
-    });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error("timeout")));
-    req.on("error", (err) => resolve({ status: 0, body: "", json: undefined, error: String(err) }));
   });
 
 const version = await run(["--version"]);
-const binaryMissing = version.spawned === false && version.error === "ENOENT";
-if (binaryMissing) {
-  console.log("skip CLI probes - nodecode binary not found on PATH (install nodecode, or set NODECODE_BIN)");
+if (!version.spawned) {
+  console.log(`FAIL nodecode --version — cannot run ${BIN} (${version.error})`);
+  console.log("\nnodecode is not installed here; the extension is built for machines that have it.");
+  process.exit(1);
+}
+record("nodecode --version prints a version", version.code === 0 && /^nodecode \S+/.test(version.stdout.trim()), version.stdout.trim() || version.stderr.trim());
+
+const help = await run(["help"]);
+const verbs = ["web", "add", "gateway", "rpc"];
+record("nodecode help lists the verbs this extension runs", verbs.every((verb) => new RegExp(`\\b${verb}\\b`).test(help.stdout)), verbs.join(", "));
+
+const webHelp = await run(["help", "web"]);
+record("nodecode help web explains --print", /--print/.test(webHelp.stdout) && /web cell/.test(webHelp.stdout), "prints the link, and names the cell it needs");
+
+const printed = await run(["web", "--print"]);
+const link = printed.stdout.split("\n").map((line) => line.trim()).find((line) => /^http:\/\/127\.0\.0\.1:\d+\/web\/#t=/.test(line));
+
+if (!GATEWAY) {
+  skip("the gateway's own page", "no gateway is running in this home");
+} else if (!link) {
+  record("nodecode web --print prints the page link", false, printed.stderr.trim() || "no link printed");
 } else {
-  const text = `${version.stdout}${version.stderr}`.trim();
-  const semver = /\d+\.\d+\.\d+/.test(text);
-  record(
-    "cli --version prints a version",
-    version.spawned === true && !version.timedOut && semver && (version.code === 0 || version.code === null),
-    text.split(/\r?\n/)[0] || `exit ${version.code}`,
-  );
+  record("nodecode web --print prints the page link", true, link.replace(/#t=.*$/, "#t=…"));
+  record("the link carries this home's operator token", link.split("#t=")[1] === token);
 
-  const help = await run(["--help"]);
-  const helpText = `${help.stdout}${help.stderr}`;
-  record("cli --help renders and includes at least one command", Boolean(helpText.match(/[a-z]{3,}[ -][a-z-]{2,}/i)), "");
+  const direct = await fetch(`${GATEWAY}/web/`);
+  const csp = direct.headers.get("content-security-policy") ?? "";
+  record("the page is served, and refuses to be framed", direct.status === 200 && /frame-ancestors 'none'/.test(csp), `HTTP ${direct.status}`);
+  record("the page is self-contained", /script-src 'self'/.test(csp) && /connect-src 'self'/.test(csp));
 
-  const rpcHelp = await run(["rpc", "--help"]);
-  const rpcText = `${rpcHelp.stdout}${rpcHelp.stderr}`;
-  record(
-    "rpc --help resolves on the CLI",
-    rpcHelp.spawned === true && !rpcHelp.timedOut && !/no such method|unknown command/i.test(rpcText),
-    rpcText.split(/\r?\n/)[0] ?? "",
-  );
-}
-
-const ping = await httpGet("/sessions");
-{
-  let json;
+  const { startGatewayProxy } = require("../out/proxy.js");
+  const proxy = await startGatewayProxy({ host: "127.0.0.1", port: owner?.port ?? Number(new URL(GATEWAY).port) });
   try {
-    json = JSON.parse(ping.body);
-  } catch {
-    json = undefined;
-  }
-  const up = ping.status >= 200 && ping.status < 300 && Array.isArray(json);
-  if (up) {
-    record(
-      "/api/gateway/sessions returns JSON when a gateway is up",
-      true,
-      `http ${ping.status}, ${Array.isArray(json) ? `${json.length} rows` : typeof json}`,
-    );
-  } else if (owner?.port || process.env.NODECODE_GATEWAY_URL) {
-    record("discovered gateway sessions endpoint is accessible", false, `http ${ping.status}${ping.error ? `, ${ping.error}` : ""}`);
-  } else {
-    console.log(`skip gateway probe — no nodecode daemon discovered at ${GATEWAY}`);
+    const framed = await fetch(`${proxy.origin}/web/`);
+    const framedCsp = framed.headers.get("content-security-policy") ?? "";
+    record("through the proxy the page may be framed", framed.status === 200 && !/frame-ancestors/.test(framedCsp), `HTTP ${framed.status}`);
+    const script = await fetch(`${proxy.origin}/web/app.js`);
+    record("the page's own client loads through the proxy", script.status === 200 && (await script.text()).length > 10000);
+    const tasks = await fetch(`${proxy.origin}/api/web/tasks`, { headers: { authorization: `Bearer ${token}` } });
+    record("the operator token is accepted through the proxy", tasks.status === 200, `HTTP ${tasks.status}`);
+    const socket = await new Promise((resolve) => {
+      const client = net.connect(proxy.port, "127.0.0.1", () => {
+        client.write(`GET /gateway HTTP/1.1\r\nHost: 127.0.0.1:${proxy.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: http://127.0.0.1:${proxy.port}\r\n\r\n`);
+      });
+      let buffer = "";
+      client.on("data", (chunk) => {
+        buffer += chunk.toString("latin1");
+        if (buffer.includes("\r\n\r\n")) {
+          client.destroy();
+          resolve(buffer.split("\r\n")[0]);
+        }
+      });
+      client.on("error", (error) => resolve(`error ${error.message}`));
+      setTimeout(() => {
+        client.destroy();
+        resolve("no answer");
+      }, 5000);
+    });
+    record("the page's socket opens through the proxy", /101/.test(socket), socket);
+
+    const foreign = await new Promise((resolve) => {
+      const client = net.connect(Number(new URL(GATEWAY).port), "127.0.0.1", () => {
+        client.write(`GET /gateway HTTP/1.1\r\nHost: 127.0.0.1:${new URL(GATEWAY).port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: vscode-webview://panel\r\n\r\n`);
+      });
+      let buffer = "";
+      client.on("data", (chunk) => {
+        buffer += chunk.toString("latin1");
+        if (buffer.includes("\r\n\r\n")) {
+          client.destroy();
+          resolve(buffer.split("\r\n")[0]);
+        }
+      });
+      client.on("error", (error) => resolve(`error ${error.message}`));
+      setTimeout(() => {
+        client.destroy();
+        resolve("no answer");
+      }, 5000);
+    });
+    record("a foreign origin is refused, which is why the view frames loopback", /403/.test(foreign), foreign);
+  } finally {
+    proxy.dispose();
   }
 }
 
-const failures = results.filter((r) => !r.pass).length;
-console.log(`${results.length - failures}/${results.length} probes passed`);
-process.exitCode = failures > 0 ? 1 : 0;
+const failures = results.filter((result) => !result.pass);
+console.log(`\n${results.length - failures.length}/${results.length} probes passed`);
+process.exit(failures.length === 0 ? 0 : 1);

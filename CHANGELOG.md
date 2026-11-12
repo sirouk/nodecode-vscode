@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3]
+
+### Added
+
+- **An end-to-end suite that runs the real extension against the real gateway.** It activates the extension as VS Code does, lets it find nodecode, its gateway and the web cell, then fetches exactly what the view framed: the page answers, its socket opens through the proxy, the proxy is what made it framable while the gateway itself still refuses, the editor tab frames the same page — and, the point of it, five polls in a row write nothing and activation starts exactly one process. It skips cleanly on a machine with no gateway, so it gates a release without needing one.
+
 ## [0.2.2]
 
 ### Fixed

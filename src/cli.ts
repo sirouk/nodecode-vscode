@@ -10,7 +10,6 @@ import * as vscode from "vscode";
 import { NodecodeDiscovery, Notifications } from "./discovery";
 
 export const NODECODE_CLI_UNKNOWN_VERSION = "unknown";
-export const NODECODE_SITE_URL = "https://nodecode.ai";
 export const NODECODE_DOCS_URL = "https://nodecode.ai/docs";
 export const NODECODE_INSTALL_URL = "https://nodecode.ai/install.sh";
 export const NODECODE_INSTALL_COMMAND = "curl -fsSL https://nodecode.ai/install.sh | sh";

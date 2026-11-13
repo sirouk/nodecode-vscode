@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The operator token never reaches the output channel.** A CLI failure was logged exactly as the CLI wrote it; a message that quoted the bearer token is now redacted there too, not only in the dialog.
+
 ## [0.2.5]
 
 ### Fixed

@@ -210,11 +210,13 @@ export class Gateway {
    */
   private report(what: string, result: CommandResult): void {
     if (result.code === 0) return;
-    this.notes.log(`${what} failed: ${(result.stderr || result.stdout).trim().split("\n")[0] || `exit ${result.code}`}`);
-    // The gateway's own words, minus the operator token if it appears in them.
-    const token = this.discovery.current()?.token;
+    // The gateway's own words, minus the operator token if they carry it: the
+    // reason goes to a dialog and to the output channel, and neither is a place
+    // for a bearer token.
     const spoken = (result.stderr || result.stdout).trim().split("\n")[0] || `exit ${result.code}`;
+    const token = this.discovery.current()?.token;
     const reason = token ? spoken.split(token).join("<token>") : spoken;
+    this.notes.log(`${what} failed: ${reason}`);
     void vscode.window.showErrorMessage(`Nodecode: ${what} failed — ${reason}`);
   }
 

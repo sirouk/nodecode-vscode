@@ -2,6 +2,7 @@
 // installed, its gateway is up and the web cell is on, the same view says what
 // is missing and offers the one step that fixes it.
 
+import * as crypto from "crypto";
 import * as vscode from "vscode";
 
 import { Gateway, GatewayState, GatewayStatus } from "./gateway";
@@ -28,7 +29,7 @@ const ACTIONS: Record<string, string> = {
   recheck: "Check again",
 };
 
-function buttons(status: GatewayStatus, working: boolean): string {
+function buttons(status: GatewayStatus): string {
   const actions: string[] = [];
   if (status.state === "missing-cli" || status.state === "unusable-cli") actions.push("install");
   if (status.state === "gateway-down") actions.push("start");
@@ -36,15 +37,14 @@ function buttons(status: GatewayStatus, working: boolean): string {
   actions.push("recheck");
   const rows = actions
     .map(
-      (action, index) =>
-        `<button class="action${index === 0 ? " primary" : ""}" data-action="${action}"${working ? " disabled" : ""}>${escapeHtml(ACTIONS[action])}</button>`,
+      (action, index) => `<button class="action${index === 0 ? " primary" : ""}" data-action="${action}">${escapeHtml(ACTIONS[action])}</button>`,
     )
     .join("");
-  return `<div class="actions">${rows}<button class="action link" data-action="docs"${working ? " disabled" : ""}>Read the docs</button></div>`;
+  return `<div class="actions">${rows}<button class="action link" data-action="docs">Read the docs</button></div>`;
 }
 
 /** One page of HTML for one state of the extension. */
-export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonce: string; cspSource: string; working?: string }): string {
+export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonce: string; working?: string }): string {
   const { status, frame, nonce } = options;
   const frameSource = frame ? frame.origin : "http://127.0.0.1:*";
   const style = `
@@ -58,6 +58,7 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       code { display: block; font-family: var(--vscode-editor-font-family); font-size: 11px; line-height: 1.6;
              background: var(--vscode-textCodeBlock-background, rgba(127,127,127,.12)); border-radius: 4px; padding: 8px 10px;
              overflow-x: auto; white-space: pre; }
+      p code { display: inline; padding: 1px 4px; white-space: normal; }
       .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
       .action { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 3px; cursor: pointer;
                 color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); border: 1px solid transparent; }
@@ -65,7 +66,6 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       .action.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
       .action.primary:hover { background: var(--vscode-button-hoverBackground); }
       .action.link { background: none; color: var(--vscode-textLink-foreground); padding-left: 2px; }
-      .action[disabled] { opacity: .5; cursor: default; }
       .meta { font-size: 11px; line-height: 1.5; opacity: .55; }
     `;
 
@@ -91,7 +91,7 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       }
       ${status.state === "gateway-down" ? `<p>The gateway is the background process the page talks to. Starting it here also keeps it running at login.</p>` : ""}
       ${status.state === "web-cell-off" ? `<p>The web cell ships with Nodecode and serves the page at <code class="inline">/web/</code>. Turning it on adds it to your cells folder, where Nodecode keeps it up to date.</p>` : ""}
-      ${buttons(status, false)}
+      ${buttons(status)}
       <div class="meta">${escapeHtml(status.binary ?? "nodecode")}${status.version && status.version !== "unknown" ? ` · ${escapeHtml(status.version)}` : ""} · <a href="${escapeHtml(status.docsUrl)}">docs</a></div>
     </div>`;
 
@@ -120,10 +120,10 @@ interface Surface {
 const READY_POLL_MS = 20000;
 const SETUP_POLL_MS = 5000;
 
-/** Keeps every surface (sidebar view, editor tabs) on the same page. */
+/** Keeps every surface (sidebar view, editor tab) on the same page. */
 export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly surfaces = new Set<Surface>();
-  private readonly panels = new Set<vscode.WebviewPanel>();
+  private panel: vscode.WebviewPanel | undefined;
   private timer: NodeJS.Timeout | undefined;
   private disposed = false;
   private state: GatewayState | undefined;
@@ -147,20 +147,24 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     void this.render(surface);
   }
 
-  /** A second copy of the same page, in an editor tab: room for the wide layout. */
+  /** The same page in an editor tab, where there is room for the wide layout. */
   async openInEditor(): Promise<void> {
+    if (this.panel) {
+      this.panel.reveal(undefined, false);
+      return;
+    }
     const panel = vscode.window.createWebviewPanel("nodecodePage", "Nodecode", vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
     });
+    this.panel = panel;
     const surface: Surface = { webview: panel.webview };
     panel.webview.onDidReceiveMessage((message: { type?: string }) => void this.act(message?.type ?? "", surface));
     panel.onDidDispose(() => {
-      this.panels.delete(panel);
+      if (this.panel === panel) this.panel = undefined;
       this.surfaces.delete(surface);
       if (this.surfaces.size === 0) this.stop();
     });
-    this.panels.add(panel);
     this.surfaces.add(surface);
     this.start();
     await this.render(surface);
@@ -180,7 +184,9 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     this.timer = undefined;
   }
 
-  async refresh(): Promise<void> {
+  /** Bring every surface up to date; forced, the page is written again even when nothing changed. */
+  async refresh(force = false): Promise<void> {
+    if (force) for (const surface of this.surfaces) surface.shown = undefined;
     for (const surface of [...this.surfaces]) await this.render(surface);
   }
 
@@ -195,58 +201,58 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     const status = working ? await this.gateway.status() : frame!.status;
     this.state = status.state;
     const page = frame?.pageUrl && frame?.pageOrigin ? { url: frame.pageUrl, origin: frame.pageOrigin } : undefined;
-    const shown = [working ?? "", status.state, status.message, page?.url ?? "", page?.origin ?? ""].join("\u0000");
+    const shown = [working ?? "", status.state, status.message, page?.url ?? "", page?.origin ?? "", String(frame?.revision ?? "")].join("\u0000");
     if (surface.shown === shown) return;
-    surface.shown = shown;
-    surface.webview.html = renderHtml({ status, frame: page, nonce: nonce(), cspSource: surface.webview.cspSource, working });
-  }
-
-  private async act(action: string, surface: Surface): Promise<void> {
-    switch (action) {
-      case "install":
-        this.gatewayInstall();
-        return;
-      case "docs":
-        void vscode.env.openExternal(vscode.Uri.parse("https://nodecode.ai/docs"));
-        return;
-      case "start": {
-        await this.render(surface, "Starting the gateway…");
-        const status = await this.gateway.startGateway();
-        this.gateway.notify(status);
-        await this.refresh();
-        return;
-      }
-      case "enable": {
-        await this.render(surface, "Turning the web cell on…");
-        const status = await this.gateway.enableWebCell();
-        this.gateway.notify(status);
-        await this.refresh();
-        return;
-      }
-      case "recheck":
-      default:
-        await this.refresh();
-        return;
+    try {
+      surface.webview.html = renderHtml({ status, frame: page, nonce: nonce(), working });
+      surface.shown = shown;
+    } catch (error) {
+      // A view disposed between the check above and this write: the page that
+      // would have been written is gone with it, and the next poll redraws.
+      this.notes.log(`could not write the view: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  private gatewayInstall(): void {
-    this.notes.log("install requested from the view");
-    this.actions.install();
+  private async act(action: string, surface: Surface): Promise<void> {
+    try {
+      switch (action) {
+        case "install":
+          this.notes.log("install requested from the view");
+          this.actions.install();
+          return;
+        case "docs":
+          void vscode.env.openExternal(vscode.Uri.parse("https://nodecode.ai/docs"));
+          return;
+        case "start":
+          await this.render(surface, "Starting the gateway…");
+          await this.gateway.startGateway();
+          await this.refresh();
+          return;
+        case "enable":
+          await this.render(surface, "Turning the web cell on…");
+          await this.gateway.enableWebCell();
+          await this.refresh();
+          return;
+        case "recheck":
+        default:
+          await this.refresh();
+          return;
+      }
+    } catch (error) {
+      this.notes.log(`action ${action} failed: ${error instanceof Error ? error.message : String(error)}`);
+      await this.refresh();
+    }
   }
 
   dispose(): void {
     this.disposed = true;
     this.stop();
-    for (const panel of this.panels) panel.dispose();
-    this.panels.clear();
+    this.panel?.dispose();
+    this.panel = undefined;
     this.surfaces.clear();
   }
 }
 
 function nonce(): string {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let text = "";
-  for (let index = 0; index < 24; index += 1) text += alphabet[Math.floor(Math.random() * alphabet.length)];
-  return text;
+  return crypto.randomBytes(18).toString("base64url");
 }

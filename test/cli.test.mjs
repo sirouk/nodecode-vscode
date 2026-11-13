@@ -75,3 +75,38 @@ test('installing runs the official installer in a terminal the operator can watc
   assert.equal(terminals[0].lines[0],installCommand());
   assert.equal(terminals[0].options.name,'Install Nodecode');
 });
+
+test('a Windows command shim is started through cmd, and a native binary is not',()=>{
+  const {spawnPlan}=require('../out/cli.js');
+  assert.deepEqual(spawnPlan('/usr/bin/nodecode',['--version'],'darwin'),{file:'/usr/bin/nodecode',args:['--version']});
+  assert.deepEqual(spawnPlan('C:\\Program Files\\nodecode\\nodecode.exe',['web'],'win32'),{file:'C:\\Program Files\\nodecode\\nodecode.exe',args:['web']});
+  const plan=spawnPlan('C:\\Users\\me\\AppData\\Roaming\\npm\\nodecode.cmd',['web','--print'],'win32','C:\\Windows\\System32\\cmd.exe');
+  assert.equal(plan.file,'C:\\Windows\\System32\\cmd.exe');
+  assert.deepEqual(plan.args.slice(0,3),['/d','/s','/c']);
+  assert.equal(plan.args[3],'""C:\\Users\\me\\AppData\\Roaming\\npm\\nodecode.cmd" "web" "--print""','every part is quoted, and cmd unwraps the outer pair');
+  assert.match(spawnPlan('C:\\x\\nodecode.BAT',[],'win32').args[3],/^""C:\\x\\nodecode\.BAT""$/);
+});
+
+test('the version is read once per binary, and a binary replaced in place is read again',()=>fixture(async root=>{
+  const {readFile}=await import('node:fs/promises');
+  const marker=join(root,'calls');
+  const file=join(root,'nodecode');
+  await writeFile(file,`#!/bin/sh\necho call >> ${marker}\necho nodecode 0.1.14\n`);await chmod(file,0o700);
+  const cli=cliFor(file);
+  assert.equal(cli.readVersion(file),'nodecode 0.1.14');
+  assert.equal(cli.readVersion(file),'nodecode 0.1.14');
+  assert.equal((await readFile(marker,'utf8')).trim().split('\n').length,1,'a poll does not start a process every tick');
+  await writeFile(file,`#!/bin/sh\necho call >> ${marker}\necho nodecode 0.1.15-dev\n`);await chmod(file,0o700);
+  assert.equal(cli.readVersion(file),'nodecode 0.1.15-dev','an update in place is read, not remembered');
+}));
+
+test('a version that could not be read is asked again, so an install is not remembered as broken',()=>fixture(async root=>{
+  const file=join(root,'nodecode');
+  await writeFile(file,'#!/bin/sh\nexit 3\n');await chmod(file,0o700);
+  const cli=cliFor(file);
+  assert.equal(cli.readVersion(file),'unknown');
+  assert.notEqual(cli.versionError(),'');
+  await writeFile(file,'#!/bin/sh\necho nodecode 0.2.0\n');await chmod(file,0o700);
+  assert.equal(cli.readVersion(file),'nodecode 0.2.0');
+  assert.equal(cli.versionError(),'','the failure does not outlive the binary that caused it');
+}));

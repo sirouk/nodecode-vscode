@@ -44,7 +44,7 @@ The view's title bar carries **Reload**, **Open in an Editor Tab** and **Open in
 
 Nodecode's page is deliberately unframable: the web cell serves it with `Content-Security-Policy: frame-ancestors 'none'`, and the gateway refuses a socket whose `Origin` is not the same loopback authority it is asked under. Both are good defaults, so this extension does not ask Nodecode to relax them.
 
-Instead it starts a small proxy on `127.0.0.1` in front of the gateway's port and changes exactly one thing on the way through: it drops that single `frame-ancestors` directive. The page, its assets, its requests, the operator token in its URL fragment, and the `/gateway` socket all pass through untouched. The webview frames the proxy's loopback origin, so the page runs as itself, on its own origin, with its own CSP — and when the web cell changes, this extension shows the change the moment it ships, because it is showing the cell.
+Instead it starts a small proxy on `127.0.0.1` in front of the gateway's port and changes exactly one thing on the way through: it drops that single `frame-ancestors` directive. The page, its assets, its requests, the operator token in its URL fragment, and the `/gateway` socket all pass through untouched. Because that proxy is the one listener that will frame the page, it answers the page and nothing else: a request or a socket that names another origin is refused before it reaches the gateway. The webview frames the proxy's loopback origin, so the page runs as itself, on its own origin, with its own CSP — and when the web cell changes, this extension shows the change the moment it ships, because it is showing the cell.
 
 Nothing about a session, a model, a checkpoint or a setting is modelled here. The extension knows four facts (CLI path, gateway port, operator token, whether `/web/` answers) and one trick (lifting the framing refusal).
 
@@ -53,6 +53,7 @@ The operator token is read from `~/.nodecode/operator-token` and placed in the f
 ## Requirements and caveats
 
 - **Untrusted and virtual workspaces are supported:** the extension reads only `~/.nodecode` (port, token) and never touches workspace files.
+- **Windows:** the installer puts the CLI under `%LOCALAPPDATA%\Programs\nodecode\current`, which the extension finds without a PATH entry; an npm-installed `nodecode.cmd` is started through `cmd`, which Node requires.
 - **Remote (SSH, WSL, dev containers):** the gateway runs on the remote host, and the frame is resolved through VS Code's port forwarding (`vscode.env.asExternalUri`). Loopback-only setups work; a gateway reachable another way does not yet.
 - **Profiles:** the extension follows `NODECODE_HOME` and the home the CLI reports. Multiple profiles are not switched between inside the view; run `nodecode -p NAME web` for another home.
 
@@ -65,7 +66,7 @@ npm test            # unit tests, the activation walk, and the CLI/gateway parit
 npm run package     # nodecode-vscode-<version>.vsix
 ```
 
-`npm test` skips the gateway probes when none is running, so it stays green on a machine that has not started Nodecode. `test/live-gateway.test.mjs` and `test/parity.mjs` exercise the real thing: the page served, framing lifted, assets loaded, the token accepted, the page's socket opened through the proxy — and a foreign origin refused.
+`npm test` skips the gateway probes when none is running, so it stays green on a machine that has not started Nodecode. The suites also walk the recovery paths rather than the happy one: a gateway that moves port or restarts on the same one, a rotated operator token, a proxy that stopped, two surfaces framing at once, and a request from a foreign origin. `test/live-gateway.test.mjs` and `test/parity.mjs` exercise the real thing: the page served, framing lifted, assets loaded, the token accepted, the page's socket opened through the proxy — and a foreign origin refused.
 
 ## Publishing
 

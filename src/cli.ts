@@ -66,10 +66,27 @@ export function resolveCliBinary(
   return undefined;
 }
 
+/**
+ * What to start, and with what: an npm-installed CLI is a `.cmd` shim on
+ * Windows, and Node refuses to start one directly (EINVAL). Quoting every part
+ * and letting `/s` unwrap the outer pair is the one form cmd hands the shim
+ * intact.
+ */
+export function spawnPlan(
+  binary: string,
+  args: string[],
+  platform: string = process.platform,
+  comspec: string = process.env.ComSpec || "cmd.exe",
+): { file: string; args: string[] } {
+  if (platform !== "win32" || !/\.(cmd|bat)$/i.test(binary)) return { file: binary, args };
+  const line = [binary, ...args].map((part) => `"${part.replace(/"/g, '""')}"`).join(" ");
+  return { file: comspec, args: ["/d", "/s", "/c", `"${line}"`] };
+}
+
 export class NodecodeCli {
   version: string = NODECODE_CLI_UNKNOWN_VERSION;
   private versionFailure = "";
-  private versionBinary: string | undefined;
+  private versionKey: string | undefined;
 
   constructor(
     private readonly discovery: NodecodeDiscovery,
@@ -84,18 +101,20 @@ export class NodecodeCli {
     return resolveCliBinary(this.configuredPath());
   }
 
-  /** Read `nodecode --version`; a failure leaves version unknown and its reason set. */
   /**
-   * Read `nodecode --version`, cached per binary: the view's poll cannot afford a
-   * process on every tick, and the version only changes when the binary does. A
-   * failed read is not cached, so the screen after an install keeps retrying.
+   * Read `nodecode --version`, cached per binary *as it stands on disk*: the
+   * view's poll cannot afford a process on every tick, and `nodecode update`
+   * replaces the binary in place, so the cache key carries its mtime and size.
+   * A failed read is never cached, so the screen after an install keeps trying.
    */
   readVersion(binary: string): string {
-    if (this.versionBinary === binary && !this.versionFailure) return this.version;
-    this.versionBinary = binary;
+    const key = versionKey(binary);
+    if (this.versionKey === key) return this.version;
+    this.versionKey = key;
     this.versionFailure = "";
+    const plan = spawnPlan(binary, ["--version"]);
     try {
-      const out = execFileSync(binary, ["--version"], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+      const out = execFileSync(plan.file, plan.args, { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] }).trim();
       this.version = out || NODECODE_CLI_UNKNOWN_VERSION;
     } catch (error) {
       this.version = NODECODE_CLI_UNKNOWN_VERSION;
@@ -117,9 +136,10 @@ export class NodecodeCli {
         resolve({ code: -1, stdout: "", stderr: "nodecode is not installed or not on PATH", timedOut: false });
         return;
       }
+      const plan = spawnPlan(binary, args);
       const child = execFile(
-        binary,
-        args,
+        plan.file,
+        plan.args,
         { encoding: "utf8", timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
         (error, stdout, stderr) => {
           const timedOut = (error as { killed?: boolean } | null)?.killed === true;
@@ -162,7 +182,8 @@ export class NodecodeCli {
       void vscode.window.showErrorMessage("Nodecode is not installed — install it first, then try again.");
       return;
     }
-    execFile(binary, ["web"], { timeout: 30000 }, (error) => {
+    const plan = spawnPlan(binary, ["web"]);
+    execFile(plan.file, plan.args, { timeout: 30000 }, (error) => {
       if (error) this.notes.log(`nodecode web failed: ${error.message.split("\n")[0]}`);
     });
   }
@@ -175,5 +196,15 @@ export class NodecodeCli {
     });
     terminal.show();
     terminal.sendText(installCommand());
+  }
+}
+
+/** The binary plus what it looks like now, so replacing it in place re-reads it. */
+function versionKey(binary: string): string {
+  try {
+    const stat = fs.statSync(binary);
+    return `${binary}\u0000${stat.mtimeMs}\u0000${stat.size}`;
+  } catch {
+    return binary;
   }
 }

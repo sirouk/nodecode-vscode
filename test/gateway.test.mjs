@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {createRequire,Module} from 'node:module';
-const require=createRequire(import.meta.url),load=Module._load;
+const require=createRequire(import.meta.url),load=Module._load;const errors=[];
 class EventEmitter{event=()=>({dispose(){}});fire(){}dispose(){}}
 Module._load=function(name,...args){
   if(name!=='vscode')return load.call(this,name,...args);
-  return {EventEmitter,Uri:{parse:(value)=>({toString:()=>value})},env:{asExternalUri:async(uri)=>uri}};
+  return {EventEmitter,Uri:{parse:(value)=>({toString:()=>value})},env:{asExternalUri:async(uri)=>uri},window:{showErrorMessage:async(message)=>{errors.push(message);}}};
 };
 const {Gateway,servesWebPage,pageLink,pageUrl}=require('../out/gateway.js');
 Module._load=load;
@@ -112,4 +112,67 @@ test('a gateway that stopped between the probe and the frame is reported, not fr
   assert.equal(framed.status.state,'gateway-down');
   assert.equal(framed.pageUrl,undefined);
   gateway.dispose();
+});
+
+test('two surfaces framing at once share one proxy',async()=>{
+  const server=http.createServer((_request,response)=>{response.writeHead(200,{'content-type':'text/html'});response.end('<html></html>');});
+  await new Promise((resolve)=>server.listen(0,'127.0.0.1',resolve));
+  const gateway=new Gateway(cliMock(),discoveryMock(endpoint(server.address().port)),notes());
+  try{
+    const [sidebar,editor]=await Promise.all([gateway.frame(),gateway.frame()]);
+    assert.equal(sidebar.pageOrigin,editor.pageOrigin,'the sidebar and the editor tab frame the same origin');
+    const third=await gateway.frame();
+    assert.equal(third.pageOrigin,sidebar.pageOrigin,'and a later frame reuses it rather than starting a second listener');
+  }finally{gateway.dispose();server.close();}
+});
+
+test('a proxy that stopped is replaced, never framed again',async()=>{
+  const server=http.createServer((_request,response)=>{response.writeHead(200,{'content-type':'text/html'});response.end('<html></html>');});
+  await new Promise((resolve)=>server.listen(0,'127.0.0.1',resolve));
+  const gateway=new Gateway(cliMock(),discoveryMock(endpoint(server.address().port)),notes());
+  try{
+    const first=await gateway.frame();
+    gateway.dispose();
+    await new Promise((resolve)=>setTimeout(resolve,50));
+    assert.equal(await fetch(`${first.pageOrigin}/web/`).then(()=>'up').catch(()=>'down'),'down','the old proxy is closed');
+    const second=await gateway.frame();
+    assert.equal(second.status.state,'ready');
+    assert.notEqual(second.pageOrigin,first.pageOrigin,'so the view is handed a live proxy, not a dead one');
+    assert.equal((await fetch(`${second.pageOrigin}/web/`)).status,200);
+  }finally{gateway.dispose();server.close();}
+});
+
+test('a command that failed says why, in the gateway own words',async()=>{
+  errors.length=0;
+  const failing=cliMock({enableWebCell:async()=>({code:3,stdout:'',stderr:'no such cell: nc://web\nsecond line',timedOut:false})});
+  const gateway=new Gateway(failing,discoveryMock(endpoint(50171)),notes());
+  try{
+    await gateway.enableWebCell();
+    assert.equal(errors.length,1,'one message, not a silent no-op');
+    assert.match(errors[0],/turning on the web cell failed/);
+    assert.match(errors[0],/no such cell: nc:\/\/web/);
+    assert.doesNotMatch(errors[0],/second line/,'the first line is the reason');
+  }finally{gateway.dispose();}
+});
+
+test('a command that worked says nothing at all',async()=>{
+  errors.length=0;
+  const gateway=new Gateway(cliMock(),discoveryMock(endpoint(50171)),notes());
+  try{
+    await gateway.startGateway();
+    assert.deepEqual(errors,[],'success is not an error dialog');
+  }finally{gateway.dispose();}
+});
+
+test('a failure that mentions the operator token is shown without it',async()=>{
+  errors.length=0;
+  const failing=cliMock({startGateway:async()=>({code:2,stdout:'',stderr:`refused bearer ${TOKEN} at /api/gateway/on`,timedOut:false})});
+  const gateway=new Gateway(failing,discoveryMock(endpoint(50171)),notes());
+  try{
+    await gateway.startGateway();
+    assert.equal(errors.length,1);
+    assert.doesNotMatch(errors[0],/token-abc/,'the token does not reach a dialog that can be pasted');
+    assert.match(errors[0],/<token>/);
+    assert.match(errors[0],/refused bearer/,'and the rest of the reason still reads');
+  }finally{gateway.dispose();}
 });

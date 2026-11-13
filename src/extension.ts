@@ -32,7 +32,7 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     item.show();
   };
-  context.subscriptions.push(item);
+  context.subscriptions.push(item, notes);
 
   let refreshing: Promise<void> | undefined;
   const refresh = (): Promise<void> => {
@@ -61,7 +61,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ["nodecode.open", () => vscode.commands.executeCommand("nodecodeWeb.focus")],
     ["nodecode.openInEditor", () => view.openInEditor()],
     ["nodecode.openInBrowser", () => cli.openInBrowser()],
-    ["nodecode.reload", () => refresh()],
+    ["nodecode.reload", () => view.refresh(true)],
     ["nodecode.install", () => cli.installInTerminal()],
     [
       "nodecode.startGateway",

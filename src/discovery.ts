@@ -13,8 +13,6 @@ export interface GatewayEndpoint {
   token: string;
   port: number;
   pid: number;
-  /** True when the owner file existed but the gateway did not answer. */
-  restorable: boolean;
 }
 
 interface OwnerFile {
@@ -47,10 +45,6 @@ export class Notifications {
     this.channel().appendLine(this.activationLog.join("\n"));
   }
 
-  activation(): readonly string[] {
-    return this.activationLog;
-  }
-
   dispose(): void {
     this.output?.dispose();
     this.output = undefined;
@@ -59,7 +53,7 @@ export class Notifications {
 
 export class NodecodeDiscovery {
   private lastEndpoint: GatewayEndpoint | null = null;
-  private restorable = false;
+  private changes = 0;
   private probeGeneration = 0;
   private timer: NodeJS.Timeout | undefined;
   private readonly emitter = new vscode.EventEmitter<GatewayEndpoint | null>();
@@ -80,11 +74,12 @@ export class NodecodeDiscovery {
   }
 
   current(): GatewayEndpoint | null {
-    return this.lastEndpoint?.restorable === false ? this.lastEndpoint : this.lastEndpoint;
+    return this.lastEndpoint;
   }
 
-  get canRestore(): boolean {
-    return this.restorable;
+  /** How many times the endpoint has changed; a frame carries it so a restart is framed afresh. */
+  get revision(): number {
+    return this.changes;
   }
 
   private readOwner(): OwnerFile | null {
@@ -109,26 +104,21 @@ export class NodecodeDiscovery {
     const generation = ++this.probeGeneration;
     const owner = this.readOwner();
     if (!owner || typeof owner.port !== "number" || !Number.isInteger(owner.port) || owner.port < 1 || owner.port > 65535) {
-      this.restorable = false;
       this.setEndpoint(null);
       return null;
     }
-    const token = this.readToken();
     const endpoint: GatewayEndpoint = {
       baseUrl: `http://127.0.0.1:${owner.port}`,
-      token,
+      token: this.readToken(),
       port: owner.port,
       pid: typeof owner.pid === "number" ? owner.pid : 0,
-      restorable: true,
     };
     const ok = await this.ping(endpoint);
     if (generation !== this.probeGeneration) return this.lastEndpoint;
     if (ok) {
-      endpoint.restorable = false;
       this.setEndpoint(endpoint);
       return endpoint;
     }
-    this.restorable = true;
     this.setEndpoint(null);
     return null;
   }
@@ -156,12 +146,20 @@ export class NodecodeDiscovery {
     }).catch(() => false);
   }
 
+  /**
+   * Hold the endpoint the page is framed from. A change in the port, in the
+   * operator token or in the gateway's own pid is a change the operator must
+   * see: a rotated token leaves the framed page holding one the gateway no
+   * longer accepts, and a gateway restarted on the same port has left the
+   * framed page talking to a socket that closed.
+   */
   private setEndpoint(next: GatewayEndpoint | null): void {
     const prev = this.lastEndpoint;
-    const changed = (prev?.baseUrl ?? null) !== (next?.baseUrl ?? null);
+    const changed = prev?.baseUrl !== next?.baseUrl || prev?.token !== next?.token || prev?.pid !== next?.pid;
     this.lastEndpoint = next;
-    if (next) this.restorable = false;
-    if (changed) this.emitter.fire(next);
+    if (!changed) return;
+    this.changes += 1;
+    this.emitter.fire(next);
   }
 
   /** Watch the owner + token files and re-probe; call once at activation. */
@@ -169,12 +167,8 @@ export class NodecodeDiscovery {
     void this.probe();
     const onFs = () => void this.probe();
     for (const file of [NodecodeDiscovery.ownerPath(), NodecodeDiscovery.tokenPath()]) {
-      try {
-        fs.watchFile(file, { interval: 2000 }, onFs);
-        context.subscriptions.push({ dispose: () => fs.unwatchFile(file, onFs) });
-      } catch {
-        /* files may not exist yet; polling covers it */
-      }
+      fs.watchFile(file, { interval: 2000 }, onFs);
+      context.subscriptions.push({ dispose: () => fs.unwatchFile(file, onFs) });
     }
     this.timer = setInterval(() => void this.probe(), intervalMs);
     context.subscriptions.push({ dispose: () => clearInterval(this.timer) });
@@ -182,6 +176,7 @@ export class NodecodeDiscovery {
 
   dispose(): void {
     if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
     this.emitter.dispose();
   }
 }

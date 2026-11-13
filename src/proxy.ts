@@ -18,6 +18,8 @@ export interface GatewayProxy {
   /** The origin to frame, e.g. http://127.0.0.1:53117 */
   readonly origin: string;
   readonly port: number;
+  /** False once the server stopped accepting, so a dead proxy is never reused. */
+  listening(): boolean;
   dispose(): void;
 }
 
@@ -41,6 +43,23 @@ export function frameableHeaders(headers: http.IncomingHttpHeaders): http.Outgoi
   return out;
 }
 
+/**
+ * The page came from here, so it may only act here: when a request names an
+ * Origin it must be this host's. A browser sends none for the navigation and
+ * the page's own subresources, but every cross-site fetch and socket does — and
+ * this listener strips the one header that would otherwise stop a page framing
+ * it, so it is not the place to trust one.
+ */
+export function originAllowed(origin: string | string[] | undefined, host: string | undefined): boolean {
+  if (!origin) return true;
+  if (typeof origin !== "string" || !host) return false;
+  try {
+    return new URL(origin).host.toLowerCase() === host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 /** The raw request line and headers to send upstream, verbatim. */
 export function upgradeHead(request: http.IncomingMessage): string {
   const lines = [`${request.method ?? "GET"} ${request.url ?? "/"} HTTP/1.1`];
@@ -54,6 +73,12 @@ export async function startGatewayProxy(
   log: (message: string) => void = () => {},
 ): Promise<GatewayProxy> {
   const server = http.createServer((request, response) => {
+    if (!originAllowed(request.headers.origin, request.headers.host)) {
+      log(`proxy: refused ${request.method} ${request.url} for origin ${String(request.headers.origin)}`);
+      response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+      response.end("the page only answers itself");
+      return;
+    }
     const upstream = http.request(
       {
         host: target.host,
@@ -66,6 +91,7 @@ export async function startGatewayProxy(
         response.writeHead(answer.statusCode ?? 502, frameableHeaders(answer.headers));
         answer.pipe(response);
         answer.on("error", () => response.destroy());
+        response.on("close", () => answer.destroy());
       },
     );
     upstream.on("error", (error) => {
@@ -81,6 +107,12 @@ export async function startGatewayProxy(
   // Origin are the same loopback authority, which is what a browser sends to
   // this proxy, so the handshake rides through unaltered.
   server.on("upgrade", (request, socket, head) => {
+    if (!originAllowed(request.headers.origin, request.headers.host)) {
+      log(`proxy: refused socket for origin ${String(request.headers.origin)}`);
+      socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
     const upstream = net.connect(target.port, target.host, () => {
       upstream.write(upgradeHead(request));
       if (head.length > 0) upstream.write(head);
@@ -94,6 +126,7 @@ export async function startGatewayProxy(
     };
     upstream.on("error", (error) => close(`upstream ${error.message}`));
     socket.on("error", (error) => close(`client ${error.message}`));
+    socket.on("close", () => upstream.destroy());
   });
 
   server.on("clientError", (error, socket) => {
@@ -118,6 +151,7 @@ export async function startGatewayProxy(
   return {
     origin: `http://127.0.0.1:${port}`,
     port,
+    listening: () => server.listening,
     dispose: () => {
       server.closeAllConnections?.();
       server.close();

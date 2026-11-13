@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A gateway that restarts is framed afresh.** The page was only rewritten when the gateway's address or token changed, so a gateway restarted on the same port left the view framing a page whose socket had closed. A new gateway process (its own pid, also published in `history.db.owner`) is now a change, and a revision the frame carries makes the view rewrite the page even when the address is identical. The same revision covers a rotated operator token.
+- **Reload reloads.** The dedupe that stopped every poll from restarting the page also stopped **Reload the Page** from doing anything when nothing had changed since the last poll. The command now writes the page regardless; the poll still writes nothing.
+- **A command that failed says why.** **Start the gateway** and **Turn on the web cell** left the same screen behind when the CLI refused, with the reason only in a log nobody had opened. The first line of the CLI's own answer is now shown, with the operator token redacted if it appears.
+- **A proxy that stopped is never framed again,** and two surfaces rendering at once share one proxy instead of racing a second listener into existence and leaking it.
+- **The version is read again when the binary changes on disk.** `nodecode update` replaces the CLI in place at the same path, so the cached version could outlive it; the cache key carries the binary's mtime and size.
+- **Another origin cannot drive the gateway through the proxy.** The proxy is the one listener that strips the framing refusal, so it now answers only requests and sockets that name its own authority: a cross-site `Origin` is refused with 403 before anything reaches the gateway. The page's own navigation, subresources and `/gateway` socket carry no origin or its own, and pass.
+- **An npm-installed `nodecode.cmd` on Windows can be started.** Node refuses to start a `.cmd`/`.bat` directly (`EINVAL`), so every CLI call failed on such an install; those are now run through `cmd /d /s /c`.
+
+### Changed
+
+- **Open in an Editor Tab reveals the tab that already exists** instead of opening another copy of the page on every press.
+- **The setup screen's inline `/web/` renders inline,** not as a code block breaking the sentence it sits in.
+
 ## [0.2.3]
 
 ### Added

@@ -68,7 +68,7 @@ npm test            # unit tests, the activation walk, and the CLI/gateway parit
 npm run package     # nodecode-vscode-<version>.vsix
 ```
 
-`npm test` skips the gateway probes when none is running, so it stays green on a machine that has not started Nodecode. The suites also walk the recovery paths rather than the happy one: a gateway that moves port or restarts on the same one, a rotated operator token, a proxy that stopped, two surfaces framing at once, and a request from a foreign origin. `test/live-gateway.test.mjs` and `test/parity.mjs` exercise the real thing: the page served, framing lifted, assets loaded, the token accepted, the page's socket opened through the proxy — and a foreign origin refused.
+`npm test` skips the gateway probes when none is running, so it stays green on a machine that has not started Nodecode. One thing it cannot prove is a keystroke: copy, paste and the other editing keys are performed by VS Code itself, so whether the framed page receives them is a fact about the editor. `PW=/path/to/playwright node test/manual/clipboard.mjs` drives a real window and presses the real chords. The suites also walk the recovery paths rather than the happy one: a gateway that moves port or restarts on the same one, a rotated operator token, a proxy that stopped, two surfaces framing at once, and a request from a foreign origin. `test/live-gateway.test.mjs` and `test/parity.mjs` exercise the real thing: the page served, framing lifted, assets loaded, the token accepted, the page's socket opened through the proxy — and a foreign origin refused.
 
 ## Publishing
 

@@ -9,6 +9,7 @@ Module._load=function(name,...args){
   return {EventEmitter,Uri:{parse:(value)=>({toString:()=>value})},env:{asExternalUri:async(uri)=>uri},window:{showErrorMessage:async(message)=>{errors.push(message);}}};
 };
 const {Gateway,servesWebPage,pageLink,pageUrl}=require('../out/gateway.js');
+const {withBridge}=require('../out/proxy.js');
 Module._load=load;
 
 const TOKEN='token-abc';
@@ -81,7 +82,7 @@ test('ready puts a proxy in front of the gateway and hands the view that page',a
     assert.notEqual(framed.pageOrigin,`http://127.0.0.1:${server.address().port}`,'the view frames the proxy, never the gateway port itself');
     const answer=await fetch(framed.pageUrl.split('#')[0]);
     assert.equal(answer.status,200);
-    assert.equal(await answer.text(),'<html>the page</html>');
+    assert.equal(await answer.text(),withBridge('<html>the page</html>'));
     // The gateway refuses a handshake whose Host and Origin disagree, so the
     // proxy keeps the browser's own loopback authority instead of rewriting it.
     assert.equal(host,framed.pageOrigin.replace('http://',''),'the gateway is asked under one loopback authority');

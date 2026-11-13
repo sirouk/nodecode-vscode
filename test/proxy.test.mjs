@@ -4,7 +4,7 @@ import http from 'node:http';
 import net from 'node:net';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
-const {startGatewayProxy,stripFrameAncestors,frameableHeaders,upgradeHead}=require('../out/proxy.js');
+const {startGatewayProxy,stripFrameAncestors,frameableHeaders,upgradeHead,withBridge,pageRewritable}=require('../out/proxy.js');
 
 const PAGE='<!doctype html><html><body>the gateway page</body></html>';
 const CSP="default-src 'self'; connect-src 'self'; frame-ancestors 'none'";
@@ -54,7 +54,7 @@ test('the page comes through byte for byte, framable, and its assets too',async(
   try{
     const response=await fetch(`${proxy.origin}/web/`);
     assert.equal(response.status,200);
-    assert.equal(await response.text(),PAGE);
+    assert.equal(await response.text(),withBridge(PAGE),'the page, and the one tag that makes its keys work');
     assert.equal(response.headers.get('content-security-policy'),"default-src 'self'; connect-src 'self'");
     assert.equal(response.headers.get('x-frame-options'),null);
     assert.equal(response.headers.get('x-kept'),'yes');
@@ -62,6 +62,48 @@ test('the page comes through byte for byte, framable, and its assets too',async(
     const json=await (await fetch(`${proxy.origin}/`)).json();
     assert.equal(json.host,`127.0.0.1:${proxy.port}`,'the gateway sees the proxy as the request host');
   }finally{proxy.dispose();target.close();}
+});
+
+test('the page carries the bridge, and the bridge is answered here rather than by the gateway',async()=>{
+  let asked=[];
+  const server=http.createServer((request,response)=>{
+    asked.push(request.url);
+    response.writeHead(200,{'content-type':'text/html; charset=utf-8'});
+    response.end(PAGE);
+  });
+  await new Promise((resolve)=>server.listen(0,'127.0.0.1',resolve));
+  const proxy=await startGatewayProxy({host:'127.0.0.1',port:server.address().port});
+  try{
+    const page=await fetch(`${proxy.origin}/web/`);
+    const body=await page.text();
+    assert.equal(body.split('<script src="nodecode-bridge.js"></script>').length,2,'the tag is added once');
+    assert.equal(page.headers.get('content-length'),String(Buffer.byteLength(body)),'the length is the page as sent, not as asked for');
+
+    const bridge=await fetch(`${proxy.origin}/web/nodecode-bridge.js`);
+    const script=await bridge.text();
+    assert.equal(bridge.status,200);
+    assert.match(bridge.headers.get('content-type'),/^text\/javascript/);
+    assert.match(script,/nodecode: "frame"/,'the page half posts to the host');
+    assert.match(script,/execCommand\("insertText"/,'a paste goes in where the caret is');
+    assert.match(script,/window\.parent === window/,'a page opened on its own is left to the browser');
+    assert.deepEqual(asked,['/web/'],'the bridge is never asked of the gateway');
+  }finally{proxy.dispose();server.close();}
+});
+
+test('only a page that can carry the tag unaltered is rewritten',async()=>{
+  assert.equal(pageRewritable({'content-type':'text/html'}),true);
+  assert.equal(pageRewritable({'content-type':'text/html; charset=utf-8'}),true);
+  assert.equal(pageRewritable({'content-type':'text/html; charset=UTF-8'}),true,'the charset is named in any case');
+  assert.equal(pageRewritable({'content-type':'application/json'}),false,'an asset is not a page');
+  assert.equal(pageRewritable({'content-type':'text/plain'}),false);
+  assert.equal(pageRewritable({'content-type':'text/html; charset=iso-8859-1'}),false,'a page in another encoding would be corrupted by the tag');
+  assert.equal(pageRewritable({'content-type':'text/html','content-encoding':'gzip'}),false,'nor is a compressed one read and rewritten');
+});
+
+test('the tag lands inside the page, whether or not it says where its body ends',()=>{
+  assert.equal(withBridge('<html><body>a</body></html>'),'<html><body>a<script src="nodecode-bridge.js"></script></body></html>');
+  assert.equal(withBridge('<html>a</html>'),'<html>a</html><script src="nodecode-bridge.js"></script>');
+  assert.equal(withBridge('<body>b</body><body>c</body>').match(/nodecode-bridge/g).length,1,'one tag, at the last body');
 });
 
 test('the page socket opens through the proxy and carries both ways',async()=>{

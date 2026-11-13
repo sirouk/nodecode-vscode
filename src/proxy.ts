@@ -9,6 +9,8 @@
 import * as http from "http";
 import * as net from "net";
 
+import { BRIDGE_PATH, FRAME_SCRIPT, bridgeTag } from "./bridge";
+
 export interface ProxyTarget {
   host: string;
   port: number;
@@ -60,6 +62,20 @@ export function originAllowed(origin: string | string[] | undefined, host: strin
   }
 }
 
+/** True for a page this listener may add its one tag to: HTML, uncompressed, UTF-8 or unlabelled. */
+export function pageRewritable(headers: http.IncomingHttpHeaders): boolean {
+  const type = String(headers["content-type"] ?? "");
+  if (!/\btext\/html\b/i.test(type)) return false;
+  if (/\bcharset\s*=\s*(?!utf-8\b)[^;]+/i.test(type)) return false;
+  return !headers["content-encoding"];
+}
+
+/** The page, with the bridge's one tag just before its closing body. */
+export function withBridge(html: string): string {
+  const at = html.lastIndexOf("</body>");
+  return at === -1 ? html + bridgeTag() : html.slice(0, at) + bridgeTag() + html.slice(at);
+}
+
 /** The raw request line and headers to send upstream, verbatim. */
 export function upgradeHead(request: http.IncomingMessage): string {
   const lines = [`${request.method ?? "GET"} ${request.url ?? "/"} HTTP/1.1`];
@@ -79,6 +95,19 @@ export async function startGatewayProxy(
       response.end("the page only answers itself");
       return;
     }
+    // The page it frames asks for one file no gateway serves: the script that
+    // makes the keyboard work inside a frame. Answered here, from this origin,
+    // so the page's own `script-src 'self'` admits it.
+    if (String(request.url ?? "").split("?")[0] === BRIDGE_PATH) {
+      const script = Buffer.from(FRAME_SCRIPT, "utf8");
+      response.writeHead(200, {
+        "content-type": "text/javascript; charset=utf-8",
+        "content-length": String(script.length),
+        "cache-control": "no-store",
+      });
+      response.end(request.method === "HEAD" ? undefined : script);
+      return;
+    }
     const upstream = http.request(
       {
         host: target.host,
@@ -88,10 +117,27 @@ export async function startGatewayProxy(
         headers: request.headers,
       },
       (answer) => {
-        response.writeHead(answer.statusCode ?? 502, frameableHeaders(answer.headers));
-        answer.pipe(response);
+        const headers = frameableHeaders(answer.headers);
+        // Everything but the page itself streams through untouched; the page is
+        // held only long enough to add the one tag, and its length with it.
+        if (!pageRewritable(answer.headers)) {
+          response.writeHead(answer.statusCode ?? 502, headers);
+          answer.pipe(response);
+          answer.on("error", () => response.destroy());
+          response.on("close", () => answer.destroy());
+          return;
+        }
+        const chunks: Buffer[] = [];
+        answer.on("data", (chunk: Buffer) => chunks.push(chunk));
         answer.on("error", () => response.destroy());
         response.on("close", () => answer.destroy());
+        answer.on("end", () => {
+          const body = Buffer.from(withBridge(Buffer.concat(chunks).toString("utf8")), "utf8");
+          headers["content-length"] = String(body.length);
+          delete headers["transfer-encoding"];
+          response.writeHead(answer.statusCode ?? 502, headers);
+          response.end(body);
+        });
       },
     );
     upstream.on("error", (error) => {

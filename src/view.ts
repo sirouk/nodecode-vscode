@@ -5,6 +5,7 @@
 import * as crypto from "crypto";
 import * as vscode from "vscode";
 
+import { hostScript } from "./bridge";
 import { Gateway, GatewayState, GatewayStatus } from "./gateway";
 import { Notifications } from "./discovery";
 
@@ -74,6 +75,7 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       for (const button of document.querySelectorAll("[data-action]")) {
         button.addEventListener("click", () => api.postMessage({ type: button.dataset.action }));
       }
+      ${frame ? hostScript(frame.origin) : ""}
     `;
   const csp = `default-src 'none'; frame-src ${frameSource}; img-src ${frameSource} data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
 

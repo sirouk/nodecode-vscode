@@ -5,6 +5,7 @@ import net from 'node:net';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
 const {startGatewayProxy,originAllowed}=require('../out/proxy.js');
+const {withBridge}=require('../out/proxy.js');
 
 /** An upstream that records what reached it, so a refused request can be shown never to arrive. */
 async function upstream(){
@@ -58,7 +59,7 @@ test('a page from elsewhere cannot drive the gateway through the proxy',async()=
   try{
     const own=await get(`${proxy.origin}/web/`,{host:new URL(proxy.origin).host});
     assert.equal(own.status,200,'the page itself is served');
-    assert.equal(own.body,'<html>the page</html>');
+    assert.equal(own.body,'<html>the page</html><script src="nodecode-bridge.js"></script>');
 
     const sameOrigin=await get(`${proxy.origin}/api/act`,{origin:proxy.origin,host:new URL(proxy.origin).host});
     assert.equal(sameOrigin.status,200,'the page acting on its own origin is served');

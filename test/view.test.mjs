@@ -20,6 +20,22 @@ test('the ready view frames the gateway page and allows exactly that origin',()=
   assert.match(html,/script-src 'nonce-abc123'/);
 });
 
+test('the framed page is given the host half of the clipboard bridge, bound to its own origin',()=>{
+  const html=render({frame:{url:'http://127.0.0.1:53117/web/#t=secret',origin:'http://127.0.0.1:53117'}});
+  assert.match(html,/nodecode !== "frame"/,'the host answers the page, and only the page');
+  assert.match(html,/event\.source !== page\.contentWindow/,'a message from another window is not the page');
+  assert.match(html,/event\.origin !== origin/,'nor is one posted from another origin');
+  assert.match(html,/const origin = "http:\/\/127\.0\.0\.1:53117"/,'bound to the framed origin, not to any origin');
+  assert.match(html,/clipboard\.read\(\)/,'the read the page cannot do itself');
+  assert.match(html,/clipboard\.writeText\(/,'and the write its copy buttons need');
+});
+
+test('a setup page carries no bridge: there is no page to bridge to',()=>{
+  const html=render({});
+  assert.doesNotMatch(html,/nodecode !== "frame"/);
+  assert.doesNotMatch(html,/nodecode-bridge/);
+});
+
 test('each missing piece names one step and never leaks the token',()=>{
   const cases=[
     ['missing-cli',"Nodecode is not installed, or not on this machine's PATH."],

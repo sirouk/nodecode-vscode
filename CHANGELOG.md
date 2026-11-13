@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Copy, cut, paste, select all and undo work inside the page.** ⌘C, ⌘V, ⌘X, ⌘A and ⌘Z did nothing at all in the view: VS Code performs those keys itself, in the webview's own document, and stops them before they reach the gateway's page, which is a frame of its own on another origin — so the caret never saw the key, the page's copy buttons could not write the clipboard either, since VS Code refuses that API to any origin but a webview's. The page now performs the editing itself, where the selection and the caret are, and asks the view above it — the one origin that is granted the clipboard — only for what it cannot do alone: reading what the operator copied elsewhere, and writing what the page copies. Pasting an image from the clipboard attaches it, as pasting a file into a browser does. A page opened in a browser rather than framed is left to the browser.
+
+### Added
+
+- The page proxy serves the one script it adds to the page, and adds its tag to the page and nothing else; every other response still passes through untouched.
+
 ## [0.2.6]
 
 ### Fixed

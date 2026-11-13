@@ -173,6 +173,45 @@ export class Gateway {
     }
   }
 
+  /**
+   * A page at another loopback port: what the web page's machines panel hands
+   * back after opening a forward to a peer, e.g. http://127.0.0.1:61234/web/#t=….
+   * Only loopback is proxied, and only a port that answers the page's own path,
+   * so this view stays a view of Nodecode and never a proxy to this machine.
+   */
+  async frameFor(target: string): Promise<{ status: GatewayStatus; pageUrl?: string; pageOrigin?: string; revision?: number }> {
+    const status = await this.status();
+    let parsed: URL;
+    try {
+      parsed = new URL(target);
+    } catch {
+      return { status };
+    }
+    if (parsed.protocol !== "http:") return { status };
+    if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname)) return { status };
+    const port = Number(parsed.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return { status };
+    const base = `http://${parsed.hostname}:${port}`;
+    if (!(await servesWebPage(base))) {
+      this.notes.log(`refused to frame ${base}: it does not answer the page`);
+      return { status };
+    }
+    try {
+      const proxy = await this.ensureProxy({ baseUrl: base, token: "", port, pid: 0 });
+      const external = await vscode.env.asExternalUri(vscode.Uri.parse(proxy.origin));
+      const forwarded = external.toString();
+      return {
+        status,
+        pageUrl: `${forwarded.replace(/\/+$/, "")}/web/${parsed.hash}`,
+        pageOrigin: new URL(forwarded).origin,
+        revision: this.discovery.revision,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { status: { ...status, state: "gateway-down", message: `The page proxy could not start: ${message}` } };
+    }
+  }
+
   /** The gateway's own link, for opening in a browser. */
   async link(): Promise<string | undefined> {
     const endpoint = this.discovery.current() ?? (await this.discovery.probe());

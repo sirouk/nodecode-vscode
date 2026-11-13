@@ -106,7 +106,7 @@ test('the extension finds this machine\'s gateway and frames its page',{skip},as
   const src=/<iframe id="page" src="([^"]+)"/.exec(webview.html)?.[1];
   assert.ok(src,'the view frames one page');
   assert.match(src,/^http:\/\/127\.0\.0\.1:\d+\/web\/#t=/,'framed through a loopback proxy, with the operator token');
-  assert.match(webview.html,new RegExp(`frame-src ${src.split('/web/')[0].replace(/[.*+?^${}()|[\]\\]/g,'\\$&')};`),'and only that origin is frameable');
+  assert.match(webview.html,new RegExp(`frame-src ${src.split('/web/')[0].replace(/[.*+?^${}()|[\]\\]/g,'\\$&')} http://127\\.0\\.0\\.1:\\*;`),'and the loopback forward a machine switch lands on besides');
   assert.ok(surface.framedIn>0&&surface.framedIn<2500,`the page is framed quickly (${surface.framedIn}ms from activate)`);
   assert.equal(shown.length,0,'nothing is asked of an operator whose machine is ready');
   t.diagnostic(`first frame in ${surface.framedIn}ms from activate, after ${spawns} process`);

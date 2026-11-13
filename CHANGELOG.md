@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The page can switch to another organism, and this view follows it.** The page's own machines panel opens a loopback forward to a peer over the operator's ssh and lands on that peer's page; a page refuses to be framed, so inside this view the frame cannot simply navigate to it. The view now proxies the peer the same way it proxies the local gateway — only plain http on loopback, and only a port that answers the page — and moves the frame there when the page asks. The frame may now come from a loopback forward as well as from this gateway's own origin, and from nothing else.
+
 ## [0.2.7]
 
 ### Fixed

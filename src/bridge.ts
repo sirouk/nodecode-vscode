@@ -103,6 +103,8 @@ export const FRAME_SCRIPT = `(() => {
     });
   }
 
+  // The page is framed: another machine's page cannot simply be navigated to,
+  // because that page refuses to be framed. The view is asked to proxy it instead.
   // The page's own copy buttons write the clipboard, which this origin is refused.
   try {
     const clipboard = navigator.clipboard;
@@ -175,6 +177,12 @@ export function hostScript(origin: string): string {
     const data = event.data;
     if (!data || data.nodecode !== "frame") return;
     if (event.source !== page.contentWindow || event.origin !== origin) return;
+    // The page's machines panel chose another organism, whose page refuses to be
+    // framed as it stands: this view proxies it instead, and moves the frame.
+    if (data.kind === "switch") {
+      api.postMessage({ type: "switch", url: String((data.payload && data.payload.url) || "") });
+      return;
+    }
     const answer = { nodecode: "host", id: data.id };
     try {
       if (data.kind === "write") {

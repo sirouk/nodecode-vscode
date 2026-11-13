@@ -103,7 +103,7 @@ test('the view shows the setup step, then frames the page once the cell is on',a
   await commands.get('nodecode.reload')();
   await settle();
   assert.match(surface.webview.html,/<iframe id="page" src="http:\/\/127\.0\.0\.1:\d+\/web\/#t=token-abc"/,'the gateway page is framed');
-  assert.match(surface.webview.html,/frame-src http:\/\/127\.0\.0\.1:\d+;/,'and only that origin may be framed');
+  assert.match(surface.webview.html,/frame-src http:\/\/127\.0\.0\.1:\d+ http:\/\/127\.0\.0\.1:\*;/,'the gateway origin and a loopback forward, and nothing else');
 });
 
 test('the editor tab is the same page, and the browser link is the gateway link',async()=>{

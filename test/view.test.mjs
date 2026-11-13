@@ -13,7 +13,7 @@ const render=(options)=>renderHtml({status:status(),nonce:'abc123',cspSource:'x'
 
 test('the ready view frames the gateway page and allows exactly that origin',()=>{
   const html=render({frame:{url:'http://127.0.0.1:53117/web/#t=secret',origin:'http://127.0.0.1:53117'}});
-  assert.match(html,/frame-src http:\/\/127\.0\.0\.1:53117;/);
+  assert.match(html,/frame-src http:\/\/127\.0\.0\.1:53117 http:\/\/127\.0\.0\.1:\*;/,'the framed page, and the loopback forward a machine switch lands on');
   assert.match(html,/<iframe id="page" src="http:\/\/127\.0\.0\.1:53117\/web\/#t=secret"/);
   assert.match(html,/allow="clipboard-read; clipboard-write"/);
   assert.doesNotMatch(html,/class="action/,'the ready view offers no setup steps');

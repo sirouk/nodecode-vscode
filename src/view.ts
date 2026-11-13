@@ -77,7 +77,10 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       }
       ${frame ? hostScript(frame.origin) : ""}
     `;
-  const csp = `default-src 'none'; frame-src ${frameSource}; img-src ${frameSource} data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
+  // A machine switch inside the page moves the frame to another loopback forward
+  // (the page's machines panel), so loopback is admitted beside this gateway's own
+  // origin -- and nothing else is.
+  const csp = `default-src 'none'; frame-src ${frameSource} http://127.0.0.1:*; img-src ${frameSource} http://127.0.0.1:* data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
 
   const body = frame
     ? `<iframe id="page" src="${escapeHtml(frame.url)}" allow="clipboard-read; clipboard-write" title="Nodecode"></iframe>`
@@ -116,6 +119,8 @@ interface Surface {
   webview: vscode.Webview;
   /** What this surface was last given, so an unchanged poll writes nothing. */
   shown?: string;
+  /** A page at another loopback port this surface was switched to, if any. */
+  target?: string;
 }
 
 /** A framed page is a whole application: poll slowly while it is up, quickly while setting up. */
@@ -139,7 +144,9 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
   resolveWebviewView(view: vscode.WebviewView): void {
     view.webview.options = { enableScripts: true };
     const surface: Surface = { webview: view.webview };
-    view.webview.onDidReceiveMessage((message: { type?: string }) => void this.act(message?.type ?? "", surface));
+    view.webview.onDidReceiveMessage((message: { type?: string; url?: string }) =>
+      void this.act(message?.type ?? "", surface, message?.url),
+    );
     view.onDidDispose(() => {
       this.surfaces.delete(surface);
       if (this.surfaces.size === 0) this.stop();
@@ -161,7 +168,9 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     });
     this.panel = panel;
     const surface: Surface = { webview: panel.webview };
-    panel.webview.onDidReceiveMessage((message: { type?: string }) => void this.act(message?.type ?? "", surface));
+    panel.webview.onDidReceiveMessage((message: { type?: string; url?: string }) =>
+      void this.act(message?.type ?? "", surface, message?.url),
+    );
     panel.onDidDispose(() => {
       if (this.panel === panel) this.panel = undefined;
       this.surfaces.delete(surface);
@@ -199,7 +208,11 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
    */
   private async render(surface: Surface, working?: string): Promise<void> {
     if (!this.surfaces.has(surface) || this.disposed) return;
-    const frame = working ? undefined : await this.gateway.frame();
+    const frame = working
+      ? undefined
+      : surface.target
+        ? await this.gateway.frameFor(surface.target)
+        : await this.gateway.frame();
     const status = working ? await this.gateway.status() : frame!.status;
     this.state = status.state;
     const page = frame?.pageUrl && frame?.pageOrigin ? { url: frame.pageUrl, origin: frame.pageOrigin } : undefined;
@@ -215,7 +228,7 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     }
   }
 
-  private async act(action: string, surface: Surface): Promise<void> {
+  private async act(action: string, surface: Surface, url?: string): Promise<void> {
     try {
       switch (action) {
         case "install":
@@ -235,6 +248,15 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           await this.gateway.enableWebCell();
           await this.refresh();
           return;
+        case "switch": {
+          // The page chose another organism: this surface shows that one from now
+          // on, through a proxy of its own, and a poll keeps it there.
+          if (!url) return;
+          surface.target = url;
+          surface.shown = undefined;
+          await this.render(surface);
+          return;
+        }
         case "recheck":
         default:
           await this.refresh();

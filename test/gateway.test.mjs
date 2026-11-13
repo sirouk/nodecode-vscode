@@ -89,6 +89,24 @@ test('ready puts a proxy in front of the gateway and hands the view that page',a
   }finally{gateway.dispose();server.close();}
 });
 
+test('another machine\'s page is framed only when it is loopback and answers the page',async()=>{
+  const page=http.createServer((request,response)=>{response.writeHead(200,{'content-type':'text/html; charset=utf-8'});response.end('<html>a peer</html>');});
+  await new Promise((resolve)=>page.listen(0,'127.0.0.1',resolve));
+  const silent=http.createServer((request,response)=>{response.writeHead(404,{'content-type':'text/plain'});response.end('no');});
+  await new Promise((resolve)=>silent.listen(0,'127.0.0.1',resolve));
+  const gateway=new Gateway(cliMock(),discoveryMock(null),notes());
+  try{
+    const here=page.address().port, elsewhere=silent.address().port;
+    assert.equal((await gateway.frameFor(`http://127.0.0.1:${elsewhere}/web/#t=x`)).pageUrl,undefined,'a port that does not answer the page is not proxied');
+    assert.equal((await gateway.frameFor('http://example.com/web/#t=x')).pageUrl,undefined,'nor is a name that is not this machine');
+    assert.equal((await gateway.frameFor('https://127.0.0.1:1234/web/#t=x')).pageUrl,undefined,'nor anything but plain http on loopback');
+    assert.equal((await gateway.frameFor('not a url')).pageUrl,undefined,'nor a string that is not one');
+    const framed=await gateway.frameFor(`http://127.0.0.1:${here}/web/#t=peer-token`);
+    assert.match(framed.pageUrl,/^http:\/\/127\.0\.0\.1:\d+\/web\/#t=peer-token$/,'the peer is framed through this view\'s own proxy');
+    assert.notEqual(framed.pageOrigin,`http://127.0.0.1:${here}`,'never the peer\'s own port, which refuses to be framed');
+  }finally{gateway.dispose();page.close();silent.close();}
+});
+
 test('the proxy follows the gateway to a new port instead of caching the old one',async()=>{
   const ports=[];
   const servers=await Promise.all([0,1].map(()=>new Promise((resolve)=>{

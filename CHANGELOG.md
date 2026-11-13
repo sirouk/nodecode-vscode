@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4]
+
 ### Fixed
 
 - **A gateway that restarts is framed afresh.** The page was only rewritten when the gateway's address or token changed, so a gateway restarted on the same port left the view framing a page whose socket had closed. A new gateway process (its own pid, also published in `history.db.owner`) is now a change, and a revision the frame carries makes the view rewrite the page even when the address is identical. The same revision covers a rotated operator token.
@@ -257,7 +259,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.0...v0.2.1

@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5]
+
 ### Fixed
 
 - **A paused or stopped gateway is reported as stopped.** The status check trusted the endpoint discovery had cached, so a gateway that had gone away was described as running without its web cell — sending the operator to turn on a cell that was never the problem. Every status now asks the gateway rather than remembering it.
@@ -264,7 +266,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.1...v0.2.2

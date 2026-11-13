@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A paused or stopped gateway is reported as stopped.** The status check trusted the endpoint discovery had cached, so a gateway that had gone away was described as running without its web cell — sending the operator to turn on a cell that was never the problem. Every status now asks the gateway rather than remembering it.
+- **Reload re-probes the gateway as well as rewriting the page.** The command updated the view's page but left the status bar on whatever it last saw.
+
 ## [0.2.4]
 
 ### Fixed

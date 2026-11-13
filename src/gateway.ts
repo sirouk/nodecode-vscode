@@ -95,7 +95,9 @@ export class Gateway {
         message: `Nodecode was found at ${binary} but would not start: ${this.cli.versionError()}`,
       };
     }
-    const endpoint = this.discovery.current() ?? (await this.discovery.probe());
+    // Ask rather than remember: a cached endpoint outlives the gateway that published
+    // it, and a stopped gateway would then be reported as one missing its web cell.
+    const endpoint = await this.discovery.probe();
     if (!endpoint) {
       return {
         ...common,

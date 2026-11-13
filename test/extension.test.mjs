@@ -127,3 +127,17 @@ after(()=>{
   gatewayServer.close();
   fs.rmSync(home,{recursive:true,force:true});
 });
+
+test('reload asks the gateway again and writes the page, even when nothing looks changed',async()=>{
+  const view=providers.get('nodecodeWeb').provider;
+  let writes=0,html='';
+  const webview={options:{},set html(value){writes+=1;html=value;},get html(){return html;},onDidReceiveMessage:()=>disposable()};
+  view.resolveWebviewView({webview,onDidDispose:()=>disposable()});
+  await settle();
+  const settled=writes;
+  assert.ok(settled>0,'the view drew once');
+  await commands.get('nodecode.reload')();
+  await settle();
+  assert.ok(writes>settled,'Reload writes the page the operator asked for');
+  assert.match(html,/<iframe/,'and what it wrote is the page');
+});

@@ -176,3 +176,23 @@ test('a failure that mentions the operator token is shown without it',async()=>{
     assert.match(errors[0],/refused bearer/,'and the rest of the reason still reads');
   }finally{gateway.dispose();}
 });
+
+test('a gateway that stopped is reported as stopped, not as one missing its cell',async()=>{
+  const server=http.createServer((_request,response)=>{response.writeHead(200,{'content-type':'text/html'});response.end('<html></html>');});
+  await new Promise((resolve)=>server.listen(0,'127.0.0.1',resolve));
+  const port=server.address().port;
+  let alive=true;
+  let probes=0;
+  // current() keeps handing back the endpoint it was given: the cached answer is
+  // what the old status trusted, and what this pins.
+  const discovery={current:()=>endpoint(port),probe:async()=>{probes+=1;return alive?endpoint(port):null;}};
+  const gateway=new Gateway(cliMock(),discovery,notes());
+  try{
+    assert.equal((await gateway.status()).state,'ready');
+    alive=false;
+    const state=await gateway.status();
+    assert.equal(probes,2,'every status asks the gateway');
+    assert.equal(state.state,'gateway-down','a cached endpoint is not evidence of a running gateway');
+    assert.doesNotMatch(state.message,/without the web cell/);
+  }finally{gateway.dispose();server.close();}
+});

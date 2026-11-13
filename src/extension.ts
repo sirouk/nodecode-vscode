@@ -61,7 +61,13 @@ export function activate(context: vscode.ExtensionContext): void {
     ["nodecode.open", () => vscode.commands.executeCommand("nodecodeWeb.focus")],
     ["nodecode.openInEditor", () => view.openInEditor()],
     ["nodecode.openInBrowser", () => cli.openInBrowser()],
-    ["nodecode.reload", () => view.refresh(true)],
+    [
+      "nodecode.reload",
+      async () => {
+        await refresh();
+        await view.refresh(true);
+      },
+    ],
     ["nodecode.install", () => cli.installInTerminal()],
     [
       "nodecode.startGateway",

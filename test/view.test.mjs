@@ -57,6 +57,12 @@ test('each missing piece names one step and never leaks the token',()=>{
   assert.doesNotMatch(render({status:status({state:'web-cell-off',message:'x'})}),/data-action="install"/);
 });
 
+test('the tailnet panel is as tall as the view allows, not a percentage of the mark it hangs from',()=>{
+  const html=render({frame:{url:'http://127.0.0.1:53117/web/#t=secret',origin:'http://127.0.0.1:53117'}});
+  const rule=html.match(/#tailnet-panel \{[^}]*\}/)?.[0]??'';
+  assert.match(rule,/max-height: calc\(100vh - \d+px\)/,'its wrapper is one line tall, so a percentage clipped every row');
+});
+
 test('messages from the gateway are written as text, never as markup',()=>{
   const html=render({status:status({state:'gateway-down',message:'<img src=x onerror="boom">'})});
   assert.doesNotMatch(html,/<img src=x/);

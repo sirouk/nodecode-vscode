@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.15]
 
+### Fixed
+
+- **The tailnet panel opened empty under a green dot.** Its height was capped at 70% of the one-line mark it hangs from, about 35 pixels, so every row — this machine, its address, the pairing code, the machines and devices — was drawn and clipped out of sight. The cap now follows the view's own height.
+
+
 ### Changed
 
 - **Marketplace compliance: the extension installs nothing and downloads nothing.** The **Install Nodecode** command is gone, and with it the terminal that ran the official `curl … | sh` installer, the install button on the view's first-run screen, and every install address in the package. Nodecode is the operator's own; where it is missing, the view links to the docs and says so.

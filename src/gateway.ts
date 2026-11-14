@@ -51,6 +51,9 @@ export function pageUrl(base: string, endpoint: GatewayEndpoint): string {
 }
 
 export class Gateway {
+  /** This tailnet's own DNS suffix, learned from the cell, or undefined until it is. */
+  tailnetSuffix?: string;
+
   private proxy: GatewayProxy | undefined;
   private proxyPort: number | undefined;
   private starting: { port: number; proxy: Promise<GatewayProxy> } | undefined;
@@ -121,6 +124,19 @@ export class Gateway {
    * stops listening. Two surfaces render at once (sidebar and an editor tab),
    * so one start is shared rather than racing a second listener into existence.
    */
+  /** Proxies for the peers this window has switched to, one per upstream. */
+  private readonly peers = new Map<string, GatewayProxy>();
+
+  private async ensurePeerProxy(host: string, port: number, tls: boolean): Promise<GatewayProxy> {
+    const key = `${tls ? "https" : "http"}://${host}:${port}`;
+    const kept = this.peers.get(key);
+    if (kept && kept.listening()) return kept;
+    const started = await startGatewayProxy({ host, port, tls }, (line) => this.notes.log(line));
+    this.peers.set(key, started);
+    this.notes.log(`page proxy ${started.origin} -> ${key}`);
+    return started;
+  }
+
   private ensureProxy(endpoint: GatewayEndpoint): Promise<GatewayProxy> {
     if (this.proxy && this.proxyPort === endpoint.port && this.proxy.listening()) return Promise.resolve(this.proxy);
     if (this.starting && this.starting.port === endpoint.port) return this.starting.proxy;
@@ -187,17 +203,27 @@ export class Gateway {
     } catch {
       return { status };
     }
-    if (parsed.protocol !== "http:") return { status };
-    if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname)) return { status };
-    const port = Number(parsed.port);
+    // Loopback http is this machine's own gateway. Anything else must be a
+    // tailnet peer over its own https: the MagicDNS name this tailnet is served
+    // under, and nothing besides it. The proxy is never a general one.
+    const tls = parsed.protocol === "https:";
+    const suffix = this.tailnetSuffix;
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return { status };
+    if (tls) {
+      if (!suffix || !parsed.hostname.endsWith(`.${suffix}`)) {
+        this.notes.log(`refused to frame ${parsed.hostname}: not a name on this tailnet`);
+        return { status };
+      }
+    } else if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname)) return { status };
+    const port = Number(parsed.port || (tls ? 443 : 80));
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { status };
-    const base = `http://${parsed.hostname}:${port}`;
+    const base = `${tls ? "https" : "http"}://${parsed.hostname}:${port}`;
     if (!(await servesWebPage(base))) {
       this.notes.log(`refused to frame ${base}: it does not answer the page`);
       return { status };
     }
     try {
-      const proxy = await this.ensureProxy({ baseUrl: base, token: "", port, pid: 0 });
+      const proxy = await this.ensurePeerProxy(parsed.hostname, port, tls);
       const external = await vscode.env.asExternalUri(vscode.Uri.parse(proxy.origin));
       const forwarded = external.toString();
       return {

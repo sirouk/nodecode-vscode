@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12]
+
+### Changed
+
+- **Tailnet access is injected into the page, not a view of its own.** The separate Tailnet Access view is gone. A small mark sits in the corner of the page this extension already frames; it opens a panel over the page with this machine's state, the address and copy button, the pairing code and its copy button, the devices paired and the machines on your tailnet. The command now focuses the page instead of a section that no longer exists.
+
+### Added
+
+- **Switching to another machine, in the frame.** Choosing a machine on the list moves the frame to that peer through the extension's own proxy, so the page is re-served here and framed as this view's own — the peer's page still refuses to be framed by anyone else. The proxy now takes an https upstream, and only one: a name under this tailnet's own DNS suffix, learned from the cell. Each peer's pairing cookie is stored under a name of its own, so pairing with one machine never overwrites the pairing with another.
+
 ## [0.2.11]
 
 ### Changed

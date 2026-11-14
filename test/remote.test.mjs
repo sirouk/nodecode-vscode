@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url), load = Module._load;
 Module._load = function (name, ...args) {
   return name === 'vscode' ? { env: { clipboard: { writeText: async () => {} } } } : load.call(this, name, ...args);
 };
-const { readRemote, actRemote, renderRemoteHtml } = require('../out/remote.js');
+const { readRemote, actRemote } = require('../out/remote.js');
 const { installBundledCell, cellFolder, REMOTE_CELL } = require('../out/cells.js');
 Module._load = load;
 
@@ -87,19 +87,4 @@ test('the cell is installed once, and never over a home that has it', async () =
     const again = installBundledCell(extension, home);
     assert.equal(again.copied, false);
   });
-});
-
-test('the panel is served under a nonce and nothing else', () => {
-  const html = renderRemoteHtml({ nonce: 'n0nce', cell: REMOTE_CELL });
-  assert.match(html, /Content-Security-Policy/);
-  assert.match(html, /script-src 'nonce-n0nce'/);
-  assert.doesNotMatch(html, /unsafe-inline/);
-  assert.match(html, new RegExp(REMOTE_CELL));
-  assert.match(html, /acquireVsCodeApi/);
-});
-
-test('the install button asks for the install, not for an action on the route', () => {
-  const html = renderRemoteHtml({ nonce: 'n', cell: REMOTE_CELL });
-  assert.match(html, /type: 'install'/);
-  assert.match(html, /if \(act === 'install'\)/);
 });

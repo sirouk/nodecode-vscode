@@ -7,6 +7,7 @@
 // follows it as it changes.
 
 import * as http from "http";
+import * as https from "https";
 import * as net from "net";
 
 import { BRIDGE_PATH, FRAME_SCRIPT, bridgeTag } from "./bridge";
@@ -14,6 +15,36 @@ import { BRIDGE_PATH, FRAME_SCRIPT, bridgeTag } from "./bridge";
 export interface ProxyTarget {
   host: string;
   port: number;
+  /** Reached over TLS: a tailnet peer's own https, not a loopback gateway. */
+  tls?: boolean;
+}
+
+/** The cookie the tailnet bridge pairs a device with, and the name it takes here. */
+const PAIR_COOKIE = "nodecode-bridge";
+
+/** A per-upstream cookie name: two peers' pairings must not overwrite each other. */
+export function cookieTag(target: ProxyTarget): string {
+  let hash = 0;
+  for (const char of `${target.host}:${target.port}`) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return `${PAIR_COOKIE}-${hash.toString(36)}`;
+}
+
+/** The browser's cookie for this upstream, named so two peers never collide. */
+export function nameCookie(header: string | undefined, tag: string): string | undefined {
+  if (!header) return undefined;
+  return header
+    .split(/;\s*/)
+    .map((part) => (part.startsWith(`${PAIR_COOKIE}=`) ? tag + part.slice(PAIR_COOKIE.length) : part))
+    .join("; ");
+}
+
+/** The upstream's cookie, named back to what the bridge knows. */
+export function unnamedCookie(header: string | undefined, tag: string): string | undefined {
+  if (!header) return undefined;
+  return header
+    .split(/;\s*/)
+    .map((part) => (part.startsWith(`${tag}=`) ? PAIR_COOKIE + part.slice(tag.length) : part))
+    .join("; ");
 }
 
 export interface GatewayProxy {
@@ -108,16 +139,28 @@ export async function startGatewayProxy(
       response.end(request.method === "HEAD" ? undefined : script);
       return;
     }
-    const upstream = http.request(
+    const tag = cookieTag(target);
+    const headers = { ...request.headers };
+    const named = nameCookie(headers.cookie as string | undefined, tag);
+    if (named) headers.cookie = named;
+    else delete headers.cookie;
+    const upstream = (target.tls ? https : http).request(
       {
         host: target.host,
         port: target.port,
         method: request.method,
         path: request.url,
-        headers: request.headers,
+        headers,
+        ...(target.tls ? { servername: target.host } : {}),
       },
       (answer) => {
         const headers = frameableHeaders(answer.headers);
+        const cookies = headers["set-cookie"];
+        if (cookies) {
+          headers["set-cookie"] = (Array.isArray(cookies) ? cookies : [cookies]).map((line) =>
+            line.replace(new RegExp(`^${PAIR_COOKIE}=`), `${tag}=`),
+          );
+        }
         // Everything but the page itself streams through untouched; the page is
         // held only long enough to add the one tag, and its length with it.
         if (!pageRewritable(answer.headers)) {

@@ -7,7 +7,8 @@ import * as vscode from "vscode";
 import { NodecodeCli } from "./cli";
 import { NodecodeDiscovery, Notifications } from "./discovery";
 import { Gateway, GatewayStatus } from "./gateway";
-import { RemoteView } from "./remote";
+import { RemoteRead, actRemote, readMachines, readRemote } from "./remote";
+import { REMOTE_CELL, installBundledCell, nodecodeHome } from "./cells";
 import { NodecodeView } from "./view";
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -15,8 +16,49 @@ export function activate(context: vscode.ExtensionContext): void {
   const discovery = new NodecodeDiscovery(notes);
   const cli = new NodecodeCli(discovery, notes);
   const gateway = new Gateway(cli, discovery, notes);
-  const view = new NodecodeView(gateway, notes, { install: () => cli.installInTerminal() });
-  const remote = new RemoteView(discovery, cli, notes, context.extensionPath);
+  // What the page's own tailnet panel asks for: the state of this machine's
+  // tailnet access, an action on it, or the cell put in place.
+  const tailnet = {
+    state: async (): Promise<Record<string, unknown>> => {
+      const endpoint = discovery.current();
+      if (!endpoint) return { problem: "This home's gateway is not answering. Start it, then look again." };
+      const read: RemoteRead = await readRemote(endpoint);
+      if (read.kind === "ok") {
+        const machines = await readMachines(endpoint);
+        const host = machines.find((machine) => machine.host)?.host;
+        if (host) gateway.tailnetSuffix = host.split(".").slice(1).join(".");
+        return { state: { ...read.state, machines } };
+      }
+      if (read.kind === "missing")
+        return { problem: `Tailnet access is the ${REMOTE_CELL} cell, and this home does not have it.`, installable: true };
+      return { problem: `Could not read tailnet access: ${read.why}` };
+    },
+    act: async (body: { action: string; index?: number }): Promise<Record<string, unknown>> => {
+      const endpoint = discovery.current();
+      if (!endpoint) return { problem: "This home's gateway is not answering." };
+      const read = await actRemote(endpoint, body);
+      if (read.kind === "ok") return { state: read.state };
+      if (read.kind === "missing") return { problem: "Tailnet access is not installed on this home.", installable: true };
+      return { problem: read.why };
+    },
+    install: async (): Promise<Record<string, unknown>> => {
+      try {
+        const done = installBundledCell(context.extensionPath, nodecodeHome());
+        notes.log(`tailnet: cell ${done.copied ? "installed" : "already present"} at ${done.path}`);
+      } catch (error) {
+        return { problem: `The cell could not be written: ${error instanceof Error ? error.message : String(error)}` };
+      }
+      const restarted = await cli.restartGateway();
+      if (restarted.code !== 0) await cli.startGateway();
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const said = await tailnet.state();
+        if (!said.problem) return said;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      return tailnet.state();
+    },
+  };
+  const view = new NodecodeView(gateway, notes, { install: () => cli.installInTerminal() }, tailnet);
 
   discovery.watch(context);
 
@@ -42,7 +84,7 @@ export function activate(context: vscode.ExtensionContext): void {
       refreshing = (async () => {
         const status = await gateway.status();
         reflect(status);
-        await Promise.all([view.refresh(), remote.refresh()]);
+        await view.refresh();
       })().finally(() => {
         refreshing = undefined;
       });
@@ -54,9 +96,6 @@ export function activate(context: vscode.ExtensionContext): void {
     discovery.onDidChange(() => void refresh()),
     view,
     vscode.window.registerWebviewViewProvider("nodecodeWeb", view, {
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
-    vscode.window.registerWebviewViewProvider("nodecodeRemote", remote, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     { dispose: () => gateway.dispose() },
@@ -106,7 +145,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage("Copied the Nodecode link. It carries the operator token: keep it to yourself.");
       },
     ],
-    ["nodecode.remoteAccess", () => vscode.commands.executeCommand("nodecodeRemote.focus")],
+    ["nodecode.remoteAccess", () => vscode.commands.executeCommand("nodecodeWeb.focus")],
     ["nodecode.showDiagnostics", () => notes.show()],
   ];
   context.subscriptions.push(...commands.map(([id, run]) => vscode.commands.registerCommand(id, run)));

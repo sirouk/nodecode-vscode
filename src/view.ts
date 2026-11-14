@@ -68,6 +68,32 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       .action.primary:hover { background: var(--vscode-button-hoverBackground); }
       .action.link { background: none; color: var(--vscode-textLink-foreground); padding-left: 2px; }
       .meta { font-size: 11px; line-height: 1.5; opacity: .55; }
+      #tailnet { position: absolute; right: 10px; top: 8px; z-index: 10; font-family: var(--vscode-font-family); }
+      #tailnet-mark { font: inherit; font-size: 11px; padding: 3px 9px; border-radius: 10px; cursor: pointer;
+        color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
+        border: 1px solid var(--vscode-widget-border, transparent); opacity: .78; }
+      #tailnet-mark:hover, #tailnet-mark.on { opacity: 1; }
+      #tailnet-mark .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px;
+        background: var(--vscode-disabledForeground); vertical-align: middle; }
+      #tailnet-mark .dot.live { background: var(--vscode-testing-iconPassed, #3fb950); }
+      #tailnet-panel { position: absolute; right: 10px; top: 32px; width: 300px; max-height: 70%; overflow: auto;
+        padding: 10px 12px; border-radius: 6px; z-index: 11; font-size: 11px; line-height: 1.5;
+        background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+        border: 1px solid var(--vscode-widget-border, rgba(127,127,127,.35));
+        box-shadow: 0 4px 16px rgba(0,0,0,.28); }
+      #tailnet-panel h2 { margin: 0 0 8px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; opacity: .6; font-weight: 600; }
+      #tailnet-panel .row { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; }
+      #tailnet-panel .grow { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #tailnet-panel .addr { color: var(--vscode-textLink-foreground); cursor: pointer; font-family: var(--vscode-editor-font-family); }
+      #tailnet-panel .addr:hover { text-decoration: underline; }
+      #tailnet-panel code { display: inline; padding: 0; background: none; font-family: var(--vscode-editor-font-family); letter-spacing: .12em; }
+      #tailnet-panel button { font: inherit; font-size: 11px; padding: 1px 7px; border-radius: 3px; cursor: pointer; border: 0;
+        color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+      #tailnet-panel button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+      #tailnet-panel button.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+      #tailnet-panel .why { margin: 0 0 8px; opacity: .7; }
+      #tailnet-panel .sep { margin: 10px 0 6px; border-top: 1px solid var(--vscode-widget-border, rgba(127,127,127,.25)); padding-top: 8px; }
+      body { position: relative; }
     `;
 
   const script = `
@@ -76,14 +102,19 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
         button.addEventListener("click", () => api.postMessage({ type: button.dataset.action }));
       }
       ${frame ? hostScript(frame.origin) : ""}
+      ${frame ? tailnetScript() : ""}
     `;
   // A machine switch inside the page moves the frame to another loopback forward
   // (the page's machines panel), so loopback is admitted beside this gateway's own
   // origin -- and nothing else is.
   const csp = `default-src 'none'; frame-src ${frameSource} http://127.0.0.1:*; img-src ${frameSource} http://127.0.0.1:* data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';`;
 
+  const tailnet = frame
+    ? `<div id="tailnet"><button id="tailnet-mark" type="button" title="Tailnet access"><span class="dot"></span>Tailnet</button>
+       <div id="tailnet-panel" hidden><h2>Tailnet access</h2><div id="tailnet-body"><p class="why">Reading…</p></div></div></div>`
+    : "";
   const body = frame
-    ? `<iframe id="page" src="${escapeHtml(frame.url)}" allow="clipboard-read; clipboard-write" title="Nodecode"></iframe>`
+    ? `${tailnet}<iframe id="page" src="${escapeHtml(frame.url)}" allow="clipboard-read; clipboard-write" title="Nodecode"></iframe>`
     : options.working
       ? `<div class="setup"><div class="mark">Nodecode</div><h1>${escapeHtml(options.working)}</h1></div>`
       : `<div class="setup">
@@ -139,13 +170,19 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     private readonly gateway: Gateway,
     private readonly notes: Notifications,
     private readonly actions: { install: () => void },
+    private readonly tailnet: {
+      state: () => Promise<Record<string, unknown>>;
+      act: (body: { action: string; index?: number }) => Promise<Record<string, unknown>>;
+      install: () => Promise<Record<string, unknown>>;
+    },
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
     view.webview.options = { enableScripts: true };
     const surface: Surface = { webview: view.webview };
-    view.webview.onDidReceiveMessage((message: { type?: string; url?: string }) =>
-      void this.act(message?.type ?? "", surface, message?.url),
+    view.webview.onDidReceiveMessage(
+      (message: { type?: string; url?: string; text?: string; index?: number; action?: string }) =>
+        void this.act(message?.type ?? "", surface, message?.url, message),
     );
     view.onDidDispose(() => {
       this.surfaces.delete(surface);
@@ -228,7 +265,17 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     }
   }
 
-  private async act(action: string, surface: Surface, url?: string): Promise<void> {
+  /** Hand the panel what it asked for: only the surface that asked hears it. */
+  private tailnetPanel(surface: Surface, view: Record<string, unknown>): void {
+    void surface.webview.postMessage({ type: "tailnet-state", view });
+  }
+
+  private async act(
+    action: string,
+    surface: Surface,
+    url?: string,
+    message?: { type?: string; url?: string; text?: string; index?: number; action?: string },
+  ): Promise<void> {
     try {
       switch (action) {
         case "install":
@@ -248,6 +295,28 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           await this.gateway.enableWebCell();
           await this.refresh();
           return;
+        case "tailnet":
+          return this.tailnetPanel(surface, await this.tailnet.state());
+        case "tailnet-act":
+          return this.tailnetPanel(
+            surface,
+            await this.tailnet.act({ action: String(message?.action ?? ""), index: message?.index }),
+          );
+        case "tailnet-install":
+          return this.tailnetPanel(surface, await this.tailnet.install());
+        case "tailnet-copy":
+          await vscode.env.clipboard.writeText(String(message?.text ?? ""));
+          return;
+        case "tailnet-open":
+          if (message?.url) await vscode.env.openExternal(vscode.Uri.parse(String(message.url)));
+          return;
+        case "tailnet-switch": {
+          if (!message?.url) return;
+          surface.target = String(message.url);
+          surface.shown = undefined;
+          await this.render(surface);
+          return;
+        }
         case "switch": {
           // The page chose another organism: this surface shows that one from now
           // on, through a proxy of its own, and a poll keeps it there.
@@ -279,4 +348,143 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
 
 function nonce(): string {
   return crypto.randomBytes(18).toString("base64url");
+}
+
+/**
+ * Tailnet access, drawn over the page rather than in a view of its own: the
+ * mark sits in the corner of the frame, and the panel under it says what this
+ * machine is serving, which code a new device types, and which machines on the
+ * tailnet answered the handshake. Every action goes to the extension host,
+ * which owns the operator token and the cell's install; nothing here holds a
+ * secret or talks to Tailscale.
+ */
+export function tailnetScript(): string {
+  return `(() => {
+  const mark = document.getElementById('tailnet-mark');
+  const panel = document.getElementById('tailnet-panel');
+  const body = document.getElementById('tailnet-body');
+  if (!mark || !panel || !body) return;
+  const api = acquireVsCodeApi();
+  let view = null;
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+  function button(label, act, extra) {
+    const node = el('button', extra || '', label);
+    node.dataset.tn = act;
+    return node;
+  }
+  function copyButton(what, text) {
+    const node = button('Copy', 'copy');
+    node.dataset.what = what;
+    node.dataset.text = text;
+    return node;
+  }
+
+  function draw() {
+    body.replaceChildren();
+    if (!view) { body.append(el('p', 'why', 'Reading…')); return; }
+    if (view.problem) {
+      body.append(el('p', 'why', view.problem));
+      if (view.installable) body.append(button('Install the tailnet access cell', 'install', 'primary'));
+      return;
+    }
+    const state = view.state;
+    if (!state) return;
+    if (!state.available) {
+      const advice = state.advice || {};
+      body.append(el('p', 'why', advice.text || 'This machine cannot be reached over a tailnet yet.'));
+      if (advice.step) body.append(el('p', 'why', advice.step));
+      if (advice.url) { const go = button(advice.label || 'Open', 'open'); go.dataset.url = advice.url; body.append(go); }
+      return;
+    }
+
+    const row = el('div', 'row');
+    row.append(el('span', 'grow', 'This machine'));
+    row.append(button(state.running ? 'Turn off' : 'Turn on', state.running ? 'stop' : 'start', state.running ? '' : 'primary'));
+    body.append(row);
+
+    if (state.running) {
+      const addr = el('div', 'row');
+      const link = el('span', 'addr grow', state.address || '');
+      link.dataset.tn = 'open'; link.dataset.url = state.address || '';
+      addr.append(link, copyButton('address', state.address || ''));
+      body.append(addr);
+
+      const code = el('div', 'row');
+      if (state.code) {
+        code.append(el('code', '', state.code), copyButton('code', state.code), button('New code', 'code'));
+        body.append(code, el('p', 'why', 'expires in ' + state.codeMinutes + ' minutes'));
+      } else {
+        code.append(el('span', 'grow', 'No code standing.'), button('New code', 'code'));
+        body.append(code);
+      }
+    }
+
+    const machines = state.machines || [];
+    if (machines.length > 1) {
+      body.append(el('div', 'sep'));
+      body.append(el('h2', '', 'Machines on your tailnet'));
+      for (const machine of machines) {
+        const line = el('div', 'row');
+        line.append(el('span', 'grow', machine.name + (machine.current ? ' (this one)' : '')));
+        if (!machine.current && machine.address) {
+          const go = button('Switch', 'switch');
+          go.dataset.url = machine.address;
+          line.append(go);
+        }
+        body.append(line);
+      }
+    }
+
+    for (const device of state.devices || []) {
+      const line = el('div', 'row');
+      line.append(el('span', 'grow', device.name + (device.login ? ' — ' + device.login : '')));
+      const forget = button('Forget', 'forget');
+      forget.dataset.index = String(device.index);
+      line.append(forget);
+      body.append(line);
+    }
+    if (state.refusal) body.append(el('p', 'why', state.refusal));
+  }
+
+  mark.addEventListener('click', () => {
+    panel.hidden = !panel.hidden;
+    mark.classList.toggle('on', !panel.hidden);
+    if (!panel.hidden) api.postMessage({ type: 'tailnet' });
+  });
+
+  panel.addEventListener('click', (event) => {
+    const target = event.target.closest('[data-tn]');
+    if (!target) return;
+    const act = target.dataset.tn;
+    if (act === 'copy') return api.postMessage({ type: 'tailnet-copy', text: target.dataset.text || '' });
+    if (act === 'switch') return api.postMessage({ type: 'tailnet-switch', url: target.dataset.url || '' });
+    if (act === 'open') return api.postMessage({ type: 'tailnet-open', url: target.dataset.url || '' });
+    if (act === 'install') {
+      view = { problem: 'Installing the cell and restarting the gateway…' };
+      draw();
+      return api.postMessage({ type: 'tailnet-install' });
+    }
+    api.postMessage({
+      type: 'tailnet-act',
+      action: act,
+      index: target.dataset.index === undefined ? undefined : Number(target.dataset.index),
+    });
+  });
+
+  window.addEventListener('message', (event) => {
+    const message = event.data;
+    if (!message || message.type !== 'tailnet-state') return;
+    view = message.view;
+    const live = !!(view && view.state && view.state.running);
+    const dot = mark.querySelector('.dot');
+    if (dot) dot.classList.toggle('live', live);
+    draw();
+  });
+})();`;
 }

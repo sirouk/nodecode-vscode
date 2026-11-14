@@ -2,7 +2,7 @@
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
   "description": "Nodecode in VS Code: the gateway's own page in your sidebar or an editor tab, with nothing in between.",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -78,6 +78,12 @@
           "type": "webview",
           "name": "Nodecode",
           "contextualTitle": "Nodecode"
+        },
+        {
+          "id": "nodecodeRemote",
+          "type": "webview",
+          "name": "Remote Access",
+          "contextualTitle": "Remote Access"
         }
       ]
     },
@@ -87,6 +93,12 @@
         "title": "Open Nodecode",
         "category": "Nodecode",
         "icon": "$(chip)"
+      },
+      {
+        "command": "nodecode.remoteAccess",
+        "title": "Remote Access: reach this machine from your tailnet",
+        "category": "Nodecode",
+        "icon": "$(globe)"
       },
       {
         "command": "nodecode.openInEditor",

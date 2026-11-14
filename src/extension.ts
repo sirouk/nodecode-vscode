@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 import { NodecodeCli } from "./cli";
 import { NodecodeDiscovery, Notifications } from "./discovery";
 import { Gateway, GatewayStatus } from "./gateway";
+import { RemoteView } from "./remote";
 import { NodecodeView } from "./view";
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -15,6 +16,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const cli = new NodecodeCli(discovery, notes);
   const gateway = new Gateway(cli, discovery, notes);
   const view = new NodecodeView(gateway, notes, { install: () => cli.installInTerminal() });
+  const remote = new RemoteView(discovery, cli, notes, context.extensionPath);
 
   discovery.watch(context);
 
@@ -40,7 +42,7 @@ export function activate(context: vscode.ExtensionContext): void {
       refreshing = (async () => {
         const status = await gateway.status();
         reflect(status);
-        await view.refresh();
+        await Promise.all([view.refresh(), remote.refresh()]);
       })().finally(() => {
         refreshing = undefined;
       });
@@ -52,6 +54,9 @@ export function activate(context: vscode.ExtensionContext): void {
     discovery.onDidChange(() => void refresh()),
     view,
     vscode.window.registerWebviewViewProvider("nodecodeWeb", view, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider("nodecodeRemote", remote, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     { dispose: () => gateway.dispose() },
@@ -101,6 +106,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage("Copied the Nodecode link. It carries the operator token: keep it to yourself.");
       },
     ],
+    ["nodecode.remoteAccess", () => vscode.commands.executeCommand("nodecodeRemote.focus")],
     ["nodecode.showDiagnostics", () => notes.show()],
   ];
   context.subscriptions.push(...commands.map(([id, run]) => vscode.commands.registerCommand(id, run)));

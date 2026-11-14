@@ -38,7 +38,29 @@ Requires VS Code 1.96 or newer and the [nodecode](https://nodecode.ai) CLI on PA
 | **Nodecode: Install Nodecode** | Runs the official installer in a terminal |
 | **Nodecode: Show Diagnostics Output** | Activation log and CLI calls (`nodecode.diagnostics`) |
 
+| Command | What it does |
+| --- | --- |
+| **Nodecode: Remote Access** | Focus the Remote Access view: this machine reached from your tailnet |
+
 The view's title bar carries **Reload**, **Open in an Editor Tab** and **Open in Your Browser**.
+
+## Remote Access
+
+The **Remote Access** view puts this machine's organism on your tailnet's own https
+address, for a phone or a laptop that has no ssh and no loopback port. It shows the
+address, the pairing code a new device types, and the devices already paired; it turns
+remote access on and off, mints a code, and forgets a device.
+
+The work is a cell, `nodecode-web-remote`, and the extension carries a copy of it: a
+home whose hub does not have the cell yet gets it from the extension, written into
+`~/.nodecode/cells/` and loaded by restarting the gateway. A home that already has the
+cell keeps its own.
+
+What it needs, in order: [Tailscale](https://tailscale.com/download) on the machine,
+signed in; MagicDNS and **HTTPS Certificates** on for the tailnet, in the admin console
+under DNS. The view names whichever step is missing and links to it. Nothing here talks
+to Tailscale itself — the cell does, through `tailscale serve` on a port of its own, and
+never 443.
 
 ## How it works
 

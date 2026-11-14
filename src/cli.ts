@@ -175,6 +175,11 @@ export class NodecodeCli {
     return this.run(["gateway", "on"], 90000);
   }
 
+  /** Restart the gateway on this build: a cell put in place by hand loads at boot. */
+  restartGateway(): Promise<CommandResult> {
+    return this.run(["gateway", "restart"], 180000);
+  }
+
   /** Open this home's page in the operator's own browser. */
   openInBrowser(): void {
     const binary = this.resolve();

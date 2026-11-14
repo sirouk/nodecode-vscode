@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The tailnet panel opened empty under a green dot.** Its height was capped at 70% of the one-line mark it hangs from, about 35 pixels, so every row — this machine, its address, the pairing code, the machines and devices — was drawn and clipped out of sight. The cap now follows the view's own height.
+- **The tailnet panel opened empty under a green dot.** Its height was capped at 70% of the one-line mark it hangs from, about 35 pixels, so every row — this machine, its address, the pairing code, the machines and devices — was drawn and clipped out of sight. The cap now follows the view's own height, and the width gives way to a sidebar narrower than the panel instead of running off its left edge.
 
 
 ### Changed

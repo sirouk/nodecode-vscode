@@ -77,7 +77,7 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       #tailnet-mark .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px;
         background: var(--vscode-disabledForeground); vertical-align: middle; }
       #tailnet-mark .dot.live { background: var(--vscode-testing-iconPassed, #3fb950); }
-      #tailnet-panel { position: absolute; right: 10px; top: 32px; width: 300px; max-height: calc(100vh - 56px); overflow: auto;
+      #tailnet-panel { position: absolute; right: 10px; top: 32px; box-sizing: border-box; width: min(326px, calc(100vw - 20px)); max-height: calc(100vh - 56px); overflow: auto;
         padding: 10px 12px; border-radius: 6px; z-index: 11; font-size: 11px; line-height: 1.5;
         background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
         border: 1px solid var(--vscode-widget-border, rgba(127,127,127,.35));

@@ -364,7 +364,8 @@ export function tailnetScript(): string {
   const panel = document.getElementById('tailnet-panel');
   const body = document.getElementById('tailnet-body');
   if (!mark || !panel || !body) return;
-  const api = acquireVsCodeApi();
+  // The shell above this already holds the one API object this webview gets:
+  // asking for a second throws, and the panel would never draw.
   let view = null;
 
   function el(tag, cls, text) {

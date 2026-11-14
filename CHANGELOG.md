@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14]
+
+### Fixed
+
+- **The tailnet panel never drew.** Its script asked for the webview API a second time, which throws in a real webview, so the panel opened empty and every button in it was dead. It now uses the API object the page shell already holds.
+
 ## [0.2.13]
 
 ### Fixed

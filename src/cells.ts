@@ -7,14 +7,18 @@
 // files here are the room's own, byte for byte, so a home that installs from
 // this bundle and one that installs from the hub end up with the same cell.
 //
-// `nodecode add nc://nodecode-web-remote` is the way in once the hub knows the
-// name; this copy is for the home whose hub does not know it yet.
+// The copy here is what a home without the cell gets, and it is the only
+// way this extension ever puts code anywhere: the files travel in the package,
+// nothing is fetched, and the room's own copy stays byte for byte this one.
 
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
 export const REMOTE_CELL = "nodecode-web-remote";
+
+/** The cell that serves the gateway's own page at /web/. Nodecode ships it; this bundle does not. */
+export const WEB_CELL = "nodecode-web";
 
 /** This home, the way the CLI resolves it. */
 export function nodecodeHome(): string {
@@ -46,4 +50,13 @@ export function installBundledCell(extensionPath: string, home: string = nodecod
     fs.copyFileSync(path.join(source, entry.name), path.join(target, entry.name));
   }
   return { path: target, copied: true };
+}
+
+/**
+ * Whether this home already has the web cell on disk. The cell is nodecode's
+ * own and is installed by nodecode, never by this extension: the answer is what
+ * decides between loading it (a gateway restart) and saying where it comes from.
+ */
+export function webCellInstalled(home: string = nodecodeHome()): boolean {
+  return fs.existsSync(path.join(cellFolder(home, WEB_CELL), `${WEB_CELL}.asd`));
 }

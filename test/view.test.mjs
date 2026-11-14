@@ -8,7 +8,7 @@ Module._load=function(name,...args){return name==='vscode'?vscode:load.call(this
 const {renderHtml,escapeHtml}=require('../out/view.js');
 Module._load=load;
 
-const status=(overrides={})=>({state:'ready',message:'Nodecode is ready.',version:'0.1.14',binary:'/usr/bin/nodecode',installCommand:'curl -fsSL https://nodecode.ai/install.sh | sh',installUrl:'https://nodecode.ai/install.sh',docsUrl:'https://nodecode.ai/docs',baseUrl:'http://127.0.0.1:50171',...overrides});
+const status=(overrides={})=>({state:'ready',message:'Nodecode is ready.',version:'0.1.14',binary:'/usr/bin/nodecode',docsUrl:'https://nodecode.ai/docs',baseUrl:'http://127.0.0.1:50171',...overrides});
 const render=(options)=>renderHtml({status:status(),nonce:'abc123',cspSource:'x',...options});
 
 test('the ready view frames the gateway page and allows exactly that origin',()=>{
@@ -48,9 +48,12 @@ test('each missing piece names one step and never leaks the token',()=>{
     assert.doesNotMatch(html,/http:\/\/127\.0\.0\.1:\d+\/web\/#t=/,`${state} frames nothing`);
     assert.match(html,/data-action="recheck"/);
   }
-  assert.match(render({status:status({state:'missing-cli',message:'x'})}),/data-action="install"/);
+  assert.doesNotMatch(render({status:status({state:'missing-cli',message:'x'})}),/data-action="install"/,'a missing nodecode is never installed from here');
+  assert.match(render({status:status({state:'missing-cli',message:'x'})}),/href="https:\/\/nodecode\.ai\/docs"/,'the docs are where it comes from');
   assert.match(render({status:status({state:'gateway-down',message:'x'})}),/data-action="start"/);
-  assert.match(render({status:status({state:'web-cell-off',message:'x'})}),/data-action="enable"/);
+  assert.match(render({status:status({state:'web-cell-off',message:'x',webCellInstalled:true})}),/data-action="enable"/,'a cell this machine has is loaded from here');
+  assert.doesNotMatch(render({status:status({state:'web-cell-off',message:'x',webCellInstalled:false})}),/data-action="enable"/,'a cell this home lacks is never promised');
+  assert.match(render({status:status({state:'web-cell-off',message:'x',webCellInstalled:false})}),/\/cells/,'and the page says where to turn it on');
   assert.doesNotMatch(render({status:status({state:'web-cell-off',message:'x'})}),/data-action="install"/);
 });
 
@@ -72,11 +75,11 @@ test('a poll that finds nothing new leaves the framed page alone',async()=>{
   const {NodecodeView}=require('../out/view.js');
   let writes=0,html='';
   const webview={cspSource:'x',options:{},set html(value){writes++;html=value;},get html(){return html;},onDidReceiveMessage(){}};
-  let state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',installCommand:'x',installUrl:'y',docsUrl:'z',baseUrl:'http://127.0.0.1:50171'};
+  let state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',docsUrl:'z',baseUrl:'http://127.0.0.1:50171'};
   const page='http://127.0.0.1:53117/web/#t=secret';
   let link=page;
-  const gateway={frame:async()=>link?{status:state,pageUrl:link,pageOrigin:'http://127.0.0.1:53117'}:{status:state},status:async()=>state,startGateway:async()=>state,enableWebCell:async()=>state,notify(){}};
-  const view=new NodecodeView(gateway,{log(){}},{install(){}});
+  const gateway={frame:async()=>link?{status:state,pageUrl:link,pageOrigin:'http://127.0.0.1:53117'}:{status:state},status:async()=>state,startGateway:async()=>state,reloadWebCell:async()=>state,notify(){}};
+  const view=new NodecodeView(gateway,{log(){}});
   view.resolveWebviewView({webview,onDidDispose:(fn)=>fn&&0});
   await new Promise((resolve)=>setTimeout(resolve,20));
   assert.equal(writes,1,'the page is written once');
@@ -99,10 +102,10 @@ test('the editor tab is opened once, and pressing again reveals it',async()=>{
     made.push(panel);
     return panel;
   };
-  const state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',installCommand:'x',docsUrl:'z'};
+  const state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',docsUrl:'z'};
   const page={status:state,pageUrl:'http://127.0.0.1:53117/web/#t=tok',pageOrigin:'http://127.0.0.1:53117'};
-  const gateway={frame:async()=>page,status:async()=>state,startGateway:async()=>state,enableWebCell:async()=>state};
-  const view=new NodecodeView(gateway,{log(){}},{install(){}});
+  const gateway={frame:async()=>page,status:async()=>state,startGateway:async()=>state,reloadWebCell:async()=>state};
+  const view=new NodecodeView(gateway,{log(){}});
   try{
     await view.openInEditor();
     await view.openInEditor();
@@ -116,9 +119,9 @@ test('a view that went away mid-write is logged, never thrown',async()=>{
   const {NodecodeView}=require('../out/view.js');
   const logged=[];
   const webview={options:{},onDidReceiveMessage:()=>({dispose(){}}),set html(_value){throw new Error('Webview is disposed');},get html(){return '';}};
-  const state={state:'gateway-down',message:'nothing yet',version:'unknown',installCommand:'x',docsUrl:'z'};
-  const gateway={frame:async()=>({status:state}),status:async()=>state,startGateway:async()=>state,enableWebCell:async()=>state};
-  const view=new NodecodeView(gateway,{log:(line)=>logged.push(line)},{install(){}});
+  const state={state:'gateway-down',message:'nothing yet',version:'unknown',docsUrl:'z'};
+  const gateway={frame:async()=>({status:state}),status:async()=>state,startGateway:async()=>state,reloadWebCell:async()=>state};
+  const view=new NodecodeView(gateway,{log:(line)=>logged.push(line)});
   try{
     view.resolveWebviewView({webview,onDidDispose:()=>undefined});
     await view.refresh();
@@ -131,9 +134,9 @@ test('reload writes the page again even when nothing changed, and a plain poll d
   let writes=0,html='';
   const webview={options:{},set html(value){writes+=1;html=value;},get html(){return html;},onDidReceiveMessage:()=>({dispose(){}})};
   let revision=1;
-  const state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',installCommand:'x',docsUrl:'z'};
-  const gateway={frame:async()=>({status:state,pageUrl:'http://127.0.0.1:53117/web/#t=tok',pageOrigin:'http://127.0.0.1:53117',revision}),status:async()=>state,startGateway:async()=>state,enableWebCell:async()=>state};
-  const view=new NodecodeView(gateway,{log(){}},{install(){}});
+  const state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',docsUrl:'z'};
+  const gateway={frame:async()=>({status:state,pageUrl:'http://127.0.0.1:53117/web/#t=tok',pageOrigin:'http://127.0.0.1:53117',revision}),status:async()=>state,startGateway:async()=>state,reloadWebCell:async()=>state};
+  const view=new NodecodeView(gateway,{log(){}});
   try{
     view.resolveWebviewView({webview,onDidDispose:()=>undefined});
     await view.refresh();

@@ -1,6 +1,8 @@
 // Activation: the status bar, one webview view (and editor tab) framing the
-// gateway's own page, and the commands that fix the three things standing in
-// front of it — a missing nodecode, a stopped gateway, a web cell that is off.
+// gateway's own page, and the commands that fix the two things standing in front
+// of it — a stopped gateway, and a web cell its gateway has not loaded. Nothing
+// is installed or downloaded from here: nodecode, and its cell, are the
+// operator's own, and the only code this extension runs is in its own package.
 
 import * as vscode from "vscode";
 
@@ -58,7 +60,7 @@ export function activate(context: vscode.ExtensionContext): void {
       return tailnet.state();
     },
   };
-  const view = new NodecodeView(gateway, notes, { install: () => cli.installInTerminal() }, tailnet);
+  const view = new NodecodeView(gateway, notes, tailnet);
 
   discovery.watch(context);
 
@@ -112,7 +114,6 @@ export function activate(context: vscode.ExtensionContext): void {
         await view.refresh(true);
       },
     ],
-    ["nodecode.install", () => cli.installInTerminal()],
     [
       "nodecode.startGateway",
       async () => {
@@ -127,8 +128,8 @@ export function activate(context: vscode.ExtensionContext): void {
       "nodecode.enableWebCell",
       async () => {
         await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: "Turning on the Nodecode web cell…" },
-          () => gateway.enableWebCell(),
+          { location: vscode.ProgressLocation.Notification, title: "Loading the Nodecode web cell…" },
+          () => gateway.reloadWebCell(),
         );
         await refresh();
       },
@@ -162,20 +163,19 @@ export function activate(context: vscode.ExtensionContext): void {
     if (status.state === "missing-cli" && !asked("install")) {
       remember("install");
       void vscode.window
-        .showInformationMessage("Nodecode is not installed. Install it to show its page in this window.", "Install", "Docs")
+        .showInformationMessage("Nodecode is not installed: the page this view shows is its own process on this machine.", "Docs", "Not now")
         .then((choice) => {
-          if (choice === "Install") cli.installInTerminal();
           if (choice === "Docs") void vscode.env.openExternal(vscode.Uri.parse(status.docsUrl));
         });
-    } else if (status.state === "web-cell-off" && !asked("web-cell")) {
+    } else if (status.state === "web-cell-off" && status.webCellInstalled && !asked("web-cell")) {
       remember("web-cell");
       void vscode.window
         .showInformationMessage("Nodecode is running, but its web cell is off — the cell that serves the page this view shows.", "Turn on the web cell", "Not now")
         .then(async (choice) => {
           if (choice !== "Turn on the web cell") return;
           await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: "Turning on the Nodecode web cell…" },
-            () => gateway.enableWebCell(),
+            { location: vscode.ProgressLocation.Notification, title: "Loading the Nodecode web cell…" },
+            () => gateway.reloadWebCell(),
           );
           await refresh();
         });

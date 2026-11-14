@@ -1,6 +1,7 @@
 // The view: the gateway's own page, framed, and nothing else. Until nodecode is
 // installed, its gateway is up and the web cell is on, the same view says what
-// is missing and offers the one step that fixes it.
+// is missing. Nothing is installed from here: nodecode is the operator's, and
+// so is its web cell.
 
 import * as crypto from "crypto";
 import * as vscode from "vscode";
@@ -24,7 +25,6 @@ export function escapeHtml(text: string): string {
 }
 
 const ACTIONS: Record<string, string> = {
-  install: "Install Nodecode",
   start: "Start the gateway",
   enable: "Turn on the web cell",
   recheck: "Check again",
@@ -32,9 +32,10 @@ const ACTIONS: Record<string, string> = {
 
 function buttons(status: GatewayStatus): string {
   const actions: string[] = [];
-  if (status.state === "missing-cli" || status.state === "unusable-cli") actions.push("install");
   if (status.state === "gateway-down") actions.push("start");
-  if (status.state === "web-cell-off") actions.push("enable");
+  // A cell this home does not have cannot be turned on from here: the button
+  // would promise an install. The page says where the cell comes from instead.
+  if (status.state === "web-cell-off" && status.webCellInstalled) actions.push("enable");
   actions.push("recheck");
   const rows = actions
     .map(
@@ -122,11 +123,17 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       <h1>${escapeHtml(status.message)}</h1>
       ${
         status.state === "missing-cli" || status.state === "unusable-cli"
-          ? `<p>Nodecode runs as one process on this machine, and this view is its own page. Install it, then check again.</p><code>${escapeHtml(status.installCommand)}</code>`
+          ? `<p>Nodecode runs as one process on this machine, and this view is its own page. It is installed on its own, never by this extension: install it from <a href="${escapeHtml(status.docsUrl)}">the docs</a>, then check again.</p>`
           : ""
       }
       ${status.state === "gateway-down" ? `<p>The gateway is the background process the page talks to. Starting it here also keeps it running at login.</p>` : ""}
-      ${status.state === "web-cell-off" ? `<p>The web cell ships with Nodecode and serves the page at <code class="inline">/web/</code>. Turning it on adds it to your cells folder, where Nodecode keeps it up to date.</p>` : ""}
+      ${
+        status.state === "web-cell-off"
+          ? status.webCellInstalled
+            ? `<p>The web cell is on this machine and this gateway has not loaded it. Restarting the gateway loads it, and the page comes back.</p>`
+            : `<p>The web cell is off in this home. It ships with Nodecode, and this extension installs nothing: turn it on in nodecode itself — open <code class="inline">/cells</code> and turn <code class="inline">web</code> on — then check again.</p>`
+          : ""
+      }
       ${buttons(status)}
       <div class="meta">${escapeHtml(status.binary ?? "nodecode")}${status.version && status.version !== "unknown" ? ` · ${escapeHtml(status.version)}` : ""} · <a href="${escapeHtml(status.docsUrl)}">docs</a></div>
     </div>`;
@@ -169,7 +176,6 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
   constructor(
     private readonly gateway: Gateway,
     private readonly notes: Notifications,
-    private readonly actions: { install: () => void },
     private readonly tailnet: {
       state: () => Promise<Record<string, unknown>>;
       act: (body: { action: string; index?: number }) => Promise<Record<string, unknown>>;
@@ -278,10 +284,6 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
   ): Promise<void> {
     try {
       switch (action) {
-        case "install":
-          this.notes.log("install requested from the view");
-          this.actions.install();
-          return;
         case "docs":
           void vscode.env.openExternal(vscode.Uri.parse("https://nodecode.ai/docs"));
           return;
@@ -292,7 +294,7 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           return;
         case "enable":
           await this.render(surface, "Turning the web cell on…");
-          await this.gateway.enableWebCell();
+          await this.gateway.reloadWebCell();
           await this.refresh();
           return;
         case "tailnet":

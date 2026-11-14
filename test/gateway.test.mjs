@@ -15,7 +15,7 @@ Module._load=load;
 const TOKEN='token-abc';
 function cliMock(overrides={}){
   return {version:'nodecode 1.0',versionError:()=>'',resolve:()=>'/usr/bin/nodecode',readVersion(){return this.version;},
-    enableWebCell:async()=>({code:0,stdout:'',stderr:'',timedOut:false}),startGateway:async()=>({code:0,stdout:'',stderr:'',timedOut:false}),...overrides};
+    restartGateway:async()=>({code:0,stdout:'',stderr:'',timedOut:false}),startGateway:async()=>({code:0,stdout:'',stderr:'',timedOut:false}),...overrides};
 }
 const endpoint=(port)=>({baseUrl:`http://127.0.0.1:${port}`,token:TOKEN,port,pid:1,restorable:false});
 const discoveryMock=(value)=>({current:()=>value,probe:async()=>value});
@@ -45,7 +45,7 @@ test('the page link carries the operator token in the fragment, and its port fol
 test('nothing installed is its own state, not a gateway failure',async()=>{
   const state=await new Gateway(cliMock({resolve:()=>undefined}),discoveryMock(null),notes()).status();
   assert.equal(state.state,'missing-cli');
-  assert.match(state.installCommand,/nodecode\.ai\/install\.sh/);
+  assert.equal(typeof state.webCellInstalled,'boolean','and whether the web cell is on this machine');
 });
 
 test('a nodecode that will not start is named as such',async()=>{
@@ -163,13 +163,13 @@ test('a proxy that stopped is replaced, never framed again',async()=>{
 
 test('a command that failed says why, in the gateway own words',async()=>{
   errors.length=0;
-  const failing=cliMock({enableWebCell:async()=>({code:3,stdout:'',stderr:'no such cell: nc://web\nsecond line',timedOut:false})});
+  const failing=cliMock({restartGateway:async()=>({code:3,stdout:'',stderr:'nothing answered on port 50171\nsecond line',timedOut:false})});
   const gateway=new Gateway(failing,discoveryMock(endpoint(50171)),notes());
   try{
-    await gateway.enableWebCell();
+    await gateway.reloadWebCell();
     assert.equal(errors.length,1,'one message, not a silent no-op');
-    assert.match(errors[0],/turning on the web cell failed/);
-    assert.match(errors[0],/no such cell: nc:\/\/web/);
+    assert.match(errors[0],/loading the web cell failed/);
+    assert.match(errors[0],/nothing answered on port 50171/);
     assert.doesNotMatch(errors[0],/second line/,'the first line is the reason');
   }finally{gateway.dispose();}
 });

@@ -2,7 +2,7 @@
 // against the CLI and the gateway on this machine. Run by `npm test`, and by
 // release.sh before anything is packaged.
 //   1. nodecode --version prints a version
-//   2. nodecode help lists the verbs the extension runs: web, add, gateway
+//   2. nodecode help lists the verbs the extension runs: web, gateway
 //   3. nodecode web --print prints the page link
 //   4. the link's token is the home's operator token
 //   5. the page is served with frame-ancestors 'none' — the reason for the proxy
@@ -67,7 +67,7 @@ if (!version.spawned) {
 record("nodecode --version prints a version", version.code === 0 && /^nodecode \S+/.test(version.stdout.trim()), version.stdout.trim() || version.stderr.trim());
 
 const help = await run(["help"]);
-const verbs = ["web", "add", "gateway", "rpc"];
+const verbs = ["web", "gateway"];
 record("nodecode help lists the verbs this extension runs", verbs.every((verb) => new RegExp(`\\b${verb}\\b`).test(help.stdout)), verbs.join(", "));
 
 const webHelp = await run(["help", "web"]);

@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Marketplace compliance: the extension installs nothing and downloads nothing.** The **Install Nodecode** command is gone, and with it the terminal that ran the official `curl … | sh` installer, the install button on the view's first-run screen, and every install address in the package. Nodecode is the operator's own; where it is missing, the view links to the docs and says so.
+- **Turning the web cell on now loads the cell, and never fetches one.** The extension used to run `nodecode add nc://web`, which can reach the cells hub. It now restarts the gateway (`nodecode gateway restart`) to load a cell the machine already has, and where the home has no such cell it says where the cell comes from instead of promising a button. The status the view reads now carries whether that cell is on disk, so the offer appears only when it can be kept.
+
+### Fixed
+
+- **A cell whose system definition names a file it no longer has.** `nodecode-web`'s `.asd` still listed `bridge`, which had moved to the `nodecode-web-remote` cell, so the web cell failed to load and the view could only ever show its setup screen. The stale component is gone and the cell loads again.
+
 ## [0.2.14]
 
 ### Fixed

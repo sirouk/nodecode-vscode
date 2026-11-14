@@ -64,6 +64,10 @@ test('activation registers the view and every command it publishes',async()=>{
   await listening;
   fs.writeFileSync(path.join(home,'history.db.owner'),JSON.stringify({pid:1,port:gatewayServer.address().port}));
   fs.writeFileSync(path.join(home,'operator-token'),'token-abc\n');
+  // The web cell is nodecode's own, and the ask is only made where it is on this
+  // machine: the extension loads an installed cell, it never installs one.
+  fs.mkdirSync(path.join(home,'cells','nodecode-web'),{recursive:true});
+  fs.writeFileSync(path.join(home,'cells','nodecode-web','nodecode-web.asd'),'(defsystem "nodecode-web")\n');
   activate(context);
   await settle();
   assert.ok(providers.get('nodecodeWeb'),'the sidebar view is registered');

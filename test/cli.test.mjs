@@ -1,18 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,chmod,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,chmod,rm,readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createRequire,Module} from 'node:module';
 const require=createRequire(import.meta.url),load=Module._load;
-const terminals=[];
 Module._load=function(name,...args){
   return name==='vscode'?{
     workspace:{getConfiguration:()=>({get:()=>undefined})},
-    window:{createTerminal:(options)=>{const terminal={options,lines:[],show(){},sendText(text){this.lines.push(text);}};terminals.push(terminal);return terminal;},showErrorMessage:async()=>undefined},
+    window:{showErrorMessage:async()=>undefined},
   }:load.call(this,name,...args);
 };
-const {NodecodeCli,resolveCliBinary,installCommand,NODECODE_INSTALL_COMMAND}=require('../out/cli.js');
+const {NodecodeCli,resolveCliBinary}=require('../out/cli.js');
 Module._load=load;
 const notes={lines:[],log(line){this.lines.push(line);}};
 const cliFor=(binary)=>{const cli=new NodecodeCli({current:()=>null,probe:async()=>null},{log(){}});cli.resolve=()=>binary;return cli;};
@@ -29,9 +28,6 @@ test('finds the native install outside a GUI PATH, without overriding explicit c
   assert.equal(resolveCliBinary(join(home,'missing'),options),undefined);
   assert.equal(resolveCliBinary('another-command',options),undefined);
   assert.equal(resolveCliBinary(dir,options),undefined);
-  assert.equal(NODECODE_INSTALL_COMMAND,'curl -fsSL https://nodecode.ai/install.sh | sh');
-  assert.match(installCommand('win32'),/install\.ps1/);
-  assert.match(installCommand('darwin'),/install\.sh \| sh/);
 }));
 
 test('the version is read, and a binary that will not start says why',()=>fixture(async root=>{
@@ -60,20 +56,20 @@ test('the page link is read from web --print, and its absence is not a crash',()
   assert.equal(await silent.webLink(),undefined);
 }));
 
-test('turning the web cell on asks for the shipped cell, answered on the line',()=>fixture(async root=>{
+test('the web cell is loaded by restarting the gateway: nothing is added, and nothing is fetched',()=>fixture(async root=>{
   const cli=cliFor(await script(root,'for arg in "$@"; do printf "%s\\n" "$arg"; done'));
-  const result=await cli.enableWebCell();
-  assert.equal(result.code,0);
-  assert.deepEqual(result.stdout.trim().split('\n'),['add','nc://web','--yes','--wait','120']);
+  assert.deepEqual((await cli.restartGateway()).stdout.trim().split('\n'),['gateway','restart']);
   assert.deepEqual((await cli.startGateway()).stdout.trim().split('\n'),['gateway','on']);
 }));
 
-test('installing runs the official installer in a terminal the operator can watch',()=>{
-  terminals.length=0;
-  new NodecodeCli({},notes).installInTerminal();
-  assert.equal(terminals.length,1);
-  assert.equal(terminals[0].lines[0],installCommand());
-  assert.equal(terminals[0].options.name,'Install Nodecode');
+test('nothing here installs nodecode or fetches a cell: the VSIX is all the code there is',async()=>{
+  const api=require('../out/cli.js');
+  assert.deepEqual(Object.keys(api).filter((name)=>/install|download|fetch|^add$/i.test(name)),[],'no installer is exported at all');
+  const cli=new NodecodeCli({},notes);
+  assert.equal(cli.installInTerminal,undefined);
+  assert.equal(cli.enableWebCell,undefined);
+  const built=await readFile(new URL('../out/cli.js',import.meta.url),'utf8');
+  assert.doesNotMatch(built,/curl|install\.sh|install\.ps1|nc:\/\//,'and no script or hub address survives in the built file');
 });
 
 test('a Windows command shim is started through cmd, and a native binary is not',()=>{

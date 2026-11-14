@@ -6,11 +6,17 @@ The Nodecode gateway's own page, in your sidebar or an editor tab — not a copy
 
 ## What it asks for, in order
 
-1. **Is nodecode installed?** If not, the view says so and offers the installer.
+1. **Is nodecode installed?** If not, the view says so and links to the docs, because nodecode is yours to install: this extension installs nothing.
 2. **Is the gateway running?** If not, it offers **Start the gateway** (`nodecode gateway on`), which also keeps it running at login.
-3. **Is the web cell on?** If not, it asks once, by name, and turns it on with `nodecode add nc://web` — the cell ships with Nodecode, so it stays current with the release you run.
+3. **Has the gateway loaded the web cell?** The cell is Nodecode's own and ships with it, so this is a restart and never an install. Where the cell is on the machine and the running gateway has not loaded it, the view offers to restart the gateway, which loads it. Where the home has no cell at all, the view says where it comes from and leaves the turning on to Nodecode.
 
 Once all three hold, the view shows the page. Nothing else to configure.
+
+## Nothing is downloaded
+
+Every line of code this extension runs ships in the `.vsix`: there is no installer, no update step, no code fetched from a repository or a CDN, and nothing collected from the network at any point after install. That is why the extension cannot install Nodecode for you, and why turning the web cell on means loading a cell your own Nodecode already has rather than fetching one.
+
+The one folder it writes outside its own package is the remote-access cell it carries (see below), copied into `~/.nodecode/cells/` from the package itself and only when that home has no such cell.
 
 ## Install
 
@@ -22,7 +28,7 @@ code --install-extension sirouk.nodecode-vscode
 
 From a release asset: download the latest `.vsix` from the [Releases](https://github.com/sirouk/nodecode-vscode/releases) page, then **Extensions → … → Install from VSIX…**.
 
-Requires VS Code 1.96 or newer and the [nodecode](https://nodecode.ai) CLI on PATH (or `nodecode.cliPath`).
+Requires VS Code 1.96 or newer and the [nodecode](https://nodecode.ai) CLI on PATH (or `nodecode.cliPath`), installed by you: the extension neither installs it nor updates it.
 
 ## Commands
 
@@ -33,9 +39,8 @@ Requires VS Code 1.96 or newer and the [nodecode](https://nodecode.ai) CLI on PA
 | **Nodecode: Open the Page in Your Browser** | Runs `nodecode web`, which opens your own browser |
 | **Nodecode: Copy the Page Link** | Copies the link, token and all — keep it to yourself |
 | **Nodecode: Reload the Page** | Re-probes the gateway and reloads the frame |
-| **Nodecode: Turn On the Web Cell** | `nodecode add nc://web --yes` |
+| **Nodecode: Turn On the Web Cell** | Restarts the gateway (`nodecode gateway restart`), loading the web cell this machine already has |
 | **Nodecode: Start the Gateway** | `nodecode gateway on` |
-| **Nodecode: Install Nodecode** | Runs the official installer in a terminal |
 | **Nodecode: Show Diagnostics Output** | Activation log and CLI calls (`nodecode.diagnostics`) |
 
 | Command | What it does |

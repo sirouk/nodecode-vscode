@@ -1,5 +1,6 @@
-// Locating the `nodecode` CLI, its version, and the three things the extension
-// does through it: turn the web cell on, start the gateway, open the page.
+// Locating the `nodecode` CLI, its version, and the two things the extension
+// does through it: start the gateway, and open the page. Nothing here installs:
+// the extension runs the nodecode the operator already has, and fetches no code.
 
 import { execFile, execFileSync } from "child_process";
 import * as fs from "fs";
@@ -11,21 +12,12 @@ import { NodecodeDiscovery, Notifications } from "./discovery";
 
 export const NODECODE_CLI_UNKNOWN_VERSION = "unknown";
 export const NODECODE_DOCS_URL = "https://nodecode.ai/docs";
-export const NODECODE_INSTALL_URL = "https://nodecode.ai/install.sh";
-export const NODECODE_INSTALL_COMMAND = "curl -fsSL https://nodecode.ai/install.sh | sh";
-export const NODECODE_WINDOWS_INSTALL_COMMAND = "irm https://nodecode.ai/install.ps1 | iex";
-/** The cell that serves the gateway's own page at /web/. */
-export const NODECODE_WEB_CELL = "web";
 
 export interface CommandResult {
   code: number;
   stdout: string;
   stderr: string;
   timedOut: boolean;
-}
-
-export function installCommand(platform: string = process.platform): string {
-  return platform === "win32" ? NODECODE_WINDOWS_INSTALL_COMMAND : NODECODE_INSTALL_COMMAND;
 }
 
 export function resolveCliBinary(
@@ -165,11 +157,6 @@ export class NodecodeCli {
     return link;
   }
 
-  /** Turn the web cell on (installs the shipped cell when it is missing, and starts it live). */
-  enableWebCell(): Promise<CommandResult> {
-    return this.run(["add", `nc://${NODECODE_WEB_CELL}`, "--yes", "--wait", "120"], 180000);
-  }
-
   /** Keep the gateway running in the background, and at login. */
   startGateway(): Promise<CommandResult> {
     return this.run(["gateway", "on"], 90000);
@@ -191,16 +178,6 @@ export class NodecodeCli {
     execFile(plan.file, plan.args, { timeout: 30000 }, (error) => {
       if (error) this.notes.log(`nodecode web failed: ${error.message.split("\n")[0]}`);
     });
-  }
-
-  /** Run the official installer in a terminal the operator can watch. */
-  installInTerminal(): void {
-    const terminal = vscode.window.createTerminal({
-      name: "Install Nodecode",
-      ...(process.platform === "win32" ? { shellPath: "powershell.exe" } : {}),
-    });
-    terminal.show();
-    terminal.sendText(installCommand());
   }
 }
 

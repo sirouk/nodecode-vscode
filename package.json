@@ -2,7 +2,7 @@
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
   "description": "Nodecode in VS Code: the gateway's own page in your sidebar or an editor tab, with nothing in between.",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -131,12 +131,6 @@
         "icon": "$(play)"
       },
       {
-        "command": "nodecode.install",
-        "title": "Install Nodecode",
-        "category": "Nodecode",
-        "icon": "$(cloud-download)"
-      },
-      {
         "command": "nodecode.showDiagnostics",
         "title": "Show Diagnostics Output",
         "category": "Nodecode",
@@ -150,9 +144,6 @@
         },
         {
           "command": "nodecode.startGateway"
-        },
-        {
-          "command": "nodecode.install"
         }
       ],
       "view/title": [

@@ -5,7 +5,8 @@
 import * as http from "http";
 import * as vscode from "vscode";
 
-import { CommandResult, NodecodeCli, installCommand, NODECODE_DOCS_URL, NODECODE_INSTALL_URL } from "./cli";
+import { webCellInstalled } from "./cells";
+import { CommandResult, NodecodeCli, NODECODE_DOCS_URL } from "./cli";
 import { GatewayEndpoint, NodecodeDiscovery, Notifications } from "./discovery";
 import { GatewayProxy, startGatewayProxy } from "./proxy";
 
@@ -17,9 +18,9 @@ export interface GatewayStatus {
   message: string;
   version: string;
   binary?: string;
-  installCommand: string;
-  installUrl: string;
   docsUrl: string;
+  /** Whether this home already has the web cell on disk: nodecode's own, never this extension's. */
+  webCellInstalled?: boolean;
   /** Where the gateway is, when one answered. */
   baseUrl?: string;
 }
@@ -75,8 +76,8 @@ export class Gateway {
     return this.inflight;
   }
 
-  private base(): Pick<GatewayStatus, "installCommand" | "installUrl" | "docsUrl"> {
-    return { installCommand: installCommand(), installUrl: NODECODE_INSTALL_URL, docsUrl: NODECODE_DOCS_URL };
+  private base(): Pick<GatewayStatus, "docsUrl" | "webCellInstalled"> {
+    return { docsUrl: NODECODE_DOCS_URL, webCellInstalled: webCellInstalled() };
   }
 
   private async inspect(): Promise<GatewayStatus> {
@@ -86,7 +87,7 @@ export class Gateway {
         ...this.base(),
         version: this.cli.version,
         state: "missing-cli",
-        message: "Nodecode is not installed, or not on this machine's PATH. Install it, then check again.",
+        message: "Nodecode is not installed, or not on this machine's PATH. This extension installs nothing: install it yourself, then check again.",
       };
     }
     this.cli.readVersion(binary);
@@ -113,7 +114,7 @@ export class Gateway {
         ...common,
         state: "web-cell-off",
         baseUrl: endpoint.baseUrl,
-        message: `The gateway is running at ${endpoint.baseUrl} without the web cell, which serves the page this view shows. Turn it on.`,
+        message: `The gateway is running at ${endpoint.baseUrl} without the web cell, which serves the page this view shows.`,
       };
     }
     return { ...common, state: "ready", message: "Nodecode is ready.", baseUrl: endpoint.baseUrl };
@@ -246,10 +247,21 @@ export class Gateway {
     return endpoint ? pageLink(endpoint) : undefined;
   }
 
-  async enableWebCell(): Promise<GatewayStatus> {
-    const result = await this.cli.enableWebCell();
-    this.report("turning on the web cell", result);
-    await this.discovery.probe();
+  /**
+   * Turn the web cell on. The cell is nodecode's own, so nothing is installed
+   * here: the gateway is restarted, which is what loads a cell already on disk
+   * -- nodecode's own words for it, and the one step this extension can take.
+   */
+  async reloadWebCell(): Promise<GatewayStatus> {
+    const result = await this.cli.restartGateway();
+    this.report("loading the web cell", result);
+    // The restarted gateway publishes its port when it is ready; wait for it
+    // rather than framing the one that just went away.
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      if (await this.discovery.probe()) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
     return this.status();
   }
 

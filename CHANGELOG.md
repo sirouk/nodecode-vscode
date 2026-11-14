@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10]
+
+### Fixed
+
+- **The panel's install button did nothing.** It sent the install as an action for the gateway's route, which does not have one, so the click was answered with a refusal the panel then redrew over. It now asks for the install as the extension's own work, and the host accepts either spelling.
+- **A restart is waited for, not assumed.** After installing the cell the panel asks the route again for up to half a minute, so a gateway still coming up is no longer shown as a fault, and a home whose gateway is not yet under the service manager is started rather than reported as failed.
+
 ## [0.2.9]
 
 ### Added

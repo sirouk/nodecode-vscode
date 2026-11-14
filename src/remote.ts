@@ -252,6 +252,12 @@ export function renderRemoteHtml(options: { nonce: string; cell: string }): stri
       vscode.postMessage({ type: 'open', url: target.dataset.url || '' });
       return;
     }
+    // Installing the cell is this extension's own work, not a word the gateway
+    // takes: it is asked for by its own message, never as an action on the route.
+    if (act === 'install') {
+      vscode.postMessage({ type: 'install' });
+      return;
+    }
     vscode.postMessage({
       type: 'act',
       action: act,
@@ -289,21 +295,29 @@ export class RemoteView implements vscode.WebviewViewProvider {
   }
 
   /** Read the route again and hand the view what it says. */
-  async refresh(): Promise<void> {
-    if (!this.view) return;
+  /** Read the route and draw what it says. Answers whether the answer was final:
+   *  a gateway still coming up is worth asking again, a refusal is not. */
+  async refresh(quiet = false): Promise<boolean> {
+    if (!this.view) return true;
     const endpoint = this.discovery.current();
     if (!endpoint) {
-      this.post({ problem: "This home's gateway is not answering. Start it, then look again.", installable: false });
-      return;
+      if (!quiet) this.post({ problem: "This home's gateway is not answering. Start it, then look again.", installable: false });
+      return false;
     }
     const read = await readRemote(endpoint);
-    if (read.kind === "ok") this.post({ state: read.state });
-    else if (read.kind === "missing")
+    if (read.kind === "ok") {
+      this.post({ state: read.state });
+      return true;
+    }
+    if (read.kind === "missing") {
       this.post({
         problem: `Remote access is the ${REMOTE_CELL} cell, and this home does not have it.`,
         installable: true,
       });
-    else this.post({ problem: `Could not read remote access: ${read.why}`, installable: false });
+      return true;
+    }
+    if (!quiet) this.post({ problem: `Could not read remote access: ${read.why}`, installable: false });
+    return false;
   }
 
   private post(view: Record<string, unknown>): void {
@@ -312,7 +326,10 @@ export class RemoteView implements vscode.WebviewViewProvider {
 
   private async handle(message: Record<string, unknown>): Promise<void> {
     const type = String(message.type || "");
-    if (type === "ready") return this.refresh();
+    if (type === "ready") {
+      await this.refresh();
+      return;
+    }
     if (type === "copy") {
       await vscode.env.clipboard.writeText(String(message.text || ""));
       return;
@@ -322,11 +339,16 @@ export class RemoteView implements vscode.WebviewViewProvider {
       if (url) await vscode.env.openExternal(vscode.Uri.parse(url));
       return;
     }
-    if (type === "install") return this.install();
+    // Both spellings: the panel asks for the install by its own message, and a
+    // click that arrives as an action must still be the install it meant.
+    if (type === "install" || (type === "act" && message.action === "install")) return this.install();
     if (type !== "act") return;
 
     const endpoint = this.discovery.current();
-    if (!endpoint) return this.refresh();
+    if (!endpoint) {
+      await this.refresh();
+      return;
+    }
     const body: { action: string; index?: number } = { action: String(message.action || "") };
     if (typeof message.index === "number") body.index = message.index;
     const read = await actRemote(endpoint, body);
@@ -350,9 +372,20 @@ export class RemoteView implements vscode.WebviewViewProvider {
       return this.post({ problem: `The cell could not be written to ${home}: ${why}`, installable: false });
     }
     this.notes.log(`remote: cell ${install.copied ? "installed" : "already present"} at ${install.path}`);
+    this.post({ problem: `Installed the cell at ${install.path}. Restarting the gateway to load it…`, installable: false });
     const restarted = await this.cli.restartGateway();
     if (restarted.code !== 0) {
-      this.notes.log(`remote: gateway restart failed: ${restarted.stderr.trim() || restarted.code}`);
+      // A home whose gateway is not under the service manager yet: start it
+      // rather than report a restart that never happened.
+      this.notes.log(`remote: gateway restart failed: ${restarted.stderr.trim() || restarted.code}; starting it instead`);
+      const started = await this.cli.startGateway();
+      if (started.code !== 0) this.notes.log(`remote: gateway start failed: ${started.stderr.trim() || started.code}`);
+    }
+    // The route answers a moment after the gateway does; asking once would show
+    // a half-started home as a fault.
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (await this.refresh(true)) return;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
     }
     await this.refresh();
   }

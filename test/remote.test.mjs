@@ -97,3 +97,9 @@ test('the panel is served under a nonce and nothing else', () => {
   assert.match(html, new RegExp(REMOTE_CELL));
   assert.match(html, /acquireVsCodeApi/);
 });
+
+test('the install button asks for the install, not for an action on the route', () => {
+  const html = renderRemoteHtml({ nonce: 'n', cell: REMOTE_CELL });
+  assert.match(html, /type: 'install'/);
+  assert.match(html, /if \(act === 'install'\)/);
+});

@@ -54,7 +54,7 @@
   "The most connections answered at once; the rest are closed.")
 (defparameter *bridge-cookie* "nodecode-bridge"
   "What a paired device's cookie is called.")
-(defparameter *bridge-https-port* 8443
+(defparameter *bridge-https-port* 8434
   "The https port this node serves the page on, beside whatever it already
 serves on 443. A port of its own, never the root: the page asks the gateway
 for absolute paths (/api/...), and tailscale's --set-path strips the prefix
@@ -62,9 +62,23 @@ before they arrive, so a path scope would break the page -- while a second
 port is a mapping of its own that leaves the node's 443 exactly as it was.")
 (defparameter *bridge-cookie-seconds* (* 30 24 60 60)
   "How long a paired device stays paired, in seconds.")
-(defparameter *bridge-port-span* 10
+(defparameter *bridge-port-span* 5
   "How many https ports past the one asked for this cell will look for a free
-one before giving up and saying so.")
+one before giving up and saying so. The same five ports are what one machine
+knocks on to find another: 8434 to 8438.")
+
+(defparameter *bridge-hello-path* "/__tailnet/hello"
+  "Who answers here is a nodecode tailnet bridge. Public to the tailnet and no
+further: a machine that has never paired with this one can still learn that it
+is here, and nothing else.")
+
+(defparameter *bridge-hello-protocol* "nodecode-tailnet/1"
+  "The word a probe must hear back: a version of the handshake, not a guess at
+a response.")
+
+(defparameter *bridge-peer-cache-seconds* 90
+  "How long an answer about the tailnet's other machines is kept before the
+tailnet is knocked on again.")
 (defparameter *bridge-code-seconds* (* 10 60)
   "How long a pairing code works for, in seconds.")
 (defparameter *bridge-script-path* "/__bridge.js"
@@ -88,6 +102,9 @@ one before giving up and saying so.")
   "The last reason a device was turned away, for the panel to show.")
 (defvar *bridge-error* nil
   "What went wrong answering the last connection, if anything did.")
+
+(defvar *bridge-peer-cache* nil
+  "The last answer about the tailnet's other machines: (time . machines).")
 
 ;;; --- whose tailnet this is ----------------------------------------------
 
@@ -116,6 +133,86 @@ Never 443, which is not this cell's to take."
     (if (and (integerp chosen) (plusp chosen) (/= chosen 443))
         chosen
         *bridge-https-port*)))
+
+(defun host-of (dns-name)
+  "The machine part of a MagicDNS name: rt50.tail77f45e.ts.net. => rt50"
+  (let ((dot (position #\. dns-name)))
+    (if dot (subseq dns-name 0 dot) dns-name)))
+
+(defun hello-json ()
+  "What this bridge says when another machine knocks."
+  (nlk:json-object
+   "protocol" *bridge-hello-protocol*
+   "name" (host-of (or (tailnet-name) ""))
+   "host" (or (tailnet-name) :null)
+   "version" "0.1.0"
+   "port" (or (getf *bridge* :https-port) (bridge-https-port))
+   "address" (or (bridge-address) :null)))
+
+(defun probe-peer (host)
+  "Does HOST answer as a nodecode tailnet bridge? Its hello, or NIL. Every port
+of the span is tried, so a machine that took the next one is still found."
+  (let ((first (bridge-https-port)))
+    (loop for port from first below (+ first *bridge-port-span*)
+          do (let ((url (format nil "https://~a:~d~a" host port *bridge-hello-path*)))
+               (handler-case
+                   (let ((parsed (ignore-errors
+                                  (nlk:decode-json
+                                   (dexador:get url :connect-timeout 1.2 :read-timeout 2
+                                                    :force-string t)))))
+                     (when (and (hash-table-p parsed)
+                                (equal (nlk:json-value parsed :text "protocol") *bridge-hello-protocol*))
+                       (return (nlk:json-object
+                                "name" (or (nlk:json-value parsed :text "name") (host-of host))
+                                "host" (or (nlk:json-value parsed :text "host") host)
+                                "address" (or (nlk:json-value parsed :text "address") :null)
+                                "port" (or (nlk:json-value parsed :integer "port") port)
+                                "version" (or (nlk:json-value parsed :text "version") :null)))))
+                 (error () nil))))))
+
+(defun online-peers ()
+  "The tailnet's other machines that are up right now, by MagicDNS name."
+  (let* ((status (tailnet-status))
+         (peers (and status (gethash "Peer" status)))
+         (names '()))
+    (when (hash-table-p peers)
+      (maphash (lambda (id peer)
+                 (declare (ignore id))
+                 (when (and (hash-table-p peer) (nlk:json-value peer :boolean "Online"))
+                   (let ((dns (nlk:json-value peer :text "DNSName")))
+                     (when dns (push (string-right-trim "." dns) names)))))
+               peers))
+    names))
+
+(defun tailnet-machines (&key refresh)
+  "Every machine on this tailnet that is serving a tailnet bridge, this one
+first. Cached: knocking on every peer costs a request each, not a scan."
+  (let ((kept *bridge-peer-cache*))
+    (when (and (not refresh) kept
+               (< (- (get-universal-time) (car kept)) *bridge-peer-cache-seconds*))
+      (return-from tailnet-machines (cdr kept)))
+    (let* ((hosts (online-peers))
+           (found (make-array (length hosts) :initial-element nil))
+           (threads (loop for host in hosts for at from 0
+                          collect (let ((here at) (peer host))
+                                    (sb-thread:make-thread
+                                     (lambda () (setf (aref found here) (probe-peer peer)))
+                                     :name "tailnet probe")))))
+      (dolist (thread threads)
+        (ignore-errors (sb-thread:join-thread thread :timeout 8)))
+      (let ((machines (loop for machine across found when machine collect machine)))
+        ;; This machine answers for itself: it is a machine with access on, and
+        ;; the one the panel is being read from.
+        (when (bridge-running-p)
+          (let ((here (ignore-errors (tailnet-name))))
+            (when here
+              (push (nlk:json-object
+                     "name" (host-of here) "host" (string-right-trim "." here)
+                     "address" (or (bridge-address) :null)
+                     "port" (getf *bridge* :https-port) "version" "0.1.0")
+                    machines))))
+        (setf *bridge-peer-cache* (cons (get-universal-time) machines))
+        machines))))
 
 (defun bridge-address ()
   "The https address this bridge answers at, or NIL when this machine is not
@@ -722,6 +819,11 @@ whatever else the gateway makes of it."
              (if (string= method "POST")
                  (pair client headers body)
                  (pairing-answer client headers)))
+            ;; Any machine may knock, and a machine that has never paired with
+            ;; this one may still learn that it is here. Nothing else is said.
+            ((string= path *bridge-hello-path*)
+             (answer-text fd 200 "OK" "application/json; charset=utf-8"
+                          (nlk:encode-json-object (hello-json))))
             ((null (paired-cookie headers))
              (redirect fd "/pair"))
             ((string= path *bridge-script-path*)
@@ -1054,6 +1156,28 @@ not a log, and a line about a request that failed an hour ago reads as a fault."
          (forget-device (nlk:json-value sent :integer "index"))
          (json-answer 200 (bridge-json)))
         (t (tasks-refused 400 "no_action" "action: start, stop, code or forget"))))))
+
+(defun peers-route (env)
+  "/api/remote/peers: the tailnet's machines that answer as a tailnet bridge,
+this one among them, each with the address another machine would open."
+  (if (member (getf env :request-method) '(:get :head))
+      (let ((here (ignore-errors (string-right-trim "." (tailnet-name)))))
+        (json-answer
+         200
+         (nlk:json-object
+          "self" (or here :null)
+          "machines"
+          (coerce (loop for machine in (tailnet-machines)
+                        collect (nlk:json-object
+                                 "name" (or (nlk:json-value machine :text "name") "a machine")
+                                 "host" (or (nlk:json-value machine :text "host") :null)
+                                 "address" (or (nlk:json-value machine :text "address") :null)
+                                 "port" (or (nlk:json-value machine :integer "port") :null)
+                                 "current" (if (and here (string= (or (nlk:json-value machine :text "host") "") here))
+                                               t
+                                               :false)))
+                  'vector))))
+      (tasks-refused 405 "method" "GET reads the tailnet's machines")))
 
 (defun bridge-route (env)
   "/api/web/bridge: GET how remote access stands; POST {action} starts or

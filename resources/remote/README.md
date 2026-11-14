@@ -3,17 +3,17 @@
 This organism on the tailnet's own https address, for a phone or a laptop that
 has no ssh and no loopback port.
 
-Turn it on with `/remote on` — or in the page's `Machines` → `Remote access`
+Turn it on with `/remote on` — or in the page's `Machines` → `Tailnet access`
 panel, when the web cell installed here carries one; a web page without the
 panel is served exactly the same, and the command is the whole of the control.
 It serves the web cell's page at
 
-    https://<this-machine>.<your-tailnet>.ts.net:8443/web/
+    https://<this-machine>.<your-tailnet>.ts.net:8434/web/
 
 and pairs each device that comes through with a code the panel shows. A paired
 device keeps a cookie and can be forgotten on its own.
 
-- **It never takes 443.** The mapping is on a port of its own (8443 unless the
+- **It never takes 443.** The mapping is on a port of its own (8434, or the next free one of 8434-8438, unless the
   cell's `https_port` setting says otherwise), so whatever this node already
   serves on its https root keeps working. A path under 443 was tried and does
   not work: `tailscale serve --set-path` strips the prefix, and the page asks
@@ -50,6 +50,6 @@ instead of offering a switch that would fail.
 
 - The proxy listens on loopback only; the tailnet reaches `serve`, never this.
 - Turning it off removes this cell's own https port and nothing else.
-- Remote access comes back by itself after a restart or a Nodecode update; the
+- Tailnet access comes back by itself after a restart or a Nodecode update; the
   wish is a file in the home (`web/bridge-on`), and paired devices are kept
   beside it.

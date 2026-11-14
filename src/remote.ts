@@ -3,7 +3,7 @@
 //
 // The panel is a view of the nodecode-web-remote cell and nothing more. It
 // reads `GET /api/remote` on the gateway this home runs, and drives the same
-// route to turn remote access on and off, to mint a pairing code, and to forget
+// route to turn tailnet access on and off, to mint a pairing code, and to forget
 // a device. The cell does the work -- the loopback proxy, the pairing, the
 // https port of its own that keeps 443 alone -- so nothing here talks to
 // Tailscale and nothing here holds a secret of its own.
@@ -13,6 +13,14 @@ import * as vscode from "vscode";
 import { GatewayEndpoint, NodecodeDiscovery, Notifications } from "./discovery";
 import { NodecodeCli } from "./cli";
 import { REMOTE_CELL, installBundledCell, nodecodeHome } from "./cells";
+
+export interface TailnetMachine {
+  name: string;
+  host?: string;
+  address?: string;
+  port?: number;
+  current: boolean;
+}
 
 export interface RemoteDevice {
   index: number;
@@ -28,6 +36,7 @@ export interface RemoteState {
   code?: string;
   codeMinutes?: number;
   devices: RemoteDevice[];
+  machines?: TailnetMachine[];
   refusal?: string;
   advice?: { reason?: string; text?: string; step?: string; label?: string; url?: string };
 }
@@ -62,7 +71,7 @@ function normalise(raw: Record<string, unknown>): RemoteState {
   };
 }
 
-/** Read remote access from the gateway at ENDPOINT. */
+/** Read tailnet access from the gateway at ENDPOINT. */
 export async function readRemote(endpoint: GatewayEndpoint, doFetch: Fetch = fetch): Promise<RemoteRead> {
   let response: Response;
   try {
@@ -81,7 +90,31 @@ export async function readRemote(endpoint: GatewayEndpoint, doFetch: Fetch = fet
   }
 }
 
-/** Act on remote access: start, stop, mint a code, forget a device. */
+/** The tailnet's machines that answer as a tailnet bridge, this one among them. */
+export async function readMachines(endpoint: GatewayEndpoint, doFetch: Fetch = fetch): Promise<TailnetMachine[]> {
+  try {
+    const response = await doFetch(`${endpoint.baseUrl}/api/remote/peers`, {
+      headers: { authorization: `Bearer ${endpoint.token}` },
+    });
+    if (!response.ok) return [];
+    const body = (await response.json()) as Record<string, unknown>;
+    const list = Array.isArray(body.machines) ? body.machines : [];
+    return list.map((entry, at) => {
+      const machine = entry as Record<string, unknown>;
+      return {
+        name: typeof machine.name === "string" ? machine.name : `machine ${at + 1}`,
+        host: typeof machine.host === "string" ? machine.host : undefined,
+        address: typeof machine.address === "string" ? machine.address : undefined,
+        port: typeof machine.port === "number" ? (machine.port as number) : undefined,
+        current: machine.current === true,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** Act on tailnet access: start, stop, mint a code, forget a device. */
 export async function actRemote(
   endpoint: GatewayEndpoint,
   body: { action: string; index?: number },
@@ -140,7 +173,7 @@ export function renderRemoteHtml(options: { nonce: string; cell: string }): stri
 </style>
 </head>
 <body>
-<div id="root"><p class="muted">Reading remote access…</p></div>
+<div id="root"><p class="muted">Reading tailnet access…</p></div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
   const root = document.getElementById('root');
@@ -168,12 +201,12 @@ export function renderRemoteHtml(options: { nonce: string; cell: string }): stri
 
   function draw() {
     root.replaceChildren();
-    if (!view) { root.append(el('p', 'muted', 'Reading remote access…')); return; }
+    if (!view) { root.append(el('p', 'muted', 'Reading tailnet access…')); return; }
 
     if (view.problem) {
       const box = el('div', 'problem');
       box.append(el('div', '', view.problem));
-      if (view.installable) box.append(button('Install the remote access cell', 'install', 'primary'));
+      if (view.installable) box.append(button('Install the tailnet access cell', 'install', 'primary'));
       root.append(box);
       return;
     }
@@ -195,7 +228,7 @@ export function renderRemoteHtml(options: { nonce: string; cell: string }): stri
 
     const toggle = el('div', 'row');
     const dot = el('span', state.running ? 'dot on' : 'dot');
-    toggle.append(dot, el('span', 'name', 'Remote access'), button(state.running ? 'Turn off' : 'Turn on', state.running ? 'stop' : 'start', state.running ? '' : 'primary'));
+    toggle.append(dot, el('span', 'name', 'Tailnet access'), button(state.running ? 'Turn off' : 'Turn on', state.running ? 'stop' : 'start', state.running ? '' : 'primary'));
     root.append(toggle);
 
     if (!state.running) {
@@ -226,6 +259,20 @@ export function renderRemoteHtml(options: { nonce: string; cell: string }): stri
       const row = el('div', 'field');
       row.append(el('span', 'muted', 'No code standing.'), button('New code', 'code'));
       root.append(row);
+    }
+
+    if (state.machines && state.machines.length > 1) {
+      root.append(el('p', 'muted', 'Machines on your tailnet with access on:'));
+      for (const machine of state.machines) {
+        const row = el('div', 'device');
+        row.append(el('span', 'who', machine.name + (machine.current ? ' (this one)' : '')));
+        if (!machine.current && machine.address) {
+          const go = button('Open', 'open');
+          go.dataset.url = machine.address;
+          row.append(go);
+        }
+        root.append(row);
+      }
     }
 
     for (const device of state.devices) {
@@ -306,17 +353,18 @@ export class RemoteView implements vscode.WebviewViewProvider {
     }
     const read = await readRemote(endpoint);
     if (read.kind === "ok") {
-      this.post({ state: read.state });
+      const machines = await readMachines(endpoint);
+      this.post({ state: { ...read.state, machines } });
       return true;
     }
     if (read.kind === "missing") {
       this.post({
-        problem: `Remote access is the ${REMOTE_CELL} cell, and this home does not have it.`,
+        problem: `Tailnet access is the ${REMOTE_CELL} cell, and this home does not have it.`,
         installable: true,
       });
       return true;
     }
-    if (!quiet) this.post({ problem: `Could not read remote access: ${read.why}`, installable: false });
+    if (!quiet) this.post({ problem: `Could not read tailnet access: ${read.why}`, installable: false });
     return false;
   }
 

@@ -2,7 +2,7 @@
   "name": "nodecode-vscode",
   "displayName": "Nodecode",
   "description": "Nodecode in VS Code: the gateway's own page in your sidebar or an editor tab, with nothing in between.",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -82,8 +82,8 @@
         {
           "id": "nodecodeRemote",
           "type": "webview",
-          "name": "Remote Access",
-          "contextualTitle": "Remote Access"
+          "name": "Tailnet Access",
+          "contextualTitle": "Tailnet Access"
         }
       ]
     },
@@ -96,7 +96,7 @@
       },
       {
         "command": "nodecode.remoteAccess",
-        "title": "Remote Access: reach this machine from your tailnet",
+        "title": "Tailnet Access: reach this machine from your tailnet",
         "category": "Nodecode",
         "icon": "$(globe)"
       },

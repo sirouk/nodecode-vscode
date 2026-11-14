@@ -11,5 +11,5 @@
   :description "Reach this organism from the rest of the tailnet over its own https port, pairing each device with a code"
   :license "MIT"
   :version "0.1.0"
-  :depends-on ("nodecode" "usocket")
+  :depends-on ("nodecode" "usocket" "dexador")
   :components ((:file "cell") (:file "remote")))

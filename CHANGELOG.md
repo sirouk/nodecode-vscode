@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11]
+
+### Changed
+
+- **Remote Access is Tailnet Access**, in the view's name, the command's title and the cell's own words. Identifiers are unchanged: the view id, the command id, the cell's name and its route are what a published install already has.
+- **The ports moved to 8434, with 8435 to 8438 behind it.** A less obvious first port, and the same five ports are what one machine knocks on to find another.
+
+### Added
+
+- **Discovery, with a handshake rather than a guess.** A machine serving tailnet access answers `/__tailnet/hello` with the protocol word, its name, its version and the address another machine would open. The panel lists every machine on the tailnet that answers, this one marked as the machine you are on, and opens any of the others. Discovery is independent of pairing: a machine nobody has ever paired with still appears; the code is only asked for when you connect.
+
 ## [0.2.10]
 
 ### Fixed

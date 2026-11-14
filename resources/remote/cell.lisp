@@ -104,34 +104,36 @@ machine has no tailscale, or it is not running."
 ;;; --- the cell -----------------------------------------------------------
 
 (defun remote-command (args session-id)
-  "/remote [status|on|off|code] => what remote access is doing, or a change
+  "/remote [status|on|off|code] => what tailnet access is doing, or a change
   to it. The same acts the page's panel offers, for the shell."
   (declare (ignore session-id))
   (let ((what (string-downcase (string-trim '(#\Space #\Tab) (or args ""))))) (cond
     ((string= what "on")
      (multiple-value-bind (okp why) (bridge-start)
-       (if okp (format nil "remote access on: ~a" why)
+       (if okp (format nil "tailnet access on: ~a" why)
            (format nil "could not turn it on: ~a" why))))
     ((string= what "off")
      (bridge-stop)
-     "remote access off; paired devices are kept")
+     "tailnet access off; paired devices are kept")
     ((string= what "code")
      (if (bridge-running-p)
          (format nil "pairing code ~a, good for ~d minutes"
                  (mint-code) (round *bridge-code-seconds* 60))
-         "remote access is off; /remote on first"))
+         "tailnet access is off; /remote on first"))
     (t
      (if (bridge-running-p)
-         (format nil "remote access on at ~a, ~d device~:p paired"
+         (format nil "tailnet access on at ~a, ~d device~:p paired"
                  (bridge-address) (length (read-devices)))
-         "remote access off; /remote on to serve this organism over your tailnet")))))
+         "tailnet access off; /remote on to serve this organism over your tailnet")))))
 
 (nle:define-cell remote
-  (:section ("remote access")
-    (:guide "the page under Machines, remote access: turn it on, then pair a device with the code it shows")
-    ("https_port" :integer :default 8443
-     :doc "the https port this cell serves the page on, beside whatever this node already serves on 443"))
+  (:section ("tailnet access")
+    (:guide "the page under Machines, tailnet access: turn it on, then pair a device with the code it shows")
+    ("https_port" :integer :default 8434
+     :doc "the first https port this cell serves the page on, beside whatever this node already serves on 443; the next four are taken when it is busy, and all five are what another machine knocks on"))
   (:command "remote" 'remote-command :description "remote access over your tailnet: status, on, off, code")
   ;; The panel's section reads and acts here; a page with no such cell at this
   ;; path simply does not draw it.
-  (:route "/api/remote" (lambda (env) (bridge-route env))))
+  (:route "/api/remote" (lambda (env) (bridge-route env)))
+  ;; The tailnet's other machines, as this one finds them.
+  (:route "/api/remote/peers" (lambda (env) (peers-route env))))

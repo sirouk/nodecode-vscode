@@ -351,7 +351,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.15...HEAD
+[0.2.15]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.8...v0.2.15
 [0.2.8]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.5...v0.2.6

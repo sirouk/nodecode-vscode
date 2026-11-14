@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.13]
+
+### Fixed
+
+- **A peer's proxy outlived the window that made it.** Every machine switched to left an https proxy listening, and a process that had one never exited — which is what hung the test run and the release. Peer proxies are now dropped with the gateway's own, and a loopback frame still uses the cached local proxy rather than a peer one.
+
 ## [0.2.12]
 
 ### Changed

@@ -127,11 +127,11 @@ export class Gateway {
   /** Proxies for the peers this window has switched to, one per upstream. */
   private readonly peers = new Map<string, GatewayProxy>();
 
-  private async ensurePeerProxy(host: string, port: number, tls: boolean): Promise<GatewayProxy> {
-    const key = `${tls ? "https" : "http"}://${host}:${port}`;
+  private async ensurePeerProxy(host: string, port: number): Promise<GatewayProxy> {
+    const key = `https://${host}:${port}`;
     const kept = this.peers.get(key);
     if (kept && kept.listening()) return kept;
-    const started = await startGatewayProxy({ host, port, tls }, (line) => this.notes.log(line));
+    const started = await startGatewayProxy({ host, port, tls: true }, (line) => this.notes.log(line));
     this.peers.set(key, started);
     this.notes.log(`page proxy ${started.origin} -> ${key}`);
     return started;
@@ -223,7 +223,9 @@ export class Gateway {
       return { status };
     }
     try {
-      const proxy = await this.ensurePeerProxy(parsed.hostname, port, tls);
+      const proxy = tls
+        ? await this.ensurePeerProxy(parsed.hostname, port)
+        : await this.ensureProxy({ baseUrl: base, token: "", port, pid: 0 });
       const external = await vscode.env.asExternalUri(vscode.Uri.parse(proxy.origin));
       const forwarded = external.toString();
       return {
@@ -287,5 +289,7 @@ export class Gateway {
 
   dispose(): void {
     this.dropProxy();
+    for (const peer of this.peers.values()) peer.dispose();
+    this.peers.clear();
   }
 }

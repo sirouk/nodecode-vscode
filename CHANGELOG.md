@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9]
+
+### Added
+
+- **Remote Access, as a view of its own.** This machine's organism reached from the rest of the tailnet over https: the address to open on a phone, the pairing code a new device types, and the devices already paired, each forgettable on its own. The view turns remote access on and off and mints a fresh code, and it reads and drives the same route the page's panel does — the work is the `nodecode-web-remote` cell, on an https port of its own, never 443.
+- **The extension carries that cell.** A home whose hub does not have `nodecode-web-remote` yet gets it from the extension: the cell's own files are written into `~/.nodecode/cells/` and the gateway restarts to load them. A home that already has the cell keeps its own copy.
+
 ## [0.2.8]
 
 ### Added

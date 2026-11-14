@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.15]
+
 ### Changed
 
 - **Marketplace compliance: the extension installs nothing and downloads nothing.** The **Install Nodecode** command is gone, and with it the terminal that ran the official `curl … | sh` installer, the install button on the view's first-run screen, and every install address in the package. Nodecode is the operator's own; where it is missing, the view links to the docs and says so.

@@ -236,7 +236,12 @@ export async function startGatewayProxy(
       socket.destroy();
       return;
     }
-    const handshake = upgradeHead(request, target.tls ? peerCookie(request.headers.cookie, tag) : request.headers.cookie);
+    // The socket carries the same pairing the page's requests do: taken in the
+    // panel and held by the window, not by the browser.
+    const pairing = target.tls
+      ? peerCookie(request.headers.cookie, tag) ?? (target.cookie ? `${PAIR_COOKIE}=${target.cookie}` : undefined)
+      : request.headers.cookie;
+    const handshake = upgradeHead(request, pairing);
     const opened = (): void => {
       upstream.write(handshake);
       if (head.length > 0) upstream.write(head);

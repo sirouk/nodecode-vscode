@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.19]
+
+### Fixed
+
+- **A machine switched to showed its page but never connected.** The page's socket to the gateway is a second way in, and it was still handed the browser's cookie rather than the pairing this window holds -- so the peer refused the upgrade, and the page sat on "reconnecting" with no sessions. The socket now carries the same pairing its requests do.
+
 ## [0.2.18]
 
 ### Fixed

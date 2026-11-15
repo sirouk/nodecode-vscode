@@ -279,18 +279,44 @@ process, and the panel is opened far more often than a node changes name.")
 (defvar *bridge-facts* nil
   "(time binary name https-certificates) as last asked.")
 
+(defvar *bridge-facts-probing* nil
+  "A fresh ask of tailscale is in flight: a second one would be the same work.")
+
+(defun ask-tailscale ()
+  "Ask tailscale what it knows, and remember it."
+  (let ((binary (tailscale-binary)))
+    (setf *bridge-facts* (list (get-universal-time) binary
+                               (and binary (tailnet-name))
+                               (and binary (tailnet-https-p))))
+    (cdr *bridge-facts*)))
+
+(defun facts-in-background ()
+  "Ask tailscale again, in a thread of its own, so an old answer is replaced
+without anybody waiting on a process. One ask at a time."
+  (sb-thread:with-mutex (*bridge-lock*)
+    (unless *bridge-facts-probing*
+      (setf *bridge-facts-probing* t)
+      (sb-thread:make-thread
+       (lambda ()
+         (unwind-protect (ignore-errors (ask-tailscale))
+           (sb-thread:with-mutex (*bridge-lock*) (setf *bridge-facts-probing* nil))))
+       :name "tailscale facts"))))
+
 (defun tailscale-facts (&key refresh)
   "What tailscale says about this machine: its binary, this node's name, and
-whether it may have https. Asked again only when the last answer is old."
+whether it may have https.
+
+Answered from the last ask whenever there is one, however old: a stale name is
+worth more than a panel that waits for a process to say it again. A stale ask
+is refreshed behind the answer. The first ask of a run is the only one that
+waits, because there is nothing else to say yet."
   (let ((kept *bridge-facts*))
-    (when (or refresh (null kept)
-              (> (- (get-universal-time) (car kept)) *bridge-facts-seconds*))
-      (let ((binary (tailscale-binary)))
-        (setf kept (list (get-universal-time) binary
-                         (and binary (tailnet-name))
-                         (and binary (tailnet-https-p)))
-              *bridge-facts* kept)))
-    (cdr kept)))
+    (cond
+      ((null kept) (or (and (not refresh) (ask-tailscale)) (ask-tailscale)))
+      ((or refresh (> (- (get-universal-time) (car kept)) *bridge-facts-seconds*))
+       (facts-in-background)
+       (cdr kept))
+      (t (cdr kept)))))
 
 (defun bridge-address ()
   "The https address this bridge answers at, or NIL when this machine is not

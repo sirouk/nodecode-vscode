@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.23]
+
+### Fixed
+
+- **The first read after an idle spell still waited for a process.** What tailscale says about this node was kept for twenty seconds, and the read that found it stale paid for it. It is answered from the stale value now and refreshed behind it, as the machine list already was; only the first read of a run waits, because only then is there nothing to say.
+
 ## [0.2.22]
 
 ### Changed

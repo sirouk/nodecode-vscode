@@ -9,7 +9,7 @@ import * as vscode from "vscode";
 import { NodecodeCli } from "./cli";
 import { NodecodeDiscovery, Notifications } from "./discovery";
 import { Gateway, GatewayStatus } from "./gateway";
-import { RemoteRead, actRemote, readMachines, readRemote } from "./remote";
+import { RemoteRead, RemoteState, TailnetMachine, actRemote, readMachines, readRemote } from "./remote";
 import { REMOTE_CELL, installBundledCell, nodecodeHome } from "./cells";
 import { NodecodeView } from "./view";
 
@@ -20,26 +20,26 @@ export function activate(context: vscode.ExtensionContext): void {
   const gateway = new Gateway(cli, discovery, notes);
   // What the page's own tailnet panel asks for: the state of this machine's
   // tailnet access, an action on it, or the cell put in place.
+  // The panel's state with the machines beside it, each marked with whether
+  // this window has taken a code for it.
+  const withMachines = (state: RemoteState, found: TailnetMachine[]): Record<string, unknown> => {
+    const machines = found.map((machine) => ({
+      ...machine,
+      // This machine is not paired with itself: it is where we are.
+      paired: !machine.current && machine.address ? gateway.isPaired(machine.address) : false,
+    }));
+    const host = machines.find((machine) => machine.host)?.host;
+    if (host) gateway.tailnetSuffix = host.split(".").slice(1).join(".");
+    return { state: { ...state, machines } };
+  };
   const tailnet = {
     state: async (): Promise<Record<string, unknown>> => {
       const endpoint = discovery.current();
       if (!endpoint) return { problem: "This home's gateway is not answering. Start it, then look again." };
       // Two questions the gateway answers on its own: asked together, the
       // panel waits for the slower one rather than for both in turn.
-      const [read, found]: [RemoteRead, Awaited<ReturnType<typeof readMachines>>] = await Promise.all([
-        readRemote(endpoint),
-        readMachines(endpoint),
-      ]);
-      if (read.kind === "ok") {
-        const machines = found.map((machine) => ({
-          ...machine,
-          // This machine is not paired with itself: it is where we are.
-          paired: !machine.current && machine.address ? gateway.isPaired(machine.address) : false,
-        }));
-        const host = machines.find((machine) => machine.host)?.host;
-        if (host) gateway.tailnetSuffix = host.split(".").slice(1).join(".");
-        return { state: { ...read.state, machines } };
-      }
+      const [read, found]: [RemoteRead, TailnetMachine[]] = await Promise.all([readRemote(endpoint), readMachines(endpoint)]);
+      if (read.kind === "ok") return withMachines(read.state, found);
       if (read.kind === "missing")
         return { problem: `Tailnet access is the ${REMOTE_CELL} cell, and this home does not have it.`, installable: true };
       return { problem: `Could not read tailnet access: ${read.why}` };
@@ -48,7 +48,9 @@ export function activate(context: vscode.ExtensionContext): void {
       const endpoint = discovery.current();
       if (!endpoint) return { problem: "This home's gateway is not answering." };
       const read = await actRemote(endpoint, body);
-      if (read.kind === "ok") return { state: read.state };
+      // Turning access on or off adds or takes away this machine's address, so
+      // the list is read again after the action rather than kept from before it.
+      if (read.kind === "ok") return withMachines(read.state, await readMachines(endpoint));
       if (read.kind === "missing") return { problem: "Tailnet access is not installed on this home.", installable: true };
       return { problem: read.why };
     },

@@ -237,14 +237,16 @@ start two sweeps."
       (sb-thread:make-thread
        (lambda ()
          (unwind-protect
-              (let ((machines (ignore-errors (probe-peers))))
-                (when machines
+              ;; Nobody answering is an answer: a machine that went away leaves
+              ;; the list. Only a sweep that failed keeps the old one.
+              (let ((machines (handler-case (probe-peers) (error () :failed))))
+                (unless (eq machines :failed)
                   (setf *bridge-peer-cache* (cons (get-universal-time) machines))
                   (keep-peers machines)))
            (sb-thread:with-mutex (*bridge-lock*) (setf *bridge-probing* nil))))
        :name "tailnet sweep"))))
 
-(defun tailnet-machines (&key refresh)
+(defun tailnet-machines ()
   "Every machine on this tailnet that is serving a tailnet bridge, this one
 first.
 
@@ -253,18 +255,14 @@ from the file the last run left -- and a stale one is swept again in the
 background. Only a machine that has never swept waits for the sweep: nothing
 else has anything to show it."
   (let ((kept (or *bridge-peer-cache*
-                  (let ((from-disk (kept-peers)))
-                    (when from-disk
-                      ;; Written by an earlier run: old, so swept again at once,
-                      ;; but shown now.
-                      (setf *bridge-peer-cache* (cons 0 from-disk)))))))
+                  (when (probe-file (peers-path))
+                    ;; Written by an earlier run, even if it found nobody: old,
+                    ;; so swept again at once, but shown now.
+                    (setf *bridge-peer-cache* (cons 0 (kept-peers)))))))
     (cond
-      ((and kept (not refresh))
+      (kept
        (when (> (- (get-universal-time) (car kept)) *bridge-peer-cache-seconds*)
          (probe-peers-in-background))
-       (cdr kept))
-      ((and kept refresh)
-       (probe-peers-in-background)
        (cdr kept))
       (t
        (let ((machines (probe-peers)))
@@ -302,7 +300,7 @@ without anybody waiting on a process. One ask at a time."
            (sb-thread:with-mutex (*bridge-lock*) (setf *bridge-facts-probing* nil))))
        :name "tailscale facts"))))
 
-(defun tailscale-facts (&key refresh)
+(defun tailscale-facts ()
   "What tailscale says about this machine: its binary, this node's name, and
 whether it may have https.
 
@@ -312,8 +310,8 @@ is refreshed behind the answer. The first ask of a run is the only one that
 waits, because there is nothing else to say yet."
   (let ((kept *bridge-facts*))
     (cond
-      ((null kept) (or (and (not refresh) (ask-tailscale)) (ask-tailscale)))
-      ((or refresh (> (- (get-universal-time) (car kept)) *bridge-facts-seconds*))
+      ((null kept) (ask-tailscale))
+      ((> (- (get-universal-time) (car kept)) *bridge-facts-seconds*)
        (facts-in-background)
        (cdr kept))
       (t (cdr kept)))))
@@ -1264,15 +1262,16 @@ not a log, and a line about a request that failed an hour ago reads as a fault."
         (t (tasks-refused 400 "no_action" "action: start, stop, code or forget"))))))
 
 (defun this-machine ()
-  "This machine's own entry, while it is serving: it is a machine with access
-on, and the one the panel is being read from."
-  (when (bridge-running-p)
-    (let ((here (ignore-errors (or (getf *bridge* :name) (second (tailscale-facts))))))
-      (when here
-        (nlk:json-object
-         "name" (host-of here) "host" (string-right-trim "." here)
-         "address" (or (bridge-address) :null)
-         "port" (getf *bridge* :https-port) "version" "0.1.0")))))
+  "This machine's own entry, whenever it is on a tailnet: the panel is read
+from here, and it is the way back from another machine's page whether or not
+this one is serving. Its address is given only while it is."
+  (let ((here (ignore-errors (or (getf *bridge* :name) (second (tailscale-facts))))))
+    (when here
+      (nlk:json-object
+       "name" (host-of here) "host" (string-right-trim "." here)
+       "address" (if (bridge-running-p) (or (bridge-address) :null) :null)
+       "port" (if (bridge-running-p) (getf *bridge* :https-port) :null)
+       "version" "0.1.0"))))
 
 (defun peers-route (env)
   "/api/remote/peers: the tailnet's machines that answer as a tailnet bridge,

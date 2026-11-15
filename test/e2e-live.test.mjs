@@ -154,3 +154,24 @@ after(()=>{
   childProcess.execFileSync=realExecFileSync;
   for(const subscription of context.subscriptions)subscription?.dispose?.();
 });
+
+test('the panel is told the machines on its first read and after an action, this machine among them',{skip},async()=>{
+  await ready();
+  const view=providers.get('nodecodeWeb');
+  const posted=[];let handler;
+  const webview={options:{},cspSource:'vscode-webview://e2e-panel',html:'',onDidReceiveMessage:(fn)=>{handler=fn;return disposable();},postMessage:async(message)=>{posted.push(message);return true;}};
+  view.resolveWebviewView({webview,onDidDispose:()=>disposable()});
+  const answer=async(message)=>{
+    const before=posted.length;handler(message);
+    for(let waited=0;waited<8000&&posted.length===before;waited+=50) await settle(50);
+    return posted.at(-1)?.view;
+  };
+  const read=await answer({type:'tailnet'});
+  if(read?.problem) return; // this home has no tailnet access cell: nothing to list
+  const listed=read.state.machines??[];
+  assert.ok(listed.some((machine)=>machine.current),'this machine is in the list');
+  if(!read.state.running) return; // only a serving machine has a start that changes nothing
+  // Start on a machine already serving answers "already on" and changes nothing.
+  const acted=await answer({type:'tailnet-act',action:'start'});
+  assert.ok(acted.state?.machines?.some((machine)=>machine.current),'an action\'s answer still carries the machines');
+});

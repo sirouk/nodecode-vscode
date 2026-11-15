@@ -220,8 +220,9 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     });
     this.panel = panel;
     const surface: Surface = { webview: panel.webview };
-    panel.webview.onDidReceiveMessage((message: { type?: string; url?: string }) =>
-      void this.act(message?.type ?? "", surface, message?.url),
+    panel.webview.onDidReceiveMessage(
+      (message: { type?: string; url?: string; text?: string; index?: number; action?: string; code?: string }) =>
+        void this.act(message?.type ?? "", surface, message?.url, message),
     );
     panel.onDidDispose(() => {
       if (this.panel === panel) this.panel = undefined;
@@ -313,11 +314,6 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           await this.refresh();
           return;
         case "tailnet":
-          // What was known a moment ago is drawn at once -- the panel opens on
-          // the machines already found -- and the answer replaces it when it
-          // comes. A panel that opens on "Reading…" for a network sweep is a
-          // panel that makes the operator wait for something it already knew.
-          if (surface.tailnet) this.postTailnet(surface, surface.tailnet);
           return this.tailnetPanel(surface, await this.tailnet.state());
         case "tailnet-act":
           return this.tailnetPanel(
@@ -348,12 +344,11 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           }
           const framed = await this.gateway.frameFor(url);
           if (framed.pageUrl) {
+            // The page written here asks for the panel's state as it loads, so
+            // the pill comes up marking the machine it now shows.
             surface.target = url;
             surface.shown = undefined;
             await this.render(surface);
-            // The panel and the pill are rebuilt with the frame, so the mark of
-            // where this window now is has to be sent again.
-            await this.tailnetPanel(surface, await this.tailnet.state());
             return;
           }
           return this.tailnetPanel(surface, { ...(await this.tailnet.state()), switchRefused: framed.refused ?? framed.status.message });
@@ -380,7 +375,6 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           surface.target = target;
           surface.shown = undefined;
           await this.render(surface);
-          await this.tailnetPanel(surface, await this.tailnet.state());
           return;
         }
         case "switch": {
@@ -390,7 +384,6 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           surface.target = url;
           surface.shown = undefined;
           await this.render(surface);
-          await this.tailnetPanel(surface, await this.tailnet.state());
           return;
         }
         case "recheck":
@@ -503,12 +496,16 @@ export function tailnetScript(): string {
     }
 
     const machines = state.machines || [];
-    if (machines.length > 1) {
+    // Shown when there is somewhere else to go, or somewhere else is shown:
+    // the list is the way back.
+    if (machines.length > 1 || view.showing) {
       body.append(el('div', 'sep'));
       body.append(el('h2', '', 'Machines on your tailnet'));
       for (const machine of machines) {
         const line = el('div', 'row');
-        const shown = machine.current ? !view.showing : Boolean(machine.address) && view.showing === machine.address;
+        // A machine paired a moment ago is shown at the base its code was
+        // asked for, without /web/: the same machine, so compared by host.
+        const shown = machine.current ? !view.showing : Boolean(machine.address && view.showing) && sameHost(view.showing, machine.address);
         // Filled and coloured where we are; filled and plain where a code was
         // taken and it is not where we are; hollow where we have never paired.
         const state = shown ? ' here ' + (machine.current ? 'local' : 'remote') : machine.paired ? ' paired' : '';
@@ -561,8 +558,11 @@ export function tailnetScript(): string {
     mark.classList.remove('on');
   }
 
-  // A click anywhere in this document that is not the panel, Escape, or a click
-  // that lands in the framed page (which takes focus away) puts the panel away.
+  // A click anywhere in this document that is not the panel, Escape, or focus
+  // leaving this view (a click in the framed page, or anywhere else) puts the
+  // panel away -- except a panel asking for a code, while focus is somewhere
+  // other than the page: that is the operator gone to copy the code it is
+  // waiting for. Focus has landed by the next task, not during the blur.
   document.addEventListener('click', (event) => {
     if (panel.hidden) return;
     if (event.target.closest && event.target.closest('#tailnet')) return;
@@ -572,7 +572,11 @@ export function tailnetScript(): string {
     if (event.key === 'Escape' && !panel.hidden) closePanel();
   });
   window.addEventListener('blur', () => {
-    if (!panel.hidden) closePanel();
+    setTimeout(() => {
+      if (panel.hidden) return;
+      const toPage = document.activeElement && document.activeElement.id === 'page';
+      if (toPage || !(view && view.needsCode)) closePanel();
+    }, 0);
   });
 
   panel.addEventListener('click', (event) => {
@@ -603,15 +607,18 @@ export function tailnetScript(): string {
     const message = event.data;
     if (!message || message.type !== 'tailnet-state') return;
     view = message.view;
-    const live = !!(view && view.state && view.state.running);
     const dot = mark.querySelector('.dot');
     if (dot) {
-      // Green for the cell on this machine, blue for another machine's: the
-      // pill says which nodecode the page in front of you is.
-      const here = !view || !view.showing;
-      dot.className = 'dot' + (live ? (here ? ' local' : ' remote') : '');
+      // Blue whenever the page is another machine's; green when it is this
+      // machine's and this machine is serving; unlit when it is not.
+      const live = !!(view && view.state && view.state.running);
+      dot.className = 'dot' + (view && view.showing ? ' remote' : live ? ' local' : '');
     }
     draw();
   });
+
+  // Asked as the page loads, not when the panel is first opened: the pill marks
+  // which machine this is from the start, and after every switch.
+  api.postMessage({ type: 'tailnet' });
 })();`;
 }

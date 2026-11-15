@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.24]
+
+### Fixed
+
+- **The pill said nothing until the panel was opened.** Its colour was set only by the panel's answer, so a freshly loaded view, or one just switched to another machine, showed an unlit mark. The page now asks as it loads, and the mark is right from the start.
+- **Another machine's page could show a green pill.** The mark was blue only while this machine was serving; with access off here, another machine's page was unlit. It is now blue whenever the page is another machine's, green when it is this machine's and this machine is serving, and unlit otherwise.
+- **A machine just paired was not marked as the one being shown.** It was compared by its full address, and a pairing lands on the machine's base address, so its row kept a Switch button for the page already in front of you. Machines are now compared by host.
+- **With access off here, there was no way back from another machine's page.** This machine was left out of the list whenever it was not serving, and with no other machine listed the list was hidden. This machine is now always listed, and the list is shown whenever another machine's page is.
+- **Turning access on or off emptied the machine list** until the panel was opened again: an action's answer did not carry the machines. It now does.
+- **Forget, New code and Turn on/off did nothing in the editor tab.** The tab passed the host only the message's type, so which device to forget, and which action, were lost. It now passes the whole message, as the sidebar does.
+- **The panel closed while you went to copy a pairing code from another window.** It now stays up while it is asking for a code, and still closes on a click into the page, outside it, or Escape.
+- **A machine that went offline stayed listed.** A sweep that found nobody was treated as a failure and the old list kept; only a sweep that failed keeps it now (tailnet access cell).
+
 ## [0.2.23]
 
 ### Fixed

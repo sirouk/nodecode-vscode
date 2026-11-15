@@ -195,3 +195,118 @@ test('a machine that cannot be framed keeps the page and says why; one that can 
     assert.match(html,/53117\/web\/#t=home/,'switching to this machine comes home');
   }finally{view.dispose();}
 });
+
+// The panel's own script, run against just enough of a document to hold it:
+// elements with ids, classes, children and data attributes, and the window's
+// message, click, key and blur events.
+function panelUnderTest(){
+  const {tailnetScript}=require('../out/view.js');
+  const byId={},listeners={},sent=[];
+  const node=(tag,id)=>{
+    const n={tagName:tag,id:id||'',className:'',textContent:'',hidden:false,children:[],dataset:{},style:{},parent:null,listeners:{},
+      append(...kids){for(const kid of kids){kid.parent=n;n.children.push(kid);if(kid.id)byId[kid.id]=kid;}},
+      replaceChildren(){n.children=[];},
+      addEventListener(type,fn){n.listeners[type]=fn;},
+      querySelector(sel){return n.children.find((kid)=>kid.className.split(' ').includes(sel.slice(1)))||null;},
+      closest(sel){for(let at=n;at;at=at.parent){if(sel.startsWith('#')?at.id===sel.slice(1):at.dataset[sel.slice(6,-1)]!==undefined)return at;}return null;},
+      get classList(){return {toggle:(name,on)=>{n.className=on?(n.className+' '+name).trim():n.className.split(' ').filter((c)=>c!==name).join(' ');},remove:(name)=>{n.className=n.className.split(' ').filter((c)=>c!==name).join(' ');}};},
+    };
+    return n;
+  };
+  const root=node('div','tailnet'),mark=node('button','tailnet-mark'),dot=node('span'),panel=node('div','tailnet-panel'),body=node('div','tailnet-body'),page=node('iframe','page');
+  dot.className='dot';mark.append(dot);panel.append(body);root.append(mark,panel);byId.page=page;panel.hidden=true;
+  const document={activeElement:null,getElementById:(id)=>byId[id]||null,createElement:(tag)=>node(tag),addEventListener:(type,fn)=>{listeners['doc:'+type]=fn;}};
+  const window={addEventListener:(type,fn)=>{listeners['win:'+type]=fn;}};
+  const timers=[];
+  new Function('document','window','api','setTimeout',tailnetScript())(document,window,{postMessage:(m)=>sent.push(m)},(fn)=>timers.push(fn));
+  const text=(n)=>n.textContent+n.children.map(text).join(' ');
+  const find=(n,pred)=>pred(n)?n:n.children.reduce((hit,kid)=>hit||find(kid,pred),null);
+  return {
+    sent,dot,panel,document,page,
+    say:(view)=>listeners['win:message']({data:{type:'tailnet-state',view}}),
+    open:()=>mark.listeners.click(),
+    clickOutside:()=>listeners['doc:click']({target:node('div')}),
+    blurTo:(element)=>{document.activeElement=element;listeners['win:blur']();timers.splice(0).forEach((fn)=>fn());},
+    text:()=>text(body),
+    rows:()=>body.children.filter((row)=>row.className==='row'&&row.children.some((kid)=>kid.className.startsWith('mdot'))).map((row)=>({mark:row.children[0].className,label:row.children[1].textContent})),
+    find:(pred)=>find(body,pred),
+  };
+}
+
+const here={name:'console',host:'console.tail.ts.net',address:'https://console.tail.ts.net:8434/web/',current:true,paired:false};
+const peer={name:'trader',host:'trader.tail.ts.net',address:'https://trader.tail.ts.net:8434/web/',current:false,paired:false};
+
+test('the page asks for the panel state as it loads, so the pill is marked before the panel is opened',()=>{
+  const panel=panelUnderTest();
+  assert.deepEqual(panel.sent,[{type:'tailnet'}]);
+});
+
+test('the pill is green on this machine, blue on another, and blue even when this machine is not serving',()=>{
+  const panel=panelUnderTest();
+  panel.say({state:{available:true,running:true,machines:[here,peer]},showing:''});
+  assert.equal(panel.dot.className,'dot local');
+  panel.say({state:{available:true,running:true,machines:[here,peer]},showing:'https://trader.tail.ts.net:8434/web/'});
+  assert.equal(panel.dot.className,'dot remote');
+  panel.say({state:{available:true,running:false,machines:[{...here,address:undefined},peer]},showing:'https://trader.tail.ts.net:8434/web/'});
+  assert.equal(panel.dot.className,'dot remote','the page is still another machine\'s');
+  panel.say({state:{available:true,running:false,machines:[{...here,address:undefined}]},showing:''});
+  assert.equal(panel.dot.className,'dot','this machine, not serving: unlit');
+});
+
+test('the list marks where we are, what is paired, and what is not',()=>{
+  const panel=panelUnderTest();
+  const third={name:'laptop',host:'laptop.tail.ts.net',address:'https://laptop.tail.ts.net:8434/web/',current:false,paired:false};
+  panel.say({state:{available:true,running:true,machines:[here,{...peer,paired:true},third]},showing:''});
+  assert.deepEqual(panel.rows(),[
+    {mark:'mdot here local',label:'console (this one) \u00b7 showing'},
+    {mark:'mdot paired',label:'trader'},
+    {mark:'mdot',label:'laptop'},
+  ]);
+  panel.say({state:{available:true,running:true,machines:[here,{...peer,paired:true},third]},showing:'https://trader.tail.ts.net:8434'});
+  assert.deepEqual(panel.rows().slice(0,2),[
+    {mark:'mdot',label:'console (this one)'},
+    {mark:'mdot here remote',label:'trader \u00b7 showing'},
+  ],'a machine just paired is shown at its base address, and still marked as where we are');
+});
+
+test('a page from another machine keeps the way back even when this machine is the only other one listed',()=>{
+  const panel=panelUnderTest();
+  panel.say({state:{available:true,running:false,machines:[{...here,address:undefined}]},showing:'https://trader.tail.ts.net:8434/web/'});
+  const back=panel.find((n)=>n.dataset.tn==='switch');
+  assert.ok(back,'a Switch back to this machine is offered');
+  assert.equal(back.dataset.url,'','and it means this machine');
+});
+
+test('the panel closes on a click outside it and on focus leaving, but not while it waits for a code from elsewhere',()=>{
+  const panel=panelUnderTest();
+  const state={available:true,running:true,machines:[here,peer]};
+  panel.open();panel.say({state,showing:''});
+  assert.equal(panel.panel.hidden,false);
+  panel.clickOutside();
+  assert.equal(panel.panel.hidden,true,'a click outside closes it');
+  panel.open();
+  panel.blurTo(panel.document.body);
+  assert.equal(panel.panel.hidden,true,'focus going elsewhere closes it');
+  panel.open();panel.say({state,showing:'',needsCode:'https://trader.tail.ts.net:8434'});
+  panel.blurTo(null);
+  assert.equal(panel.panel.hidden,false,'gone to read the code: the field stays up');
+  panel.blurTo(panel.page);
+  assert.equal(panel.panel.hidden,true,'a click into the page still closes it');
+});
+
+test('the editor tab hands the host the whole message, as the sidebar does',async()=>{
+  const {NodecodeView}=require('../out/view.js');
+  let handler;
+  vscode.window.createWebviewPanel=()=>({webview:{html:'',options:{},onDidReceiveMessage:(fn)=>{handler=fn;return {dispose(){}};},postMessage:async()=>true},onDidDispose:()=>undefined,reveal(){},dispose(){}});
+  const state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',docsUrl:'z'};
+  const gateway={frame:async()=>({status:state,pageUrl:'http://127.0.0.1:53117/web/',pageOrigin:'http://127.0.0.1:53117'}),status:async()=>state};
+  const acted=[];
+  const tailnet={state:async()=>({state:{available:true}}),act:async(body)=>{acted.push(body);return {state:{available:true}};},install:async()=>({})};
+  const view=new NodecodeView(gateway,{log(){}},tailnet);
+  try{
+    await view.openInEditor();
+    handler({type:'tailnet-act',action:'forget',index:2});
+    await new Promise((resolve)=>setTimeout(resolve,20));
+    assert.deepEqual(acted,[{action:'forget',index:2}]);
+  }finally{view.dispose();}
+});

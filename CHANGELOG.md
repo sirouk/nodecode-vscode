@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.18]
+
+### Fixed
+
+- **A pairing taken in the panel never reached the page.** For a peer the proxy preferred the browser's cookie and dropped the header when the browser had none -- which it always has, because the code is entered in the panel and the pairing is kept by the window. Every request went to that machine unpaired, so switching landed on its code page again. The pairing is now sent as the bridge's own cookie, which is what turns that 303 into the page.
+- **The code is asked for under the machine it is for**, rather than at the foot of the panel where it belonged to nothing in particular.
+
 ## [0.2.17]
 
 ### Changed

@@ -430,6 +430,15 @@ export function tailnetScript(): string {
     node.dataset.tn = act;
     return node;
   }
+  /** Two addresses on the same machine: the panel's carry /web/, a refusal
+   *  names the base it refused, and both mean that machine. */
+  function sameHost(a, b) {
+    try {
+      return new URL(a).host === new URL(b).host;
+    } catch (error) {
+      return a === b;
+    }
+  }
   function copyButton(what, text) {
     const node = button('Copy', 'copy');
     node.dataset.what = what;
@@ -491,21 +500,22 @@ export function tailnetScript(): string {
           line.append(go);
         }
         body.append(line);
+        // The code is asked for under the machine it is for, not at the foot of
+        // the panel where it would belong to nothing in particular.
+        if (view.needsCode && machine.address && sameHost(view.needsCode, machine.address)) {
+          const ask = el('div', 'row');
+          const field = document.createElement('input');
+          field.id = 'tailnet-code';
+          field.placeholder = 'code from that machine';
+          field.value = view.pasted || '';
+          field.autocomplete = 'one-time-code';
+          field.style.cssText = 'flex:1 1 auto;min-width:0;font:inherit;font-size:11px;padding:2px 6px;border-radius:3px;border:1px solid var(--vscode-input-border, #444);background:var(--vscode-input-background);color:var(--vscode-input-foreground);';
+          ask.append(field, button('Paste', 'paste'), button('Pair', 'pair', 'primary'));
+          body.append(ask);
+          if (view.codeRefused) body.append(el('p', 'why', view.codeRefused));
+        }
       }
-      if (view.needsCode) {
-      body.append(el('p', 'why', 'That machine has not been paired with this one. Type the code it is showing:'));
-      const row = el('div', 'row');
-      const field = document.createElement('input');
-      field.id = 'tailnet-code';
-      field.placeholder = 'XXXX-XXXX';
-      field.value = view.pasted || '';
-      field.autocomplete = 'one-time-code';
-      field.style.cssText = 'flex:1 1 auto;min-width:0;font:inherit;font-size:11px;padding:2px 6px;border-radius:3px;border:1px solid var(--vscode-input-border, #444);background:var(--vscode-input-background);color:var(--vscode-input-foreground);';
-      row.append(field, button('Paste', 'paste'), button('Pair', 'pair', 'primary'));
-      body.append(row);
-      if (view.codeRefused) body.append(el('p', 'why', view.codeRefused));
-    }
-    if (view.switchRefused) body.append(el('p', 'why', 'Could not switch: ' + view.switchRefused));
+      if (view.switchRefused) body.append(el('p', 'why', 'Could not switch: ' + view.switchRefused));
     }
 
     for (const device of state.devices || []) {

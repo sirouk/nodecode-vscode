@@ -171,8 +171,13 @@ export async function startGatewayProxy(
     }
     const headers = { ...request.headers };
     if (target.tls) {
-      const cookie = peerCookie(headers.cookie, tag);
-      if (cookie) headers.cookie = cookie;
+      // The pairing this window took for that peer, sent as the bridge's own
+      // cookie. The browser never holds it: a code is entered in the panel, so
+      // there is nothing for it to hold, and anything it did hold belongs to
+      // another listener on loopback.
+      const fromBrowser = peerCookie(headers.cookie, tag);
+      if (fromBrowser) headers.cookie = fromBrowser;
+      else if (target.cookie) headers.cookie = `${PAIR_COOKIE}=${target.cookie}`;
       else delete headers.cookie;
     }
     const upstream = (target.tls ? https : http).request(

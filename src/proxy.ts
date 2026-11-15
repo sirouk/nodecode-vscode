@@ -18,6 +18,9 @@ export interface ProxyTarget {
   port: number;
   /** Reached over TLS: a tailnet peer's own https, not a loopback gateway. */
   tls?: boolean;
+  /** The pairing this window holds for that peer, sent on as its bridge's own
+   * cookie. Nothing until a code was taken: the browser never holds it. */
+  cookie?: string;
 }
 
 /** The cookie the tailnet bridge pairs a device with, and the name it takes here. */
@@ -57,7 +60,10 @@ export function framedPairCookie(line: string, tag: string): string {
  */
 export function crossSiteRefused(headers: http.IncomingHttpHeaders): boolean {
   const site = headers["sec-fetch-site"];
-  if (!site || site === "same-origin" || site === "none") return false;
+  // Same-site is every loopback port: this gateway and a peer's are one site,
+  // and a page that switched to a peer still speaks to its own origin. Only a
+  // different site -- some website the operator wandered onto -- is refused.
+  if (!site || site === "same-origin" || site === "same-site" || site === "none") return false;
   return !(headers["sec-fetch-mode"] === "navigate" && headers["sec-fetch-dest"] === "iframe");
 }
 

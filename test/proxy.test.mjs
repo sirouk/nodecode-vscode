@@ -4,7 +4,7 @@ import http from 'node:http';
 import net from 'node:net';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
-const {startGatewayProxy,stripFrameAncestors,frameableHeaders,upgradeHead,withBridge,pageRewritable,peerCookie,framedPairCookie,crossSiteRefused}=require('../out/proxy.js');
+const {startGatewayProxy,stripFrameAncestors,frameableHeaders,upgradeHead,withBridge,pageRewritable,peerCookie,framedPairCookie,crossSiteRefused,originAllowed}=require('../out/proxy.js');
 
 const PAGE='<!doctype html><html><body>the gateway page</body></html>';
 const CSP="default-src 'self'; connect-src 'self'; frame-ancestors 'none'";
@@ -167,7 +167,10 @@ test('only the frame itself may arrive from another site',()=>{
   assert.equal(crossSiteRefused({'sec-fetch-site':'same-origin','sec-fetch-mode':'cors','sec-fetch-dest':'empty'}),false);
   assert.equal(crossSiteRefused({'sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','sec-fetch-dest':'iframe'}),false,'the editor framing the page');
   assert.equal(crossSiteRefused({'sec-fetch-site':'cross-site','sec-fetch-mode':'no-cors','sec-fetch-dest':'script'}),true,'another site including the token script');
-  assert.equal(crossSiteRefused({'sec-fetch-site':'same-site','sec-fetch-mode':'cors','sec-fetch-dest':'empty'}),true,'another loopback port reading the page');
+  assert.equal(crossSiteRefused({'sec-fetch-site':'same-site','sec-fetch-mode':'cors','sec-fetch-dest':'empty'}),false,'another loopback port is the same site: a page that switched to a peer still speaks to its own origin');
+  assert.equal(originAllowed('http://127.0.0.1:6000','127.0.0.1:6001'),false,'and the origin check is what keeps that other port out');
+  assert.equal(originAllowed('https://evil.example','127.0.0.1:6001'),false);
+  assert.equal(originAllowed('null','127.0.0.1:6001'),false,'an opaque origin names nobody');
 });
 
 test('a socket to a peer carries its pairing, renamed, in place of the browser cookie',()=>{

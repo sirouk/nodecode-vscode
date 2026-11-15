@@ -159,6 +159,9 @@ interface Surface {
   shown?: string;
   /** A page at another loopback port this surface was switched to, if any. */
   target?: string;
+  /** The last thing the tailnet panel was told, so a paste answers the same
+   *  question the panel is still asking rather than blanking it. */
+  tailnet?: Record<string, unknown>;
 }
 
 /** A framed page is a whole application: poll slowly while it is up, quickly while setting up. */
@@ -187,7 +190,7 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     view.webview.options = { enableScripts: true };
     const surface: Surface = { webview: view.webview };
     view.webview.onDidReceiveMessage(
-      (message: { type?: string; url?: string; text?: string; index?: number; action?: string }) =>
+      (message: { type?: string; url?: string; text?: string; index?: number; action?: string; code?: string }) =>
         void this.act(message?.type ?? "", surface, message?.url, message),
     );
     view.onDidDispose(() => {
@@ -273,14 +276,20 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
 
   /** Hand the panel what it asked for: only the surface that asked hears it. */
   private tailnetPanel(surface: Surface, view: object): void {
-    void surface.webview.postMessage({ type: "tailnet-state", view: { ...view, showing: surface.target ?? "" } });
+    const said = { ...view, showing: surface.target ?? "" };
+    surface.tailnet = said;
+    void surface.webview.postMessage({ type: "tailnet-state", view: said });
+  }
+
+  private postTailnet(surface: Surface, view: object): void {
+    void surface.webview.postMessage({ type: "tailnet-state", view });
   }
 
   private async act(
     action: string,
     surface: Surface,
     url?: string,
-    message?: { type?: string; url?: string; text?: string; index?: number; action?: string },
+    message?: { type?: string; url?: string; text?: string; index?: number; action?: string; code?: string },
   ): Promise<void> {
     try {
       switch (action) {
@@ -309,6 +318,32 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
         case "tailnet-copy":
           await vscode.env.clipboard.writeText(String(message?.text ?? ""));
           return;
+        case "tailnet-paste": {
+          // The clipboard is the editor's to read: a page inside a frame is
+          // not given it, so the code is taken here and handed to the field.
+          const text = await vscode.env.clipboard.readText();
+          return this.postTailnet(surface, { ...(surface.tailnet ?? {}), pasted: String(text || "").trim() });
+        }
+        case "tailnet-pair": {
+          const url = String(message?.url ?? "");
+          const code = String(message?.code ?? "");
+          const paired = await this.gateway.pairPeer(url, code);
+          if (!paired.ok) {
+            return this.tailnetPanel(surface, {
+              ...(await this.tailnet.state()),
+              needsCode: url,
+              codeRefused: paired.why ?? "that code was not taken",
+            });
+          }
+          const framed = await this.gateway.frameFor(url);
+          if (framed.pageUrl) {
+            surface.target = url;
+            surface.shown = undefined;
+            await this.render(surface);
+            return;
+          }
+          return this.tailnetPanel(surface, { ...(await this.tailnet.state()), switchRefused: framed.refused ?? framed.status.message });
+        }
         case "tailnet-open":
           if (message?.url) await vscode.env.openExternal(vscode.Uri.parse(String(message.url)));
           return;
@@ -319,9 +354,12 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           if (target) {
             const framed = await this.gateway.frameFor(target);
             if (!framed.pageUrl) {
+              // A machine that has never paired with this one asks for a code:
+              // it is taken here rather than in the page, which cannot paste.
               return this.tailnetPanel(surface, {
                 ...(await this.tailnet.state()),
-                switchRefused: framed.refused ?? framed.status.message,
+                ...(framed.needsCode ? { needsCode: framed.needsCode } : {}),
+                ...(framed.needsCode ? {} : { switchRefused: framed.refused ?? framed.status.message }),
               });
             }
           }
@@ -454,7 +492,20 @@ export function tailnetScript(): string {
         }
         body.append(line);
       }
-      if (view.switchRefused) body.append(el('p', 'why', 'Could not switch: ' + view.switchRefused));
+      if (view.needsCode) {
+      body.append(el('p', 'why', 'That machine has not been paired with this one. Type the code it is showing:'));
+      const row = el('div', 'row');
+      const field = document.createElement('input');
+      field.id = 'tailnet-code';
+      field.placeholder = 'XXXX-XXXX';
+      field.value = view.pasted || '';
+      field.autocomplete = 'one-time-code';
+      field.style.cssText = 'flex:1 1 auto;min-width:0;font:inherit;font-size:11px;padding:2px 6px;border-radius:3px;border:1px solid var(--vscode-input-border, #444);background:var(--vscode-input-background);color:var(--vscode-input-foreground);';
+      row.append(field, button('Paste', 'paste'), button('Pair', 'pair', 'primary'));
+      body.append(row);
+      if (view.codeRefused) body.append(el('p', 'why', view.codeRefused));
+    }
+    if (view.switchRefused) body.append(el('p', 'why', 'Could not switch: ' + view.switchRefused));
     }
 
     for (const device of state.devices || []) {
@@ -479,6 +530,11 @@ export function tailnetScript(): string {
     if (!target) return;
     const act = target.dataset.tn;
     if (act === 'copy') return api.postMessage({ type: 'tailnet-copy', text: target.dataset.text || '' });
+    if (act === 'paste') return api.postMessage({ type: 'tailnet-paste' });
+    if (act === 'pair') {
+      const field = document.getElementById('tailnet-code');
+      return api.postMessage({ type: 'tailnet-pair', url: view && view.needsCode, code: field ? field.value : '' });
+    }
     if (act === 'switch') return api.postMessage({ type: 'tailnet-switch', url: target.dataset.url || '' });
     if (act === 'open') return api.postMessage({ type: 'tailnet-open', url: target.dataset.url || '' });
     if (act === 'install') {

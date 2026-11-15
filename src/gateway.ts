@@ -157,11 +157,15 @@ export class Gateway {
   /** Proxies for the peers this window has switched to, one per upstream. */
   private readonly peers = new Map<string, GatewayProxy>();
 
+  /** The pairing cookie this window holds for a peer, by "host:port". */
+  private readonly pairings = new Map<string, string>();
+
   private async ensurePeerProxy(host: string, port: number): Promise<GatewayProxy> {
     const key = `https://${host}:${port}`;
+    const cookie = this.pairings.get(`${host}:${port}`);
     const kept = this.peers.get(key);
     if (kept && kept.listening()) return kept;
-    const started = await startGatewayProxy({ host, port, tls: true }, (line) => this.notes.log(line));
+    const started = await startGatewayProxy({ host, port, tls: true, cookie }, (line) => this.notes.log(line));
     this.peers.set(key, started);
     this.notes.log(`page proxy ${started.origin} -> ${key}`);
     return started;
@@ -225,7 +229,70 @@ export class Gateway {
    * Only loopback is proxied, and only a port that answers the page's own path,
    * so this view stays a view of Nodecode and never a proxy to this machine.
    */
-  async frameFor(target: string): Promise<{ status: GatewayStatus; pageUrl?: string; pageOrigin?: string; revision?: number; refused?: string }> {
+  /**
+   * Take a pairing code for a peer and keep the cookie it answers with.
+   *
+   * The code is typed here, in the panel, and never in a page inside the
+   * frame: a webview does not hand that page the clipboard, so a code copied
+   * on this machine could not be pasted on the one being connected.
+   */
+  async pairPeer(url: string, code: string): Promise<{ ok: boolean; why?: string }> {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return { ok: false, why: "that is not an address" };
+    }
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    const body = `code=${encodeURIComponent(code.trim())}`;
+    return await new Promise((resolve) => {
+      const request = https.request(
+        {
+          host: parsed.hostname,
+          port,
+          path: "/pair",
+          method: "POST",
+          servername: parsed.hostname,
+          headers: { "content-type": "application/x-www-form-urlencoded", "content-length": Buffer.byteLength(body) },
+        },
+        (response) => {
+          const lines = response.headers["set-cookie"] ?? [];
+          const paired = (Array.isArray(lines) ? lines : [lines]).find((line) => line.startsWith("nodecode-bridge="));
+          response.resume();
+          if (response.statusCode === 303 && paired) {
+            const value = paired.split(";")[0].slice("nodecode-bridge=".length);
+            this.pairings.set(`${parsed.hostname}:${port}`, value);
+            // A new pairing must be served by a proxy that carries it.
+            this.peers.get(`https://${parsed.hostname}:${port}`)?.dispose();
+            this.peers.delete(`https://${parsed.hostname}:${port}`);
+            this.notes.log(`paired with ${parsed.hostname}`);
+            return resolve({ ok: true });
+          }
+          resolve({ ok: false, why: "that code is not the one that machine is showing" });
+        },
+      );
+      request.on("error", (error: Error) => resolve({ ok: false, why: error.message }));
+      request.end(body);
+    });
+  }
+
+  /** Does that peer answer its page, or does it want a code first? */
+  private async peerWantsCode(host: string, port: number): Promise<boolean> {
+    const cookie = this.pairings.get(`${host}:${port}`);
+    return await new Promise((resolve) => {
+      const request = https.request(
+        { host, port, path: "/web/", method: "GET", servername: host, headers: cookie ? { cookie: `nodecode-bridge=${cookie}` } : {} },
+        (response) => {
+          response.resume();
+          resolve(response.statusCode === 303);
+        },
+      );
+      request.on("error", () => resolve(false));
+      request.end();
+    });
+  }
+
+  async frameFor(target: string): Promise<{ status: GatewayStatus; pageUrl?: string; pageOrigin?: string; revision?: number; refused?: string; needsCode?: string }> {
     const status = await this.status();
     let parsed: URL;
     try {
@@ -251,6 +318,9 @@ export class Gateway {
     if (!(await (tls ? answersAsPeer(base) : servesWebPage(base)))) {
       this.notes.log(`refused to frame ${base}: it does not answer as nodecode`);
       return { status, refused: `${parsed.hostname} did not answer as Nodecode.` };
+    }
+    if (tls && (await this.peerWantsCode(parsed.hostname, port))) {
+      return { status, needsCode: base };
     }
     try {
       const proxy = tls

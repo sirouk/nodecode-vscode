@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.17]
+
+### Changed
+
+- **One control, not two.** The page's own machines panel no longer draws a tailnet section: the editor's Tailnet mark is the single place to turn access on and see who is paired.
+
+### Fixed
+
+- **Pairing a second machine works, and needs no paste.** Switching to a machine this window has never paired with now asks for its code in the panel, where Paste reads the editor's clipboard — a page inside a frame is never given that clipboard, which is why pasting into the remote page failed. The code is redeemed by the extension and the pairing is kept with the proxy, so the frame opens already paired.
+- **A peer's page is no longer refused as foreign.** The proxy treated every loopback port as a different site and answered "the page only answers itself"; same-site is now allowed, and only a genuinely different site is refused.
+
 ## [0.2.16]
 
 ### Fixed

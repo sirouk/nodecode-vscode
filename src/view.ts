@@ -313,6 +313,11 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           await this.refresh();
           return;
         case "tailnet":
+          // What was known a moment ago is drawn at once -- the panel opens on
+          // the machines already found -- and the answer replaces it when it
+          // comes. A panel that opens on "Reading…" for a network sweep is a
+          // panel that makes the operator wait for something it already knew.
+          if (surface.tailnet) this.postTailnet(surface, surface.tailnet);
           return this.tailnetPanel(surface, await this.tailnet.state());
         case "tailnet-act":
           return this.tailnetPanel(

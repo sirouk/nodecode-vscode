@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.22]
+
+### Changed
+
+- **The panel no longer waits for the tailnet.** The machine list is answered from what the cell already knows -- this run's sweep, or the file the last run wrote -- and a stale list is swept again in a background thread. Only a machine that has never swept waits for one.
+- **What tailscale says about this node is asked once in a while, not on every read.** Each answer costs a process; the name, the binary and the https certificate do not change between two openings of a panel. Reads that cost ~700 ms now cost ~8 ms.
+- The two questions the panel asks (its own state, the tailnet's machines) are asked together rather than in turn, and the panel draws what it knew a moment ago while the fresh answer is on its way.
+
 ## [0.2.21]
 
 ### Added

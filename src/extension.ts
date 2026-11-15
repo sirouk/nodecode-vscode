@@ -24,9 +24,14 @@ export function activate(context: vscode.ExtensionContext): void {
     state: async (): Promise<Record<string, unknown>> => {
       const endpoint = discovery.current();
       if (!endpoint) return { problem: "This home's gateway is not answering. Start it, then look again." };
-      const read: RemoteRead = await readRemote(endpoint);
+      // Two questions the gateway answers on its own: asked together, the
+      // panel waits for the slower one rather than for both in turn.
+      const [read, found]: [RemoteRead, Awaited<ReturnType<typeof readMachines>>] = await Promise.all([
+        readRemote(endpoint),
+        readMachines(endpoint),
+      ]);
       if (read.kind === "ok") {
-        const machines = (await readMachines(endpoint)).map((machine) => ({
+        const machines = found.map((machine) => ({
           ...machine,
           // This machine is not paired with itself: it is where we are.
           paired: !machine.current && machine.address ? gateway.isPaired(machine.address) : false,

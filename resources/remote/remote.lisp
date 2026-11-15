@@ -106,6 +106,9 @@ tailnet is knocked on again.")
 (defvar *bridge-peer-cache* nil
   "The last answer about the tailnet's other machines: (time . machines).")
 
+(defvar *bridge-probing* nil
+  "A sweep of the tailnet is in flight: a second one would be the same work.")
+
 ;;; --- whose tailnet this is ----------------------------------------------
 
 (defun tailnet-login ()
@@ -184,41 +187,116 @@ of the span is tried, so a machine that took the next one is still found."
                peers))
     names))
 
+(defun peers-path ()
+  "What this machine found last time, kept across restarts: a panel that opens
+with the machines it knew is better than one that opens empty and waits."
+  (nlk:home "web/tailnet-machines.json"))
+
+(defun kept-peers ()
+  "The machines written down by an earlier run, or NIL."
+  (let ((path (peers-path)))
+    (when (probe-file path)
+      (ignore-errors
+       (let ((parsed (nlk:decode-json (uiop:read-file-string path)))
+             (kept '()))
+         (when (hash-table-p parsed)
+           (let ((machines (nlk:json-value parsed :array "machines")))
+             (when machines
+               (loop for machine across machines
+                     when (hash-table-p machine)
+                       do (push machine kept)))))
+         kept)))))
+
+(defun keep-peers (machines)
+  "Write MACHINES down for the run after this one."
+  (ignore-errors
+   (nlk:write-file-atomically
+    (peers-path)
+    (nlk:encode-json-object (nlk:json-object "machines" (coerce machines 'vector))))))
+
+(defun probe-peers ()
+  "Knock on every peer that is up, all at once, and answer what answered back."
+  (let* ((hosts (online-peers))
+         (found (make-array (length hosts) :initial-element nil))
+         (threads (loop for host in hosts for at from 0
+                        collect (let ((here at) (peer host))
+                                  (sb-thread:make-thread
+                                   (lambda () (setf (aref found here) (probe-peer peer)))
+                                   :name "tailnet probe")))))
+    (dolist (thread threads)
+      (ignore-errors (sb-thread:join-thread thread :timeout 8)))
+    (loop for machine across found when machine collect machine)))
+
+(defun probe-peers-in-background ()
+  "Knock again, in a thread of its own, so a stale list is refreshed without
+anybody waiting on it. One knock at a time: a panel opened twice must not
+start two sweeps."
+  (sb-thread:with-mutex (*bridge-lock*)
+    (unless *bridge-probing*
+      (setf *bridge-probing* t)
+      (sb-thread:make-thread
+       (lambda ()
+         (unwind-protect
+              (let ((machines (ignore-errors (probe-peers))))
+                (when machines
+                  (setf *bridge-peer-cache* (cons (get-universal-time) machines))
+                  (keep-peers machines)))
+           (sb-thread:with-mutex (*bridge-lock*) (setf *bridge-probing* nil))))
+       :name "tailnet sweep"))))
+
 (defun tailnet-machines (&key refresh)
   "Every machine on this tailnet that is serving a tailnet bridge, this one
-first. Cached: knocking on every peer costs a request each, not a scan."
-  (let ((kept *bridge-peer-cache*))
-    (when (and (not refresh) kept
-               (< (- (get-universal-time) (car kept)) *bridge-peer-cache-seconds*))
-      (return-from tailnet-machines (cdr kept)))
-    (let* ((hosts (online-peers))
-           (found (make-array (length hosts) :initial-element nil))
-           (threads (loop for host in hosts for at from 0
-                          collect (let ((here at) (peer host))
-                                    (sb-thread:make-thread
-                                     (lambda () (setf (aref found here) (probe-peer peer)))
-                                     :name "tailnet probe")))))
-      (dolist (thread threads)
-        (ignore-errors (sb-thread:join-thread thread :timeout 8)))
-      (let ((machines (loop for machine across found when machine collect machine)))
-        ;; This machine answers for itself: it is a machine with access on, and
-        ;; the one the panel is being read from.
-        (when (bridge-running-p)
-          (let ((here (ignore-errors (tailnet-name))))
-            (when here
-              (push (nlk:json-object
-                     "name" (host-of here) "host" (string-right-trim "." here)
-                     "address" (or (bridge-address) :null)
-                     "port" (getf *bridge* :https-port) "version" "0.1.0")
-                    machines))))
-        (setf *bridge-peer-cache* (cons (get-universal-time) machines))
-        machines))))
+first.
+
+The list is answered from what this machine already knows -- from this run, or
+from the file the last run left -- and a stale one is swept again in the
+background. Only a machine that has never swept waits for the sweep: nothing
+else has anything to show it."
+  (let ((kept (or *bridge-peer-cache*
+                  (let ((from-disk (kept-peers)))
+                    (when from-disk
+                      ;; Written by an earlier run: old, so swept again at once,
+                      ;; but shown now.
+                      (setf *bridge-peer-cache* (cons 0 from-disk)))))))
+    (cond
+      ((and kept (not refresh))
+       (when (> (- (get-universal-time) (car kept)) *bridge-peer-cache-seconds*)
+         (probe-peers-in-background))
+       (cdr kept))
+      ((and kept refresh)
+       (probe-peers-in-background)
+       (cdr kept))
+      (t
+       (let ((machines (probe-peers)))
+         (setf *bridge-peer-cache* (cons (get-universal-time) machines))
+         (keep-peers machines)
+         machines)))))
+
+(defparameter *bridge-facts-seconds* 20
+  "How long what tailscale says about this node is kept. Each answer costs a
+process, and the panel is opened far more often than a node changes name.")
+
+(defvar *bridge-facts* nil
+  "(time binary name https-certificates) as last asked.")
+
+(defun tailscale-facts (&key refresh)
+  "What tailscale says about this machine: its binary, this node's name, and
+whether it may have https. Asked again only when the last answer is old."
+  (let ((kept *bridge-facts*))
+    (when (or refresh (null kept)
+              (> (- (get-universal-time) (car kept)) *bridge-facts-seconds*))
+      (let ((binary (tailscale-binary)))
+        (setf kept (list (get-universal-time) binary
+                         (and binary (tailnet-name))
+                         (and binary (tailnet-https-p)))
+              *bridge-facts* kept)))
+    (cdr kept)))
 
 (defun bridge-address ()
   "The https address this bridge answers at, or NIL when this machine is not
 on a tailnet that has HTTPS. A running bridge answers at the port it took,
 which is the one asked for unless that was someone else's."
-  (let ((name (tailnet-name)))
+  (let ((name (or (getf *bridge* :name) (second (tailscale-facts)))))
     (and name (format nil "https://~a:~d/web/" name
                       (or (getf *bridge* :https-port) (bridge-https-port))))))
 
@@ -1087,29 +1165,30 @@ the question is answered without asking for a certificate."
 (defun tailnet-advice ()
   "What stands in the way of serving this page, and where to take that step,
 in the order the steps have to be taken. NIL when nothing does."
-  (cond
-    ((null (tailscale-binary))
+  (destructuring-bind (binary name https) (tailscale-facts)
+    (cond
+     ((null binary)
      (nlk:json-object
       "reason" "not_installed"
       "text" "Tailscale is not installed on this machine, so there is no tailnet address to serve this page at."
       "step" "Install it from tailscale.com/download, run `tailscale up' and sign in. Nothing else is needed: the tailnet's own https address is what this page is served at, and it is the only address it is served at."
       "label" "Get Tailscale"
       "url" "https://tailscale.com/download"))
-    ((null (tailnet-name))
+     ((null name)
      (nlk:json-object
       "reason" "not_connected"
       "text" "Tailscale is here, but this machine is not on a tailnet yet."
       "step" "Run `tailscale up' and sign in for the account that owns this machine. Its address appears here once it is connected."
       "label" "Tailscale"
       "url" "https://login.tailscale.com/admin/machines"))
-    ((not (tailnet-https-p))
+     ((not https)
      (nlk:json-object
       "reason" "no_https"
       "text" "This tailnet may not issue an https certificate for this machine, so there is no secure address to serve the page at."
       "step" "Switch on HTTPS certificates for the tailnet, once, in the admin console: DNS, then HTTPS Certificates. It takes effect in about a minute and needs no restart."
       "label" "Open the DNS settings"
       "url" "https://login.tailscale.com/admin/dns"))
-    (t :null)))
+     (t :null))))
 
 (defun bridge-json ()
   "Remote access as the panel reads it. A refusal is read once: the panel is
@@ -1118,7 +1197,8 @@ not a log, and a line about a request that failed an hour ago reads as a fault."
         (refusal *bridge-refusal*))
     (setf *bridge-refusal* nil)
     (nlk:json-object
-     "available" (and (tailscale-binary) (tailnet-name) (tailnet-https-p) t)
+     "available" (destructuring-bind (binary name https) (tailscale-facts)
+                   (and binary name https t))
      "https_port" (bridge-https-port)
      "address" (or (bridge-address) :null)
      "running" (and running t)
@@ -1157,17 +1237,29 @@ not a log, and a line about a request that failed an hour ago reads as a fault."
          (json-answer 200 (bridge-json)))
         (t (tasks-refused 400 "no_action" "action: start, stop, code or forget"))))))
 
+(defun this-machine ()
+  "This machine's own entry, while it is serving: it is a machine with access
+on, and the one the panel is being read from."
+  (when (bridge-running-p)
+    (let ((here (ignore-errors (or (getf *bridge* :name) (second (tailscale-facts))))))
+      (when here
+        (nlk:json-object
+         "name" (host-of here) "host" (string-right-trim "." here)
+         "address" (or (bridge-address) :null)
+         "port" (getf *bridge* :https-port) "version" "0.1.0")))))
+
 (defun peers-route (env)
   "/api/remote/peers: the tailnet's machines that answer as a tailnet bridge,
 this one among them, each with the address another machine would open."
   (if (member (getf env :request-method) '(:get :head))
-      (let ((here (ignore-errors (string-right-trim "." (tailnet-name)))))
+      (let ((here (ignore-errors (string-right-trim "." (second (tailscale-facts))))))
         (json-answer
          200
          (nlk:json-object
           "self" (or here :null)
           "machines"
-          (coerce (loop for machine in (tailnet-machines)
+          (coerce (loop for machine in (let ((mine (this-machine)))
+                                       (if mine (cons mine (tailnet-machines)) (tailnet-machines)))
                         collect (nlk:json-object
                                  "name" (or (nlk:json-value machine :text "name") "a machine")
                                  "host" (or (nlk:json-value machine :text "host") :null)

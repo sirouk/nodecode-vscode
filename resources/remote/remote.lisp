@@ -135,7 +135,7 @@ Never 443, which is not this cell's to take."
         *bridge-https-port*)))
 
 (defun host-of (dns-name)
-  "The machine part of a MagicDNS name: rt50.tail77f45e.ts.net. => rt50"
+  "The machine part of a MagicDNS name: host.example-tailnet.ts.net. => host"
   (let ((dot (position #\. dns-name)))
     (if dot (subseq dns-name 0 dot) dns-name)))
 

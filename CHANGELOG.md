@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.21]
+
+### Added
+
+- **A paired machine reads as paired.** The list now marks a machine this window has taken a code for with a solid mark, so the three states are distinct at a glance: where you are (green, or blue for another machine), paired but not where you are (solid, plain), and never paired (hollow).
+- **The panel closes when you click away from it** — anywhere in the view, the Escape key, or a click that lands in the framed page.
+
 ## [0.2.20]
 
 ### Added

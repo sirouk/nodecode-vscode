@@ -26,7 +26,11 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!endpoint) return { problem: "This home's gateway is not answering. Start it, then look again." };
       const read: RemoteRead = await readRemote(endpoint);
       if (read.kind === "ok") {
-        const machines = await readMachines(endpoint);
+        const machines = (await readMachines(endpoint)).map((machine) => ({
+          ...machine,
+          // This machine is not paired with itself: it is where we are.
+          paired: !machine.current && machine.address ? gateway.isPaired(machine.address) : false,
+        }));
         const host = machines.find((machine) => machine.host)?.host;
         if (host) gateway.tailnetSuffix = host.split(".").slice(1).join(".");
         return { state: { ...read.state, machines } };

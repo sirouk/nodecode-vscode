@@ -160,6 +160,17 @@ export class Gateway {
   /** The pairing cookie this window holds for a peer, by "host:port". */
   private readonly pairings = new Map<string, string>();
 
+  /** Has this window paired with the machine at URL? A code was taken for it. */
+  isPaired(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+      return this.pairings.has(`${parsed.hostname}:${port}`);
+    } catch {
+      return false;
+    }
+  }
+
   private async ensurePeerProxy(host: string, port: number): Promise<GatewayProxy> {
     const key = `https://${host}:${port}`;
     const cookie = this.pairings.get(`${host}:${port}`);

@@ -80,6 +80,7 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       #tailnet-mark .dot.remote { background: var(--vscode-charts-blue, #3794ff); }
       #tailnet-panel .mdot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--vscode-descriptionForeground); opacity: .5; }
       #tailnet-panel .mdot.here { border: 0; opacity: 1; }
+      #tailnet-panel .mdot.paired { border: 0; opacity: 1; background: var(--vscode-foreground, #fff); }
       #tailnet-panel .mdot.here.local { background: var(--vscode-testing-iconPassed, #3fb950); }
       #tailnet-panel .mdot.here.remote { background: var(--vscode-charts-blue, #3794ff); }
       #tailnet-panel { position: absolute; right: 10px; top: 32px; box-sizing: border-box; width: min(326px, calc(100vw - 20px)); max-height: calc(100vh - 56px); overflow: auto;
@@ -503,7 +504,10 @@ export function tailnetScript(): string {
       for (const machine of machines) {
         const line = el('div', 'row');
         const shown = machine.current ? !view.showing : Boolean(machine.address) && view.showing === machine.address;
-        const where = el('span', 'mdot' + (shown ? ' here' : '') + (shown ? (machine.current ? ' local' : ' remote') : ''));
+        // Filled and coloured where we are; filled and plain where a code was
+        // taken and it is not where we are; hollow where we have never paired.
+        const state = shown ? ' here ' + (machine.current ? 'local' : 'remote') : machine.paired ? ' paired' : '';
+        const where = el('span', 'mdot' + state);
         line.append(where);
         line.append(el('span', 'grow', machine.name + (machine.current ? ' (this one)' : '') + (shown ? ' · showing' : '')));
         if (!shown && (machine.current || machine.address)) {
@@ -545,6 +549,25 @@ export function tailnetScript(): string {
     panel.hidden = !panel.hidden;
     mark.classList.toggle('on', !panel.hidden);
     if (!panel.hidden) api.postMessage({ type: 'tailnet' });
+  });
+
+  function closePanel() {
+    panel.hidden = true;
+    mark.classList.remove('on');
+  }
+
+  // A click anywhere in this document that is not the panel, Escape, or a click
+  // that lands in the framed page (which takes focus away) puts the panel away.
+  document.addEventListener('click', (event) => {
+    if (panel.hidden) return;
+    if (event.target.closest && event.target.closest('#tailnet')) return;
+    closePanel();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !panel.hidden) closePanel();
+  });
+  window.addEventListener('blur', () => {
+    if (!panel.hidden) closePanel();
   });
 
   panel.addEventListener('click', (event) => {

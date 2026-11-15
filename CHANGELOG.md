@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.20]
+
+### Added
+
+- **The pill says which nodecode you are on.** Its dot is green when the page in front of you is this machine's own gateway, and blue when it is another machine's, so the question "whose sessions am I looking at" is answered without opening anything.
+- **The machine list marks the one you are connected to**, green for this machine and blue for another; every other row keeps a hollow mark.
+
 ## [0.2.19]
 
 ### Fixed

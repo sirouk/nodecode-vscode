@@ -76,7 +76,12 @@ export function renderHtml(options: { status: GatewayStatus; frame?: Frame; nonc
       #tailnet-mark:hover, #tailnet-mark.on { opacity: 1; }
       #tailnet-mark .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px;
         background: var(--vscode-disabledForeground); vertical-align: middle; }
-      #tailnet-mark .dot.live { background: var(--vscode-testing-iconPassed, #3fb950); }
+      #tailnet-mark .dot.local { background: var(--vscode-testing-iconPassed, #3fb950); }
+      #tailnet-mark .dot.remote { background: var(--vscode-charts-blue, #3794ff); }
+      #tailnet-panel .mdot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--vscode-descriptionForeground); opacity: .5; }
+      #tailnet-panel .mdot.here { border: 0; opacity: 1; }
+      #tailnet-panel .mdot.here.local { background: var(--vscode-testing-iconPassed, #3fb950); }
+      #tailnet-panel .mdot.here.remote { background: var(--vscode-charts-blue, #3794ff); }
       #tailnet-panel { position: absolute; right: 10px; top: 32px; box-sizing: border-box; width: min(326px, calc(100vw - 20px)); max-height: calc(100vh - 56px); overflow: auto;
         padding: 10px 12px; border-radius: 6px; z-index: 11; font-size: 11px; line-height: 1.5;
         background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
@@ -340,6 +345,9 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
             surface.target = url;
             surface.shown = undefined;
             await this.render(surface);
+            // The panel and the pill are rebuilt with the frame, so the mark of
+            // where this window now is has to be sent again.
+            await this.tailnetPanel(surface, await this.tailnet.state());
             return;
           }
           return this.tailnetPanel(surface, { ...(await this.tailnet.state()), switchRefused: framed.refused ?? framed.status.message });
@@ -366,6 +374,7 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           surface.target = target;
           surface.shown = undefined;
           await this.render(surface);
+          await this.tailnetPanel(surface, await this.tailnet.state());
           return;
         }
         case "switch": {
@@ -375,6 +384,7 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           surface.target = url;
           surface.shown = undefined;
           await this.render(surface);
+          await this.tailnetPanel(surface, await this.tailnet.state());
           return;
         }
         case "recheck":
@@ -493,6 +503,8 @@ export function tailnetScript(): string {
       for (const machine of machines) {
         const line = el('div', 'row');
         const shown = machine.current ? !view.showing : Boolean(machine.address) && view.showing === machine.address;
+        const where = el('span', 'mdot' + (shown ? ' here' : '') + (shown ? (machine.current ? ' local' : ' remote') : ''));
+        line.append(where);
         line.append(el('span', 'grow', machine.name + (machine.current ? ' (this one)' : '') + (shown ? ' · showing' : '')));
         if (!shown && (machine.current || machine.address)) {
           const go = button('Switch', 'switch');
@@ -565,7 +577,12 @@ export function tailnetScript(): string {
     view = message.view;
     const live = !!(view && view.state && view.state.running);
     const dot = mark.querySelector('.dot');
-    if (dot) dot.classList.toggle('live', live);
+    if (dot) {
+      // Green for the cell on this machine, blue for another machine's: the
+      // pill says which nodecode the page in front of you is.
+      const here = !view || !view.showing;
+      dot.className = 'dot' + (live ? (here ? ' local' : ' remote') : '');
+    }
     draw();
   });
 })();`;

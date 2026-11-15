@@ -157,3 +157,41 @@ test('reload writes the page again even when nothing changed, and a plain poll d
     assert.equal(writes,3,'a gateway that restarted is framed afresh, even at the same address');
   }finally{view.dispose();}
 });
+
+test('a machine that cannot be framed keeps the page and says why; one that can is shown, and this one is the way back',async()=>{
+  const {NodecodeView}=require('../out/view.js');
+  let html='',writes=0;const posted=[];let handler;
+  const webview={options:{},set html(value){writes+=1;html=value;},get html(){return html;},onDidReceiveMessage:(fn)=>{handler=fn;return {dispose(){}};},postMessage:async(message)=>{posted.push(message);return true;}};
+  const state={state:'ready',message:'Nodecode is ready.',version:'0.1.14',docsUrl:'z'};
+  const peer='https://peer.tail.ts.net:8434';
+  const asked=[];
+  const gateway={
+    frame:async()=>({status:state,pageUrl:'http://127.0.0.1:53117/web/#t=home',pageOrigin:'http://127.0.0.1:53117'}),
+    frameFor:async(target)=>{asked.push(target);return target===peer?{status:state,pageUrl:'http://127.0.0.1:53999/web/',pageOrigin:'http://127.0.0.1:53999'}:{status:state,refused:'gone.tail.ts.net did not answer as Nodecode.'};},
+    status:async()=>state,startGateway:async()=>state,reloadWebCell:async()=>state,
+  };
+  const tailnet={state:async()=>({state:{available:true}}),act:async()=>({}),install:async()=>({})};
+  const view=new NodecodeView(gateway,{log(){}},tailnet);
+  const settle=()=>new Promise((resolve)=>setTimeout(resolve,20));
+  try{
+    view.resolveWebviewView({webview,onDidDispose:()=>undefined});
+    await settle();
+    assert.match(html,/53117\/web\/#t=home/);
+    const before=writes;
+    handler({type:'tailnet-switch',url:'https://gone.tail.ts.net:8434'});
+    await settle();
+    assert.equal(writes,before,'a refused switch leaves the page as it was');
+    assert.match(posted.at(-1).view.switchRefused,/did not answer as Nodecode/,'and the panel says why');
+    handler({type:'tailnet-switch',url:peer});
+    await settle();
+    assert.match(html,/53999\/web\//,'a peer that answers is the page from now on');
+    await view.refresh();
+    assert.equal(asked.at(-1),peer,'and a poll keeps it there');
+    handler({type:'tailnet'});
+    await settle();
+    assert.equal(posted.at(-1).view.showing,peer,'the panel knows which machine it shows');
+    handler({type:'tailnet-switch',url:''});
+    await settle();
+    assert.match(html,/53117\/web\/#t=home/,'switching to this machine comes home');
+  }finally{view.dispose();}
+});

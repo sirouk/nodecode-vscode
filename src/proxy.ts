@@ -9,6 +9,7 @@
 import * as http from "http";
 import * as https from "https";
 import * as net from "net";
+import * as tls from "tls";
 
 import { BRIDGE_PATH, FRAME_SCRIPT, bridgeTag } from "./bridge";
 
@@ -29,22 +30,35 @@ export function cookieTag(target: ProxyTarget): string {
   return `${PAIR_COOKIE}-${hash.toString(36)}`;
 }
 
-/** The browser's cookie for this upstream, named so two peers never collide. */
-export function nameCookie(header: string | undefined, tag: string): string | undefined {
-  if (!header) return undefined;
-  return header
-    .split(/;\s*/)
-    .map((part) => (part.startsWith(`${PAIR_COOKIE}=`) ? tag + part.slice(PAIR_COOKIE.length) : part))
-    .join("; ");
+/**
+ * What a peer is sent of the browser's cookies: its own pairing, under the name
+ * its bridge knows, and nothing else. Cookies on loopback are shared by every
+ * port, so anything else in the header belongs to some other listener.
+ */
+export function peerCookie(header: string | undefined, tag: string): string | undefined {
+  const mine = header?.split(/;\s*/).find((part) => part.startsWith(`${tag}=`));
+  return mine ? PAIR_COOKIE + mine.slice(tag.length) : undefined;
 }
 
-/** The upstream's cookie, named back to what the bridge knows. */
-export function unnamedCookie(header: string | undefined, tag: string): string | undefined {
-  if (!header) return undefined;
-  return header
-    .split(/;\s*/)
-    .map((part) => (part.startsWith(`${tag}=`) ? PAIR_COOKIE + part.slice(tag.length) : part))
-    .join("; ");
+/**
+ * The bridge's pairing cookie, as this listener hands it to the browser: under
+ * this upstream's own name, and SameSite=None, because the page lives in a
+ * frame whose parent is the editor, and a browser drops a Lax cookie set there.
+ */
+export function framedPairCookie(line: string, tag: string): string {
+  if (!line.startsWith(`${PAIR_COOKIE}=`)) return line;
+  return `${tag}=${line.slice(PAIR_COOKIE.length + 1)}`.replace(/;\s*SameSite=(Lax|Strict)\b/i, "; SameSite=None");
+}
+
+/**
+ * With the pairing cookie SameSite=None, another site could ask this listener
+ * for a peer's page and be answered as the paired device. Only the frame's own
+ * navigation may come from another site; everything after it is this origin's.
+ */
+export function crossSiteRefused(headers: http.IncomingHttpHeaders): boolean {
+  const site = headers["sec-fetch-site"];
+  if (!site || site === "same-origin" || site === "none") return false;
+  return !(headers["sec-fetch-mode"] === "navigate" && headers["sec-fetch-dest"] === "iframe");
 }
 
 export interface GatewayProxy {
@@ -107,11 +121,14 @@ export function withBridge(html: string): string {
   return at === -1 ? html + bridgeTag() : html.slice(0, at) + bridgeTag() + html.slice(at);
 }
 
-/** The raw request line and headers to send upstream, verbatim. */
-export function upgradeHead(request: http.IncomingMessage): string {
+/** The raw request line and headers to send upstream, verbatim but for the cookie, which is COOKIE. */
+export function upgradeHead(request: http.IncomingMessage, cookie?: string): string {
   const lines = [`${request.method ?? "GET"} ${request.url ?? "/"} HTTP/1.1`];
   const raw = request.rawHeaders;
-  for (let index = 0; index + 1 < raw.length; index += 2) lines.push(`${raw[index]}: ${raw[index + 1]}`);
+  for (let index = 0; index + 1 < raw.length; index += 2) {
+    if (raw[index].toLowerCase() !== "cookie") lines.push(`${raw[index]}: ${raw[index + 1]}`);
+  }
+  if (cookie) lines.push(`Cookie: ${cookie}`);
   return `${lines.join("\r\n")}\r\n\r\n`;
 }
 
@@ -119,7 +136,14 @@ export async function startGatewayProxy(
   target: ProxyTarget,
   log: (message: string) => void = () => {},
 ): Promise<GatewayProxy> {
+  const tag = cookieTag(target);
   const server = http.createServer((request, response) => {
+    if (target.tls && crossSiteRefused(request.headers)) {
+      log(`proxy: refused a cross-site ${request.method} ${request.url}`);
+      response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+      response.end("the page only answers itself");
+      return;
+    }
     if (!originAllowed(request.headers.origin, request.headers.host)) {
       log(`proxy: refused ${request.method} ${request.url} for origin ${String(request.headers.origin)}`);
       response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
@@ -139,11 +163,12 @@ export async function startGatewayProxy(
       response.end(request.method === "HEAD" ? undefined : script);
       return;
     }
-    const tag = cookieTag(target);
     const headers = { ...request.headers };
-    const named = nameCookie(headers.cookie as string | undefined, tag);
-    if (named) headers.cookie = named;
-    else delete headers.cookie;
+    if (target.tls) {
+      const cookie = peerCookie(headers.cookie, tag);
+      if (cookie) headers.cookie = cookie;
+      else delete headers.cookie;
+    }
     const upstream = (target.tls ? https : http).request(
       {
         host: target.host,
@@ -157,9 +182,7 @@ export async function startGatewayProxy(
         const headers = frameableHeaders(answer.headers);
         const cookies = headers["set-cookie"];
         if (cookies) {
-          headers["set-cookie"] = (Array.isArray(cookies) ? cookies : [cookies]).map((line) =>
-            line.replace(new RegExp(`^${PAIR_COOKIE}=`), `${tag}=`),
-          );
+          headers["set-cookie"] = (Array.isArray(cookies) ? cookies : [cookies]).map((line) => framedPairCookie(line, tag));
         }
         // Everything but the page itself streams through untouched; the page is
         // held only long enough to add the one tag, and its length with it.
@@ -202,12 +225,16 @@ export async function startGatewayProxy(
       socket.destroy();
       return;
     }
-    const upstream = net.connect(target.port, target.host, () => {
-      upstream.write(upgradeHead(request));
+    const handshake = upgradeHead(request, target.tls ? peerCookie(request.headers.cookie, tag) : request.headers.cookie);
+    const opened = (): void => {
+      upstream.write(handshake);
       if (head.length > 0) upstream.write(head);
       upstream.pipe(socket);
       socket.pipe(upstream);
-    });
+    };
+    const upstream = target.tls
+      ? tls.connect({ host: target.host, port: target.port, servername: target.host }, opened)
+      : net.connect(target.port, target.host, opened);
     const close = (why: string): void => {
       log(`proxy: socket closed (${why})`);
       socket.destroy();

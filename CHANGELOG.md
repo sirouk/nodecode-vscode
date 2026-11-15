@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Switch did nothing.** Choosing another machine on the tailnet panel checked the peer with a plain-http request against its https address, which throws, so the switch failed silently and the page stayed put. A peer is now checked by its handshake, `/__tailnet/hello`, which answers before any pairing; a device that has not paired yet is then shown the peer's own pairing page in the frame.
+- **Pairing with a peer could never take.** The proxy renamed the pairing cookie the wrong way on the way out, so the peer never saw it and sent the frame back to its pairing page forever; and the cookie was `SameSite=Lax`, which a browser drops when it is set inside a frame. The peer now receives its own pairing under the name it knows and nothing else of the browser's cookies, and the browser keeps it as `SameSite=None`.
+- **The peer's socket could not open.** The page's live connection to a peer was dialled as plain TCP against an https port; it now goes over TLS, carrying the pairing.
+- **A switch that cannot happen says why**, under the machine list, and leaves the page you were on. The panel marks the machine it is showing, and this machine has a Switch of its own, which is the way back.
+
+### Security
+
+- **Only the frame itself may reach a peer from another site.** With the pairing cookie `SameSite=None`, another page could otherwise include the peer's page as a script and read the operator token from it; a cross-site request to a peer's proxy is refused unless it is the frame's own navigation.
+
 ## [0.2.15]
 
 ### Fixed

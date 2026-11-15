@@ -4,7 +4,7 @@ import http from 'node:http';
 import net from 'node:net';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
-const {startGatewayProxy,stripFrameAncestors,frameableHeaders,upgradeHead,withBridge,pageRewritable}=require('../out/proxy.js');
+const {startGatewayProxy,stripFrameAncestors,frameableHeaders,upgradeHead,withBridge,pageRewritable,peerCookie,framedPairCookie,crossSiteRefused}=require('../out/proxy.js');
 
 const PAGE='<!doctype html><html><body>the gateway page</body></html>';
 const CSP="default-src 'self'; connect-src 'self'; frame-ancestors 'none'";
@@ -149,4 +149,29 @@ test('a gateway that is gone answers as gone, and the proxy closes cleanly',asyn
   }finally{proxy.dispose();}
   await new Promise((resolve)=>setTimeout(resolve,50));
   assert.ok(proxy.port>0);
+});
+
+test('a peer is sent its own pairing, under the name its bridge knows, and nothing else',()=>{
+  assert.equal(peerCookie('other=1; nodecode-bridge-abc=T; nodecode-bridge-xyz=U','nodecode-bridge-abc'),'nodecode-bridge=T');
+  assert.equal(peerCookie('other=1; nodecode-bridge=raw','nodecode-bridge-abc'),undefined,'a cookie for another listener on loopback stays here');
+  assert.equal(peerCookie(undefined,'nodecode-bridge-abc'),undefined);
+});
+
+test('the pairing a peer sets is stored under its own name, and survives the frame',()=>{
+  assert.equal(framedPairCookie('nodecode-bridge=T; Path=/; HttpOnly; Secure; SameSite=Lax','nodecode-bridge-abc'),'nodecode-bridge-abc=T; Path=/; HttpOnly; Secure; SameSite=None','a Lax cookie set in a frame is dropped by the browser');
+  assert.equal(framedPairCookie('session=1; SameSite=Lax','nodecode-bridge-abc'),'session=1; SameSite=Lax','any other cookie passes as sent');
+});
+
+test('only the frame itself may arrive from another site',()=>{
+  assert.equal(crossSiteRefused({}),false,'no fetch metadata: not a browser request');
+  assert.equal(crossSiteRefused({'sec-fetch-site':'same-origin','sec-fetch-mode':'cors','sec-fetch-dest':'empty'}),false);
+  assert.equal(crossSiteRefused({'sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','sec-fetch-dest':'iframe'}),false,'the editor framing the page');
+  assert.equal(crossSiteRefused({'sec-fetch-site':'cross-site','sec-fetch-mode':'no-cors','sec-fetch-dest':'script'}),true,'another site including the token script');
+  assert.equal(crossSiteRefused({'sec-fetch-site':'same-site','sec-fetch-mode':'cors','sec-fetch-dest':'empty'}),true,'another loopback port reading the page');
+});
+
+test('a socket to a peer carries its pairing, renamed, in place of the browser cookie',()=>{
+  const request={method:'GET',url:'/gateway',headers:{},rawHeaders:['Host','127.0.0.1:1','Cookie','a=1; nodecode-bridge-abc=T','Origin','http://127.0.0.1:1']};
+  assert.equal(upgradeHead(request,'nodecode-bridge=T'),'GET /gateway HTTP/1.1\r\nHost: 127.0.0.1:1\r\nOrigin: http://127.0.0.1:1\r\nCookie: nodecode-bridge=T\r\n\r\n');
+  assert.equal(upgradeHead(request,undefined),'GET /gateway HTTP/1.1\r\nHost: 127.0.0.1:1\r\nOrigin: http://127.0.0.1:1\r\n\r\n','an unpaired socket goes without');
 });

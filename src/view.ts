@@ -272,8 +272,8 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
   }
 
   /** Hand the panel what it asked for: only the surface that asked hears it. */
-  private tailnetPanel(surface: Surface, view: Record<string, unknown>): void {
-    void surface.webview.postMessage({ type: "tailnet-state", view });
+  private tailnetPanel(surface: Surface, view: object): void {
+    void surface.webview.postMessage({ type: "tailnet-state", view: { ...view, showing: surface.target ?? "" } });
   }
 
   private async act(
@@ -313,8 +313,19 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
           if (message?.url) await vscode.env.openExternal(vscode.Uri.parse(String(message.url)));
           return;
         case "tailnet-switch": {
-          if (!message?.url) return;
-          surface.target = String(message.url);
+          // An empty address is this machine; anything else must answer before
+          // the surface leaves the page it shows, or the switch says why not.
+          const target = String(message?.url ?? "") || undefined;
+          if (target) {
+            const framed = await this.gateway.frameFor(target);
+            if (!framed.pageUrl) {
+              return this.tailnetPanel(surface, {
+                ...(await this.tailnet.state()),
+                switchRefused: framed.refused ?? framed.status.message,
+              });
+            }
+          }
+          surface.target = target;
           surface.shown = undefined;
           await this.render(surface);
           return;
@@ -434,14 +445,16 @@ export function tailnetScript(): string {
       body.append(el('h2', '', 'Machines on your tailnet'));
       for (const machine of machines) {
         const line = el('div', 'row');
-        line.append(el('span', 'grow', machine.name + (machine.current ? ' (this one)' : '')));
-        if (!machine.current && machine.address) {
+        const shown = machine.current ? !view.showing : Boolean(machine.address) && view.showing === machine.address;
+        line.append(el('span', 'grow', machine.name + (machine.current ? ' (this one)' : '') + (shown ? ' · showing' : '')));
+        if (!shown && (machine.current || machine.address)) {
           const go = button('Switch', 'switch');
-          go.dataset.url = machine.address;
+          go.dataset.url = machine.current ? '' : machine.address;
           line.append(go);
         }
         body.append(line);
       }
+      if (view.switchRefused) body.append(el('p', 'why', 'Could not switch: ' + view.switchRefused));
     }
 
     for (const device of state.devices || []) {

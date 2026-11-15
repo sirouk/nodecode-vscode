@@ -101,6 +101,11 @@ test('another machine\'s page is framed only when it is loopback and answers the
     assert.equal((await gateway.frameFor('http://example.com/web/#t=x')).pageUrl,undefined,'nor is a name that is not this machine');
     assert.equal((await gateway.frameFor('https://127.0.0.1:1234/web/#t=x')).pageUrl,undefined,'nor anything but plain http on loopback');
     assert.equal((await gateway.frameFor('not a url')).pageUrl,undefined,'nor a string that is not one');
+    gateway.tailnetSuffix='tail0.ts.net';
+    const quiet=await gateway.frameFor('https://nobody.tail0.ts.net:1/web/');
+    assert.equal(quiet.pageUrl,undefined,'a tailnet peer is framed only when it answers the handshake');
+    assert.match(quiet.refused,/did not answer as Nodecode/,'and the refusal says so, rather than throwing');
+    assert.match((await gateway.frameFor('https://evil.example:8434/web/')).refused,/not a name on this tailnet/);
     const framed=await gateway.frameFor(`http://127.0.0.1:${here}/web/#t=peer-token`);
     assert.match(framed.pageUrl,/^http:\/\/127\.0\.0\.1:\d+\/web\/#t=peer-token$/,'the peer is framed through this view\'s own proxy');
     assert.notEqual(framed.pageOrigin,`http://127.0.0.1:${here}`,'never the peer\'s own port, which refuses to be framed');

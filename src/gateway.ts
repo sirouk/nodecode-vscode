@@ -3,6 +3,7 @@
 // hold, which page to frame.
 
 import * as http from "http";
+import * as https from "https";
 import * as vscode from "vscode";
 
 import { webCellInstalled } from "./cells";
@@ -32,6 +33,34 @@ export function servesWebPage(baseUrl: string, timeoutMs = 4000): Promise<boolea
       const type = String(response.headers["content-type"] ?? "");
       response.resume();
       resolve(response.statusCode === 200 && type.includes("text/html"));
+    });
+    request.on("timeout", () => {
+      request.destroy();
+      resolve(false);
+    });
+    request.on("error", () => resolve(false));
+    request.end();
+  });
+}
+
+/**
+ * True when a tailnet peer answers the bridge's handshake. A peer's page sends
+ * a device that has not paired yet to /pair, so the page itself is no test of
+ * a peer: the handshake is, and it answers before any pairing.
+ */
+export function answersAsPeer(baseUrl: string, timeoutMs = 4000): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const request = https.request(`${baseUrl}/__tailnet/hello`, { method: "GET", timeout: timeoutMs }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("error", () => resolve(false));
+      response.on("end", () => {
+        try {
+          resolve(response.statusCode === 200 && JSON.parse(Buffer.concat(chunks).toString("utf8")).protocol === "nodecode-tailnet/1");
+        } catch {
+          resolve(false);
+        }
+      });
     });
     request.on("timeout", () => {
       request.destroy();
@@ -196,7 +225,7 @@ export class Gateway {
    * Only loopback is proxied, and only a port that answers the page's own path,
    * so this view stays a view of Nodecode and never a proxy to this machine.
    */
-  async frameFor(target: string): Promise<{ status: GatewayStatus; pageUrl?: string; pageOrigin?: string; revision?: number }> {
+  async frameFor(target: string): Promise<{ status: GatewayStatus; pageUrl?: string; pageOrigin?: string; revision?: number; refused?: string }> {
     const status = await this.status();
     let parsed: URL;
     try {
@@ -213,15 +242,15 @@ export class Gateway {
     if (tls) {
       if (!suffix || !parsed.hostname.endsWith(`.${suffix}`)) {
         this.notes.log(`refused to frame ${parsed.hostname}: not a name on this tailnet`);
-        return { status };
+        return { status, refused: `${parsed.hostname} is not a name on this tailnet.` };
       }
     } else if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(parsed.hostname)) return { status };
     const port = Number(parsed.port || (tls ? 443 : 80));
     if (!Number.isInteger(port) || port < 1 || port > 65535) return { status };
     const base = `${tls ? "https" : "http"}://${parsed.hostname}:${port}`;
-    if (!(await servesWebPage(base))) {
-      this.notes.log(`refused to frame ${base}: it does not answer the page`);
-      return { status };
+    if (!(await (tls ? answersAsPeer(base) : servesWebPage(base)))) {
+      this.notes.log(`refused to frame ${base}: it does not answer as nodecode`);
+      return { status, refused: `${parsed.hostname} did not answer as Nodecode.` };
     }
     try {
       const proxy = tls

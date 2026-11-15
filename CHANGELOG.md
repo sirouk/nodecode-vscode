@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16]
+
 ### Fixed
 
 - **Switch did nothing.** Choosing another machine on the tailnet panel checked the peer with a plain-http request against its https address, which throws, so the switch failed silently and the page stayed put. A peer is now checked by its handshake, `/__tailnet/hello`, which answers before any pairing; a device that has not paired yet is then shown the peer's own pairing page in the frame.
@@ -362,7 +364,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Session lifecycle from the tree: open panel, fork, rename, reveal terminal, export history, delete.
   - Model and effort pickers, `nodecode.md` workspace-file writer, activation log and diagnostics output channel.
 
-[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.15...HEAD
+[Unreleased]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.16...HEAD
+[0.2.16]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.8...v0.2.15
 [0.2.8]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/sirouk/nodecode-vscode/compare/v0.2.6...v0.2.7

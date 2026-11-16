@@ -177,12 +177,6 @@ export function hostScript(origin: string): string {
     const data = event.data;
     if (!data || data.nodecode !== "frame") return;
     if (event.source !== page.contentWindow || event.origin !== origin) return;
-    // The page's machines panel chose another organism, whose page refuses to be
-    // framed as it stands: this view proxies it instead, and moves the frame.
-    if (data.kind === "switch") {
-      api.postMessage({ type: "switch", url: String((data.payload && data.payload.url) || "") });
-      return;
-    }
     const answer = { nodecode: "host", id: data.id };
     try {
       if (data.kind === "write") {

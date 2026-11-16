@@ -197,7 +197,7 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     const surface: Surface = { webview: view.webview };
     view.webview.onDidReceiveMessage(
       (message: { type?: string; url?: string; text?: string; index?: number; action?: string; code?: string }) =>
-        void this.act(message?.type ?? "", surface, message?.url, message),
+        void this.act(message?.type ?? "", surface, message),
     );
     view.onDidDispose(() => {
       this.surfaces.delete(surface);
@@ -222,7 +222,7 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
     const surface: Surface = { webview: panel.webview };
     panel.webview.onDidReceiveMessage(
       (message: { type?: string; url?: string; text?: string; index?: number; action?: string; code?: string }) =>
-        void this.act(message?.type ?? "", surface, message?.url, message),
+        void this.act(message?.type ?? "", surface, message),
     );
     panel.onDidDispose(() => {
       if (this.panel === panel) this.panel = undefined;
@@ -295,7 +295,6 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
   private async act(
     action: string,
     surface: Surface,
-    url?: string,
     message?: { type?: string; url?: string; text?: string; index?: number; action?: string; code?: string },
   ): Promise<void> {
     try {
@@ -373,15 +372,6 @@ export class NodecodeView implements vscode.WebviewViewProvider, vscode.Disposab
             }
           }
           surface.target = target;
-          surface.shown = undefined;
-          await this.render(surface);
-          return;
-        }
-        case "switch": {
-          // The page chose another organism: this surface shows that one from now
-          // on, through a proxy of its own, and a poll keeps it there.
-          if (!url) return;
-          surface.target = url;
           surface.shown = undefined;
           await this.render(surface);
           return;

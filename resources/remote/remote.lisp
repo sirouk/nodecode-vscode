@@ -594,7 +594,7 @@ one field it asks for."
                <style>~a</style></head><body><main><h1>Pair this device</h1>~
                <p>This machine answers the devices of its own tailnet, once each.~
                You are signed in as <b>~a</b>.</p>~
-               <p>Type the code it shows under Machines.</p>~
+               <p>Type the code it shows under its Tailnet pill.</p>~
                <form method=post action=/pair>~
                <input name=code autocomplete=one-time-code autofocus required placeholder=XXXX-XXXX>~
                <button type=submit>Pair</button></form>~
@@ -1214,9 +1214,21 @@ in the order the steps have to be taken. NIL when nothing does."
       "url" "https://login.tailscale.com/admin/dns"))
      (t :null))))
 
-(defun bridge-json ()
-  "Remote access as the panel reads it. A refusal is read once: the panel is
-not a log, and a line about a request that failed an hour ago reads as a fault."
+(defun asking-device (env)
+  "The index of the paired device whose browser asked ENV, or NIL: the bridge
+passes a paired browser's cookie through to the gateway, and a browser on
+loopback has none."
+  (let* ((cookie (gethash "cookie" (getf env :headers)))
+         (token (and cookie (cookie-value (list (cons "cookie" cookie)) *bridge-cookie*))))
+    (when (and token (plusp (length token)))
+      (position token (read-devices)
+                :test (lambda (token device)
+                        (string= token (or (nlk:json-value device :text "token") "")))))))
+
+(defun bridge-json (env)
+  "Remote access as the panel reads it, for the browser that asked ENV. A
+refusal is read once: the panel is not a log, and a line about a request that
+failed an hour ago reads as a fault."
   (let ((running (bridge-running-p))
         (refusal *bridge-refusal*))
     (setf *bridge-refusal* nil)
@@ -1231,7 +1243,8 @@ not a log, and a line about a request that failed an hour ago reads as a fault."
      "devices" (device-json)
      "refusal" (or refusal :null)
      "advice" (tailnet-advice)
-     "port" (if running (getf *bridge* :port) 0))))
+     "port" (if running (getf *bridge* :port) 0)
+     "this_device" (or (asking-device env) :null))))
 
 (defun bridge-act (env)
   "POST {action}: start and stop remote access, mint a code, forget a device."
@@ -1246,19 +1259,19 @@ not a log, and a line about a request that failed an hour ago reads as a fault."
         ((and action (string-equal action "start"))
          (multiple-value-bind (okp why) (bridge-start)
            (if okp
-               (json-answer 200 (bridge-json))
+               (json-answer 200 (bridge-json env))
                (tasks-refused 409 "would_not_start" (format nil "~a" why)))))
         ((and action (string-equal action "stop"))
          (bridge-stop)
-         (json-answer 200 (bridge-json)))
+         (json-answer 200 (bridge-json env)))
         ((and action (string-equal action "code"))
          (unless (bridge-running-p)
            (return-from bridge-act (tasks-refused 409 "not_running" "remote access is off")))
          (mint-code)
-         (json-answer 200 (bridge-json)))
+         (json-answer 200 (bridge-json env)))
         ((and action (string-equal action "forget"))
          (forget-device (nlk:json-value sent :integer "index"))
-         (json-answer 200 (bridge-json)))
+         (json-answer 200 (bridge-json env)))
         (t (tasks-refused 400 "no_action" "action: start, stop, code or forget"))))))
 
 (defun this-machine ()
@@ -1300,7 +1313,7 @@ this one among them, each with the address another machine would open."
   "/api/web/bridge: GET how remote access stands; POST {action} starts or
 stops it, mints a pairing code, or forgets a device."
   (case (getf env :request-method)
-    ((:get :head) (bridge-json))
+    ((:get :head) (bridge-json env))
     (:post (bridge-act env))
     (t (tasks-refused 405 "method" "GET reads remote access; POST acts on it"))))
 

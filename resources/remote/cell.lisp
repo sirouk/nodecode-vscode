@@ -128,7 +128,7 @@ machine has no tailscale, or it is not running."
 
 (nle:define-cell remote
   (:section ("tailnet access")
-    (:guide "the page under Machines, tailnet access: turn it on, then pair a device with the code it shows")
+    (:guide "the page's Tailnet pill, on this machine: turn it on, then pair a device with the code it shows")
     ("https_port" :integer :default 8434
      :doc "the first https port this cell serves the page on, beside whatever this node already serves on 443; the next four are taken when it is busy, and all five are what another machine knocks on"))
   (:command "remote" 'remote-command :description "remote access over your tailnet: status, on, off, code")

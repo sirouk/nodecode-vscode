@@ -3,9 +3,10 @@
 This organism on the tailnet's own https address, for a phone or a laptop that
 has no ssh and no loopback port.
 
-Turn it on with `/remote on` — or in the page's `Machines` → `Tailnet access`
-panel, when the web cell installed here carries one; a web page without the
-panel is served exactly the same, and the command is the whole of the control.
+Turn it on with `/remote on` — or with the `Tailnet` pill at the head of the
+page, when the web cell installed here carries one; a page without the pill is
+served exactly the same, and the command is the whole of the control. The pill
+also lists the other machines of the tailnet serving a page, to switch to.
 It serves the web cell's page at
 
     https://<this-machine>.<your-tailnet>.ts.net:8434/web/

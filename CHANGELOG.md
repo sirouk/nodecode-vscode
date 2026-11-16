@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.25]
+
+### Changed
+
+- **The bundled tailnet access cell tells a page which paired device is asking**, so the web page's new Tailnet pill can mark "this browser" among the paired devices. Its pairing page and guide now point to the Tailnet pill instead of the old Machines panel.
+
+### Removed
+
+- **The page's old machines-panel switch message.** The web page no longer sends it (its Tailnet pill stays hidden inside the editor, where the extension's own pill switches machines), so the frame no longer listens for it.
+
 ## [0.2.24]
 
 ### Fixed
